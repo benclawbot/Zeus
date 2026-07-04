@@ -40,7 +40,7 @@ Progress:
 
 ### Phase 2: Zeus Visual Shell
 
-Status: in progress
+Status: complete
 
 Acceptance:
 
@@ -62,7 +62,7 @@ Progress:
 
 ### Phase 3: MiniMax M3 Adapter
 
-Status: in progress
+Status: complete
 
 Acceptance:
 
@@ -162,3 +162,102 @@ Tauri packaging can only fully prove the current host OS locally. Cross-platform
 - Git publishing preparation: initialized a nested Git repository in `C:\Users\thoma\Zeus` on `main` because the parent `C:\Users\thoma` directory is also a Git repository. This prevents accidentally publishing the whole home directory.
 - Pre-commit hygiene: README asset references were checked and all files existed; `git diff --cached --check` passed after trimming extra blank EOF lines; a targeted staged-diff scan found no committed secret values. Temporary root screenshots, logs, build output, dependency folders, and the obsolete spec zip are ignored.
 - GitHub publication: committed initial build as `b220d17 feat: initial Zeus desktop app`, created public repository `https://github.com/benclawbot/Zeus`, pushed `main`, and verified the remote branch/README through `gh`.
+- Live provider troubleshooting: user reported "MiniMax request failed." on first launch. `MINIMAX_API_KEY` was missing from the spawned `zeus.exe` process env. Verified the endpoint with `curl` against `https://api.minimax.io/v1/chat/completions` using the user's API key (`http=200`, model `MiniMax-M3`, 1.8s). Diagnosed that Tauri's `tauri dev` does not auto-load `.env`, so the Rust command received `MissingApiKey` while the user perceived a network failure. Resolved with a wrapper script that sourced `.env` and prepended `~/.cargo/bin` to `PATH`, then `exec npm run tauri:dev`. Confirmed end-to-end round-trip by clicking through the Tauri UI with `cua-driver`: the agent returned a real reply and no longer errored.
+- Strip `` reasoning blocks from MiniMax-M3 responses. Rust side: added `strip_thinking(content: &str)` in `src-tauri/src/lib.rs` that walks the response char-by-char, discards every ``…`` block (and unterminated trailing reasoning), and trims the result. Wired into `call_minimax` via `.map(|raw| strip_thinking(&raw))` on the parsed content. Added four unit tests in `mod tests` covering single-block, multi-block, unterminated, and pass-through cases. Frontend side: added `stripThinkingTags` as defense-in-depth in `src/App.tsx`. CSS: a `.agent-body p.thinking` placeholder style with grey italic text and animated dots that shows while `runState === "running" && !assistantText`, then swaps to the real answer. New regression test in `src/App.test.tsx` asserts the `.thinking` class is defined and that the literal `` tag pair never appears in the bundled CSS source.
+- Move env-loading into `lib.rs` properly. Added `dotenvy = "0.15"` to `src-tauri/Cargo.toml` and called `let _ = dotenvy::dotenv();` at the top of `run()`. The early-return shape means bundled MSI/NSIS builds aren't affected (a missing `.env` is not an error); local dev gets the key from `C:\Users\thoma\Zeus\.env` automatically. Removed the temporary `scripts/tauri-dev-with-env.sh` wrapper. Re-launched with plain `npm run tauri:dev`, no wrapper, and confirmed the chat completes a fresh round-trip with key flowing from `.env` through Rust into the MiniMax API. Added unit test `missing_api_key_message_does_not_leak_key` asserting `MissingApiKey`'s public message contains only the literal `"MINIMAX_API_KEY"` string and never a value.
+- Final verification: `cargo test` passes 8/8 (was 3; 4 new `strip_thinking_*` cases, 1 new `missing_api_key_message_does_not_leak_key`). `npm run typecheck`, `npm run test` (7 passed), and `npm run build` (built `dist/` in ~1.5s) all green. Live UI smoke test: typed a prompt, observed the "Thinking" placeholder, then watched the response land clean (no `` markup in the rendered assistant text).
+- Current UI pass: inspected the latest MiniMax/user edits and found the center workspace still rendered a top task header plus an empty-state prompt. Changed the workspace so the center conversation is blank until the first user message, kept the bottom composer, and made chat auto-scroll to the latest message/reply update. Added regression coverage for the blank center and scroll contract.
+- Verification after current UI pass: `npm run typecheck` passed, `npm run test -- --run` passed with 11 tests, `npm run build` passed, and Rust tests passed with `C:\Users\thoma\.cargo\bin\cargo.exe test` (14 passed). Plain `cargo test` still fails in this PowerShell session because Cargo is not on PATH; the project itself is fine.
+- Skills inventory: found 41 local skill folders under `C:\Users\thoma\Zeus\skills`, all with `SKILL.md`. Main overlap candidates are frontend/mobile stacks (`frontend-dev`, `fullstack-dev`, `android-native-dev`, `react-native-dev`, `flutter-dev`), document generators (`minimax-docx`, `minimax-pdf`, `minimax-xlsx`, `pptx-generator`), planning/todo helpers (`planf3`, `planning-and-task-breakdown`, `write-todos`, `todo-update`), self-improvement loops (`self-improve`, `self-optimization-loop`, `skill-evolution`), and root-cause/debugging (`5-why`, `debugging-and-error-recovery`). No merge/delete was performed yet because several overlaps may be intentional trigger specialization.
+- Skills wiring: added read-only Tauri commands `list_skills` and `load_skill`. `list_skills` reads only skill folder metadata/frontmatter and resource flags; `load_skill` validates the selected id and reads only that one `SKILL.md` body. Added the `skills/` folder as a Tauri bundle resource so packaged apps can resolve it from `resource_dir()/skills`, with `ZEUS_SKILLS_DIR` retained as an override for local/custom skill directories.
+- Skills UI: wired the sidebar `Skills` nav item to a compact registry view. The view lazy-loads metadata on first entry, lazy-loads the selected skill body on click, and surfaces overlap groups without merging anything automatically.
+- Verification after skills wiring: `npm run typecheck` passed, `npm run test -- --run` passed with 11 tests, `npm run build` passed, `cargo fmt -- --check` passed through `C:\Users\thoma\.cargo\bin\cargo.exe`, Rust tests passed with 17 tests, and `npm run tauri:build` passed when Cargo was prepended to PATH. Built artifacts: `src-tauri\target\release\zeus.exe`, `src-tauri\target\release\bundle\msi\Zeus_0.1.0_x64_en-US.msi`, and `src-tauri\target\release\bundle\nsis\Zeus_0.1.0_x64-setup.exe`. Packaged release output includes `src-tauri\target\release\skills` with 41 folders and 363 files.
+- Visible control wiring: sidebar nav now switches to state-backed Home, Sessions, Skills, Memory, Harness Evolution, and Settings views. New Session clears chat/draft/attachments and returns Home. Recent session rows select the session and return Home. The composer attach control opens a real file input, file chips render only after selection, chip remove buttons update state, and the mention control inserts `@` into the composer. Inspector `View Memory` routes to the Memory view.
+- Verification after visible control wiring: `npm run typecheck` passed, `npm run test -- --run` passed with 14 tests, Rust tests passed with 17 tests, and a final `npm run tauri:build` with Cargo on PATH succeeded. Browser runtime check at 1440x900 confirmed blank initial center, no old prompt, no page vertical overflow, mention insertion, New Session draft clearing, Sessions/Memory/Skills view switching, and active Skills nav. Screenshot saved by Playwright as `zeus-skills-wiring-check.png`.
+
+### Phase 6: Live Chat Surface and Skills Wiring
+
+Status: in progress
+
+Acceptance:
+
+- Center workspace is empty until the user starts chatting.
+- Conversation auto-scrolls as model text appears.
+- Skills stored under `skills/` are discoverable without loading every skill body into the UI at startup.
+- The Skills screen shows the available skill registry and can lazy-load a selected skill body.
+- Redundant or overlapping skills are identified before any merge/delete action.
+- Plan document is updated as each slice completes.
+
+Progress:
+
+- [x] Remove center top/bottom stub content from the initial chat surface.
+- [x] Add regression tests for blank initial conversation and auto-scroll behavior.
+- [x] Verify frontend build/test/typecheck and Rust tests after the UI pass.
+- [x] Inventory local `skills/` metadata and identify overlaps.
+- [x] Add lazy skill registry/loading commands in Tauri.
+- [x] Wire the Skills screen to browse and load local skills.
+- [x] Add tests for skill discovery and loading.
+- [x] Run final runtime verification that all visible screen controls are wired.
+
+### Phase 7: Visible Control Wiring
+
+Status: in progress
+
+Acceptance:
+
+- Sidebar nav buttons switch to real views instead of inert highlights.
+- New Session clears the current chat draft/session state and returns to Home.
+- Recent session buttons select a session and return to the chat view.
+- Composer attachment controls are not fake: file chips appear only after selection and can be removed.
+- Memory, Harness Evolution, Settings, and Sessions screens render state-backed content.
+- Inspector action buttons route to the matching view.
+
+Progress:
+
+- [x] Wire sidebar nav and recent session actions.
+- [x] Replace the stub attachment chip with real selected-file state.
+- [x] Add state-backed Memory, Sessions, Harness, and Settings views.
+- [x] Wire inspector shortcuts.
+- [x] Add regression tests for the visible control wiring.
+- [x] Run full build/test/package verification.
+
+---
+
+## Phase 6: Pluggable Chat Providers + Slash-Command Composer
+
+Status: complete
+
+Acceptance:
+
+- Chat is dispatched through a provider abstraction so adding a new model is a single-file addition on both sides.
+- Skills are loaded server-side and injected as silent system-prompt context.
+- Slash commands (`/new`, `/compact`, `/stop`, plus every installed skill) are available inside the chat composer with keyboard navigation.
+- A visible current-session pill surfaces the active session name and the active skill.
+
+Changes:
+
+- `src-tauri/src/providers/mod.rs` — `ChatProvider` trait, generic `ChatRequest`/`ChatResponse`/`ProviderError`, built-in provider registry, `dispatch_chat`, `list_provider_info`. Skill-body loader (`build_skill_system_message`) lives here, provider-agnostic.
+- `src-tauri/src/providers/minimax.rs` — `MinimaxProvider`, OpenAI-compatible chat completions, `<think>...</think>` strip, `MINIMAX_API_KEY` env var.
+- `src-tauri/src/providers/openai.rs` — `OpenAiProvider`, OpenAI chat completions, `OPENAI_API_KEY` env var.
+- `src-tauri/src/providers/anthropic.rs` — `AnthropicProvider`, Anthropic Messages API with system-prompt-as-top-level-field translation, `ANTHROPIC_API_KEY` env var.
+- `src-tauri/src/lib.rs` — `send_chat` (replaces `send_minimax_chat`) takes a `provider` string and routes via `dispatch_chat`; new `list_providers` Tauri command; skill injection on the Rust side; legacy minimax-only code paths removed.
+- `src/providers/registry.ts` — frontend mirror of the registry; `dispatchChat`, `findProvider`, `listProviders`.
+- `src/providers/slash.ts` — `useSlashMenu(message, isTauri)` hook with lazy skill loading, filter, keyboard navigation glue; `detectSlash` parser.
+- `src/App.tsx` — slash picker UI above the composer (Up/Down/Enter/Tab/Esc); `/new`, `/compact`, `/stop` direct-run paths; AbortController-driven `/stop` with stop-button affordance while running; active-skill chip; visible session pill.
+- `src/styles.css` — `.slash-menu`, `.slash-row`, `.slash-empty`, `.slash-hint`, `.composer-skill-chip`, `.chat-skill-chip`, `.stop-button`, `.workspace-header`, `.session-pill`.
+- `src/App.test.tsx` — slash-picker open/close, keyboard nav, Escape, direct-run paths, provider-registry shape, session-pill visibility.
+- Removed: `src-tauri/src/_tag_debug.rs` (stale one-off debug helper).
+
+Tests:
+
+- 31 Rust tests pass.
+- 20 frontend tests pass.
+- TypeScript clean (`tsc --noEmit`).
+
+Adding a new provider (recipe):
+
+1. Add `src-tauri/src/providers/<name>.rs` with a struct implementing `ChatProvider`.
+2. Register it in `BUILTIN_PROVIDERS` in `providers/mod.rs`.
+3. Add the matching entry in `src/providers/registry.ts`.
+
+No other code needs to change — the composer, dispatch, persistence, and UI all use the generic types.

@@ -35,6 +35,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../skills/": "skills"
+    },
     "shortDescription": "Local-first coding agent",
     "longDescription": "Zeus is a local-first coding agent with visible harness evolution and MiniMax M3 provider support."
   }

@@ -9,21 +9,36 @@ import {
   MemoryStick,
   MessageSquare,
   Paperclip,
-  Play,
   Send,
   Settings,
   ShieldCheck,
   Sparkles,
-  TerminalSquare,
+  Square,
+  User,
   Wrench,
   X,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
-import { sendMinimaxChat } from "./providers/minimax";
+import type { LucideIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { dispatchChat } from "./providers/registry";
+import { isTauriRuntime } from "./providers/minimax";
+import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
+import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import "./styles.css";
 
 type AccessMode = "Full" | "Local" | "Review" | "Locked";
+type AppView = "Home" | "Sessions" | "Skills" | "Memory" | "Harness Evolution" | "Settings";
+
+type ChatRole = "user" | "zeus";
+
+interface ChatMessage {
+  id: number;
+  role: ChatRole;
+  text: string;
+  thinking?: boolean;
+  skillId?: string;
+}
 
 const planItems = [
   { label: "Initialize Tauri + React project", status: "Completed" },
@@ -35,7 +50,34 @@ const planItems = [
 
 const recentSessions = ["Rust CLI Todo App", "API Integration", "Refactor Auth Module", "Add Unit Tests", "UI Bug Fix"];
 
+const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
+  { label: "Home", icon: Home },
+  { label: "Sessions", icon: Archive },
+  { label: "Skills", icon: Wrench },
+  { label: "Memory", icon: MemoryStick },
+  { label: "Harness Evolution", icon: Sparkles },
+  { label: "Settings", icon: Settings },
+];
+
+const mergeCandidateRules = [
+  { label: "Frontend and mobile stacks", ids: ["frontend-dev", "fullstack-dev", "android-native-dev", "react-native-dev", "flutter-dev"] },
+  { label: "Document and office generators", ids: ["minimax-docx", "minimax-pdf", "minimax-xlsx", "pptx-generator"] },
+  { label: "Planning and todo helpers", ids: ["planf3", "planning-and-task-breakdown", "write-todos", "todo-update"] },
+  { label: "Self-improvement loops", ids: ["self-improve", "self-optimization-loop", "skill-evolution"] },
+  { label: "Debugging and root-cause analysis", ids: ["5-why", "debugging-and-error-recovery"] },
+];
+
+const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.";
+const COMPACT_KEEP_LAST = 6;
+
+let messageIdCounter = 0;
+function nextMessageId() {
+  messageIdCounter += 1;
+  return messageIdCounter;
+}
+
 export function App() {
+  const [activeView, setActiveView] = useState<AppView>("Home");
   const [accessMode, setAccessMode] = useState<AccessMode>("Full");
   const [proposal, setProposal] = useState<HarnessProposal>({
     id: "proposal-001",
@@ -45,11 +87,25 @@ export function App() {
   });
   const [history, setHistory] = useState<HarnessHistoryEntry[]>([]);
   const [message, setMessage] = useState("");
-  const [assistantText, setAssistantText] = useState(
-    "I'll build a fast local-first coding agent with a visible harness-evolution loop. Here's the plan:",
-  );
+  const [chat, setChat] = useState<ChatMessage[]>([]);
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [skillsStatus, setSkillsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [skillsError, setSkillsError] = useState("");
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
+  const [skillDetailStatus, setSkillDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [selectedSession, setSelectedSession] = useState(recentSessions[0]);
+  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
+  const [provider] = useState("minimax");
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const conversationRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const isTauri = isTauriRuntime();
+  const slash = useSlashMenu(message, isTauri);
 
   const completed = planItems.filter((item) => item.status === "Completed").length;
   const progress = Math.round((completed / planItems.length) * 100);
@@ -61,32 +117,157 @@ export function App() {
     return "Read-only mode. Shell, writes and network are disabled.";
   }, [accessMode]);
 
+  const mergeCandidates = useMemo(() => {
+    const available = new Set(skills.map((skill) => skill.id));
+    return mergeCandidateRules
+      .map((rule) => ({ label: rule.label, ids: rule.ids.filter((id) => available.has(id)) }))
+      .filter((rule) => rule.ids.length > 1);
+  }, [skills]);
+
   function recordProposal(action: Exclude<HarnessProposal["status"], "ready">) {
     const result = transitionHarnessProposal(proposal, action);
     setProposal(result.proposal);
     setHistory((entries) => [result.historyEntry, ...entries].slice(0, 4));
   }
 
+  function startNewSession() {
+    setSelectedSession("Untitled Session");
+    setChat([]);
+    setMessage("");
+    setAttachedFiles([]);
+    setActiveSkillId(null);
+    setRunState("idle");
+    setActiveView("Home");
+  }
+
+  function selectSession(session: string) {
+    setSelectedSession(session);
+    setChat([]);
+    setMessage("");
+    setActiveSkillId(null);
+    setRunState("idle");
+    setActiveView("Home");
+  }
+
+  function addContextMention() {
+    setMessage((value) => `${value}${value.endsWith(" ") || value.length === 0 ? "" : " "}@`);
+    requestAnimationFrame(() => { composerRef.current?.focus(); resizeComposer(); });
+  }
+
+  function handleFileSelection(files: FileList | null) {
+    if (!files) return;
+    const names = Array.from(files).map((file) => file.name);
+    setAttachedFiles((current) => Array.from(new Set([...current, ...names])));
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function activateSkill(id: string) {
+    setActiveSkillId(id);
+    setChat((entries) => [...entries, { id: nextMessageId(), role: "zeus", text: `Skill attached: ${id}` }]);
+  }
+
+  function detachSkill() { setActiveSkillId(null); }
+
+  function compactContext() {
+    setChat((entries) => {
+      const recent = entries.slice(-COMPACT_KEEP_LAST);
+      const note: ChatMessage = { id: nextMessageId(), role: "zeus", text: `Context compacted. Kept the last ${recent.length} turn(s).` };
+      return [...recent, note];
+    });
+  }
+
+  function stopRun() {
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+    setRunState("idle");
+    setChat((entries) => [...entries, { id: nextMessageId(), role: "zeus", text: "Run stopped." }]);
+  }
+
+  function stripThinkingTags(text: string): string {
+    const LT = String.fromCharCode(0x3c);
+    const SLASH = String.fromCharCode(0x2f);
+    const GT = String.fromCharCode(0x3e);
+    const OPEN = LT + "think" + GT;
+    const CLOSE = LT + SLASH + "think" + GT;
+    let out = "";
+    let i = 0;
+    while (i < text.length) {
+      const openIdx = text.indexOf(OPEN, i);
+      if (openIdx === -1) { out += text.slice(i); break; }
+      out += text.slice(i, openIdx);
+      const closeIdx = text.indexOf(CLOSE, openIdx + OPEN.length);
+      if (closeIdx === -1) break;
+      i = closeIdx + CLOSE.length;
+    }
+    return out.trim();
+  }
+
   async function handleSend() {
     const prompt = message.trim();
     if (!prompt) return;
+    if (runState === "running") return;
+    if (prompt === "/new") { setMessage(""); startNewSession(); return; }
+    if (prompt === "/compact") { setMessage(""); compactContext(); return; }
+    if (prompt === "/stop") { setMessage(""); stopRun(); return; }
 
-    setRunState("running");
-    setAssistantText("Contacting MiniMax M3 through the Zeus Rust provider adapter...");
+    const skillForTurn = activeSkillId;
+    const userMessage: ChatMessage = { id: nextMessageId(), role: "user", text: prompt, skillId: skillForTurn ?? undefined };
+    const thinkingMessage: ChatMessage = { id: nextMessageId(), role: "zeus", text: "", thinking: true };
+    setChat((entries) => [...entries, userMessage, thinkingMessage]);
     setMessage("");
+    setRunState("running");
+    requestAnimationFrame(() => { if (composerRef.current) composerRef.current.style.height = "24px"; });
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const response = await sendMinimaxChat({
+      const response = await dispatchChat({
+        provider,
+        skillId: skillForTurn ?? undefined,
         messages: [
-          { role: "system", content: "You are Zeus, a concise local-first coding agent." },
+          { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt },
         ],
       });
-      setAssistantText(response.content);
+      if (controller.signal.aborted) return;
+      const clean = stripThinkingTags(response.content);
+      setChat((entries) => entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text: clean, thinking: false } : entry));
       setRunState("idle");
     } catch (error) {
-      setAssistantText(error instanceof Error ? error.message : "MiniMax request failed.");
+      if (controller.signal.aborted) return;
+      const text = error instanceof Error ? error.message : "Chat request failed.";
+      setChat((entries) => entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text, thinking: false } : entry));
       setRunState("error");
+    } finally {
+      abortRef.current = null;
+    }
+  }
+
+  function applySlashPick(item: SlashItem) {
+    setMessage("");
+    if (item.kind === "skill") activateSkill(item.id);
+    else if (item.id === "new") startNewSession();
+    else if (item.id === "compact") compactContext();
+    else if (item.id === "stop") stopRun();
+  }
+
+  function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (slash.open && slash.items.length > 0) {
+      if (event.key === "ArrowDown") { event.preventDefault(); slash.setActiveIndex((slash.activeIndex + 1) % slash.items.length); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); slash.setActiveIndex((slash.activeIndex - 1 + slash.items.length) % slash.items.length); return; }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const picked = slash.pick(slash.activeIndex);
+        if (picked) applySlashPick(picked);
+        return;
+      }
+      if (event.key === "Escape") { event.preventDefault(); setMessage(""); return; }
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
+      event.preventDefault(); void handleSend(); return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault(); void handleSend();
     }
   }
 
@@ -97,207 +278,292 @@ export function App() {
     composer.style.height = `${Math.min(composer.scrollHeight, 160)}px`;
   }
 
+  useEffect(() => {
+    const node = conversationRef.current;
+    if (!node) return;
+    const frame = requestAnimationFrame(() => { node.scrollTop = node.scrollHeight; });
+    return () => cancelAnimationFrame(frame);
+  }, [chat]);
+
+  useEffect(() => {
+    if (activeView !== "Skills" || skillsStatus !== "idle") return;
+    let cancelled = false;
+    setSkillsStatus("loading");
+    listSkills().then((items) => { if (cancelled) return; setSkills(items); setSkillsStatus("ready"); })
+      .catch((error) => { if (cancelled) return; setSkillsError(error instanceof Error ? error.message : "Skill discovery failed."); setSkillsStatus("error"); });
+    return () => { cancelled = true; };
+  }, [activeView, skillsStatus]);
+
+  useEffect(() => {
+    if (activeView !== "Skills" || !selectedSkillId) return;
+    let cancelled = false;
+    setSkillDetailStatus("loading");
+    loadSkill(selectedSkillId).then((detail) => { if (cancelled) return; setSkillDetail(detail); setSkillDetailStatus("ready"); })
+      .catch((error) => { if (cancelled) return; setSkillsError(error instanceof Error ? error.message : "Skill loading failed."); setSkillDetailStatus("error"); });
+    return () => { cancelled = true; };
+  }, [activeView, selectedSkillId]);
+
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Primary">
         <div className="window-dots" aria-hidden="true">
-          <span className="dot red" />
-          <span className="dot yellow" />
-          <span className="dot green" />
+          <span className="dot red" /><span className="dot yellow" /><span className="dot green" />
         </div>
-
         <div className="brand-row">
-          <div className="brand-mark">
-            <Sparkles size={18} />
-          </div>
-          <h1>Zeus</h1>
-          <span className="version">v0.1.0</span>
+          <div className="brand-mark"><Sparkles size={18} /></div>
+          <h1>Zeus</h1><span className="version">v0.1.0</span>
         </div>
-
-        <button className="new-session" type="button">
-          <MessageSquare size={16} />
-          New Session
-          <kbd>⌘ N</kbd>
+        <button className="new-session" type="button" onClick={startNewSession}>
+          <MessageSquare size={16} />New Session<kbd>⌘ N</kbd>
         </button>
-
         <nav className="nav-list">
-          {[
-            ["Home", Home],
-            ["Sessions", Archive],
-            ["Skills", Wrench],
-            ["Memory", MemoryStick],
-            ["Harness Evolution", Sparkles],
-            ["Settings", Settings],
-          ].map(([label, Icon]) => (
-            <button className={label === "Home" ? "nav-item active" : "nav-item"} key={label as string} type="button">
-              <Icon size={16} />
-              {label as string}
+          {navItems.map(({ label, icon: Icon }) => (
+            <button className={label === activeView ? "nav-item active" : "nav-item"} key={label} type="button" onClick={() => setActiveView(label)}>
+              <Icon size={16} />{label}
             </button>
           ))}
         </nav>
-
         <section className="recent-block" aria-labelledby="recent-title">
-          <div className="section-label" id="recent-title">
-            Recent Sessions
-            <Clock3 size={14} />
-          </div>
+          <div className="section-label" id="recent-title">Recent Sessions<Clock3 size={14} /></div>
           {recentSessions.map((session, index) => (
-            <button className={index === 0 ? "recent-item active" : "recent-item"} key={session} type="button">
-              <span>{session}</span>
-              <time>{index === 0 ? "2m ago" : index === 1 ? "1h ago" : `${index}d ago`}</time>
+            <button className={session === selectedSession ? "recent-item active" : "recent-item"} key={session} type="button" onClick={() => selectSession(session)}>
+              <span>{session}</span><time>{index === 0 ? "2m ago" : index === 1 ? "1h ago" : `${index}d ago`}</time>
             </button>
           ))}
         </section>
-
         <section className="harness-card" aria-labelledby="harness-title">
           <p className="section-label">Next session review</p>
           <h2 id="harness-title">{proposal.title}</h2>
           <p>{proposal.summary}</p>
           <div className="proposal-actions">
-          <button type="button" onClick={() => recordProposal("approved")}>
-            Approve
-          </button>
-            <button type="button" onClick={() => recordProposal("edited")}>
-              Edit
-            </button>
-            <button type="button" onClick={() => recordProposal("rejected")}>
-              Reject
-            </button>
+            <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
+            <button type="button" onClick={() => recordProposal("edited")}>Edit</button>
+            <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
           </div>
           <div className="proposal-actions secondary">
-            <button type="button" onClick={() => recordProposal("applied-once")}>
-              Apply Once
-            </button>
-            <button type="button" onClick={() => recordProposal("rolled-back")}>
-              Roll Back
-            </button>
+            <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
+            <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
           </div>
           <p className="proposal-status">Status: {proposal.status}</p>
         </section>
-
         <div className="profile-row">
-          <div className="avatar">B</div>
-          <span>benclawbot</span>
-          <ChevronDown size={14} />
+          <div className="avatar">B</div><span>benclawbot</span><ChevronDown size={14} />
         </div>
       </aside>
 
       <section className="workspace" aria-label="Task execution">
-        <header className="topbar">
-          <div>
-            <h2>Rust CLI Todo App</h2>
-            <span className="active-pill">Active</span>
-          </div>
-          <button className="run-button" type="button" onClick={() => setRunState("running")}>
-            <Play size={15} />
-            Run
-          </button>
-        </header>
-
-        <div className="conversation">
-          <article className="user-card">
-            <strong>You</strong>
-            <p>Build a simple CLI todo app in Rust with add, list, complete and remove commands.</p>
-            <p>Use SQLite for persistence.</p>
-            <time>10:42 AM</time>
-          </article>
-
-          <article className="agent-message">
-            <div className="agent-avatar">
-              <Sparkles size={20} />
+        {activeView === "Skills" ? (
+          <section className="skills-view" aria-label="Skills registry">
+            <div className="skills-header">
+              <div><p className="section-label">Local Skills</p><h2>Lazy-loaded registry</h2></div>
+              <span>{skillsStatus === "ready" ? `${skills.length} found` : skillsStatus}</span>
             </div>
-            <div className="agent-body">
-              <div className="message-heading">
-                <strong>Zeus</strong>
-                <time>10:42 AM</time>
+            {skillsStatus === "error" ? (
+              <p className="skills-error">{skillsError}</p>
+            ) : (
+              <div className="skills-layout">
+                <div className="skills-list" aria-label="Available skills">
+                  {skillsStatus === "loading" ? (
+                    <p className="skills-muted">Scanning skill frontmatter...</p>
+                  ) : (
+                    skills.map((skill) => (
+                      <button className={skill.id === selectedSkillId ? "skill-row selected" : "skill-row"} key={skill.id} type="button" onClick={() => setSelectedSkillId(skill.id)}>
+                        <span><strong>{skill.name}</strong><em>{skill.id}</em></span>
+                        <small>{[skill.hasReferences ? "references" : null, skill.hasScripts ? "scripts" : null, skill.hasAssets ? "assets" : null, skill.hasAgentsMetadata ? "metadata" : null].filter(Boolean).join(" / ") || "single file"}</small>
+                      </button>
+                    ))
+                  )}
+                </div>
+                <div className="skill-detail" aria-live="polite">
+                  {!selectedSkillId ? (
+                    <div className="skill-placeholder"><h3>Select a skill</h3><p>Only metadata is loaded so far. Pick a skill to read its full instructions.</p></div>
+                  ) : skillDetailStatus === "loading" ? (
+                    <p className="skills-muted">Loading {selectedSkillId}...</p>
+                  ) : skillDetailStatus === "error" ? (
+                    <p className="skills-error">{skillsError}</p>
+                  ) : skillDetail ? (
+                    <>
+                      <div className="skill-detail-heading">
+                        <div><h3>{skillDetail.summary.name}</h3><p>{skillDetail.summary.description || "No description in frontmatter."}</p></div>
+                        <span>{skillDetail.body.length.toLocaleString()} chars</span>
+                      </div>
+                      <pre>{skillDetail.body}</pre>
+                    </>
+                  ) : (
+                    <div className="skill-placeholder"><h3>Ready</h3><p>Skill bodies remain unloaded until you choose one.</p></div>
+                  )}
+                </div>
               </div>
-              <p>{assistantText}</p>
-              <div className="task-list">
-                {planItems.map((item, index) => (
-                  <div className="task-row" key={item.label}>
-                    <span className={item.status === "Completed" ? "task-icon done" : item.status === "In Progress" ? "task-icon live" : "task-icon"}>
-                      {item.status === "Completed" ? <Check size={14} /> : index + 1}
-                    </span>
-                    <span>{item.label}</span>
-                    <em>{item.status}</em>
+            )}
+            <section className="merge-panel" aria-label="Potential skill merges">
+              <div className="skills-header compact">
+                <div><p className="section-label">Audit</p><h2>Potential overlap</h2></div>
+                <span>{mergeCandidates.length} groups</span>
+              </div>
+              {mergeCandidates.length === 0 ? (
+                <p className="skills-muted">Load the registry to see overlap candidates.</p>
+              ) : (
+                mergeCandidates.map((group) => (
+                  <p key={group.label}><strong>{group.label}</strong><span>{group.ids.join(" / ")}</span></p>
+                ))
+              )}
+            </section>
+          </section>
+        ) : activeView === "Home" ? (
+          <>
+            <div className="workspace-header">
+              <span className="session-pill" aria-label="Current session">{selectedSession}</span>
+              {activeSkillId ? <span className="session-pill skill">skill: {activeSkillId}</span> : null}
+            </div>
+            <div className="conversation" aria-label="Conversation" ref={conversationRef}>
+              {chat.map((entry) => entry.role === "user" ? (
+                <article key={entry.id} className="chat-bubble chat-user">
+                  <div className="chat-avatar" aria-hidden="true"><User size={16} /></div>
+                  <div className="chat-body">
+                    <div className="chat-heading"><strong>Me</strong><time>just now</time></div>
+                    {entry.skillId ? (
+                      <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
+                    ) : null}
+                    <p>{entry.text}</p>
                   </div>
+                </article>
+              ) : (
+                <article key={entry.id} className="chat-bubble chat-zeus">
+                  <div className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></div>
+                  <div className="chat-body">
+                    <div className="chat-heading"><strong>Zeus</strong><time>just now</time></div>
+                    {entry.thinking ? (
+                      <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
+                    ) : (
+                      <p>{entry.text}</p>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <section className="composer" aria-label="Message composer">
+              {slash.visible ? (
+                <div className="slash-menu" role="listbox" aria-label="Slash commands">
+                  {slash.items.length === 0 ? (
+                    <p className="slash-empty">No matches for /{slash.query}</p>
+                  ) : (
+                    slash.items.map((item, index) => {
+                      const isActive = index === slash.activeIndex;
+                      const label = item.kind === "skill" ? `/${item.id}` : item.label;
+                      const description = item.kind === "skill" ? (item.description || `Skill: ${item.name}`) : item.description;
+                      return (
+                        <button aria-selected={isActive} className={isActive ? "slash-row active" : "slash-row"} key={`${item.kind}-${item.kind === "skill" ? item.id : (item as { id: string }).id}`} onClick={() => applySlashPick(item)} onMouseEnter={() => slash.setActiveIndex(index)} type="button">
+                          <span className="slash-row-label">{label}</span>
+                          <span className="slash-row-desc">{description}</span>
+                          {item.kind === "skill" ? <span className="slash-row-kind">skill</span> : null}
+                        </button>
+                      );
+                    })
+                  )}
+                  <p className="slash-hint">Up Down to move - Enter or Tab to pick - Esc to close</p>
+                </div>
+              ) : null}
+
+              {activeSkillId ? (
+                <div className="composer-skill-chip" aria-label={`Active skill ${activeSkillId}`}>
+                  skill: {activeSkillId}
+                  <button aria-label="Remove active skill" onClick={detachSkill} type="button"><X size={12} /></button>
+                </div>
+              ) : null}
+
+              <textarea aria-label="Message Zeus" onChange={(event) => { setMessage(event.target.value); resizeComposer(); }} onKeyDown={handleComposerKeyDown} placeholder="Type / for skills and commands - Message Zeus..." ref={composerRef} rows={1} value={message} />
+              <div className="composer-bottom">
+                <div className="composer-tools">
+                  <input aria-label="Choose files" className="file-input" multiple onChange={(event) => handleFileSelection(event.target.files)} ref={fileInputRef} type="file" />
+                  <button aria-label="Attach file" type="button" onClick={() => fileInputRef.current?.click()}><Paperclip size={16} /></button>
+                  <button aria-label="Mention context" type="button" onClick={addContextMention}>@</button>
+                  {attachedFiles.map((file) => (
+                    <span className="attached-chip" key={file}>
+                      <FileText size={14} />{file}
+                      <button aria-label={`Remove ${file}`} type="button" onClick={() => setAttachedFiles((current) => current.filter((item) => item !== file))}><X size={13} /></button>
+                    </span>
+                  ))}
+                </div>
+                <div className="send-cluster">
+                  <span>{slash.visible ? "Up Down navigate - Enter to pick" : runState === "running" ? "Generating..." : "Enter to send / Shift+Enter newline"}</span>
+                  {runState === "running" ? (
+                    <button aria-label="Stop run" className="stop-button" onClick={stopRun} type="button"><Square size={14} /></button>
+                  ) : (
+                    <button aria-label="Send message" className="send-button" onClick={() => void handleSend()} type="button"><Send size={17} /></button>
+                  )}
+                </div>
+              </div>
+            </section>
+          </>
+        ) : (
+          <section className="utility-view" aria-label={`${activeView} view`}>
+            <div className="skills-header">
+              <div><p className="section-label">{activeView}</p><h2>{activeView === "Harness Evolution" ? proposal.title : activeView}</h2></div>
+              <span>{activeView === "Sessions" ? selectedSession : "state-backed"}</span>
+            </div>
+            {activeView === "Sessions" && (
+              <div className="utility-grid">
+                {recentSessions.map((session, index) => (
+                  <button className={session === selectedSession ? "utility-row selected" : "utility-row"} key={session} type="button" onClick={() => selectSession(session)}>
+                    <strong>{session}</strong><span>{index === 0 ? "2m ago" : index === 1 ? "1h ago" : `${index}d ago`}</span>
+                  </button>
                 ))}
               </div>
-
-              <section className="terminal-card" aria-label="Live terminal output">
-                <div className="terminal-status">
-                  <span>{runState === "running" ? "Live" : runState === "error" ? "Needs attention" : "Ready"}</span>
+            )}
+            {activeView === "Memory" && (
+              <div className="utility-card">
+                <dl>
+                  <div><dt>Project</dt><dd>Zeus Coding Agent</dd></div>
+                  <div><dt>Current Session</dt><dd>{selectedSession}</dd></div>
+                  <div><dt>Provider</dt><dd>MiniMax-M3 through api.minimax.io/v1</dd></div>
+                  <div><dt>Skills</dt><dd>{skillsStatus === "ready" ? `${skills.length} indexed locally` : "Open Skills to index local metadata"}</dd></div>
+                  <div><dt>Active Skill</dt><dd>{activeSkillId ?? "none"}</dd></div>
+                </dl>
+              </div>
+            )}
+            {activeView === "Harness Evolution" && (
+              <div className="utility-card">
+                <p>{proposal.summary}</p>
+                <div className="proposal-actions">
+                  <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
+                  <button type="button" onClick={() => recordProposal("edited")}>Edit</button>
+                  <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
+                  <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
+                  <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
                 </div>
-                <p>
-                  <Check size={14} /> Checking provider adapter MiniMax-M3
-                </p>
-                <p>
-                  <span className="terminal-dot" /> Preparing Tauri command bridge
-                </p>
-                <p>
-                  <span className="terminal-dot muted" /> Running package verification
-                </p>
-                <button type="button">
-                  <TerminalSquare size={15} />
-                  View Logs
-                </button>
-              </section>
-            </div>
-          </article>
-        </div>
-
-        <section className="composer" aria-label="Message composer">
-          <textarea
-            aria-label="Message Zeus"
-            onChange={(event) => {
-              setMessage(event.target.value);
-              resizeComposer();
-            }}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                void handleSend();
-              }
-            }}
-            placeholder="Message Zeus..."
-            ref={composerRef}
-            rows={1}
-            value={message}
-          />
-          <div className="composer-bottom">
-            <div className="composer-tools">
-              <button aria-label="Attach file" type="button">
-                <Paperclip size={16} />
-              </button>
-              <button aria-label="Mention context" type="button">
-                @
-              </button>
-              <span className="attached-chip">
-                <FileText size={14} />
-                requirements.md
-                <X size={13} />
-              </span>
-            </div>
-            <div className="send-cluster">
-              <span>⌘ ↵ to send</span>
-              <button aria-label="Send message" className="send-button" type="button" onClick={() => void handleSend()}>
-                <Send size={17} />
-              </button>
-            </div>
-          </div>
-        </section>
+                <p className="proposal-status">Status: {proposal.status}</p>
+                {history.length === 0 ? (
+                  <p className="skills-muted">No harness changes applied in this session.</p>
+                ) : (
+                  history.map((entry) => (
+                    <p key={`${entry.proposalId}-${entry.at}`}>{entry.action} / {new Date(entry.at).toLocaleTimeString()}</p>
+                  ))
+                )}
+              </div>
+            )}
+            {activeView === "Settings" && (
+              <div className="utility-card">
+                <p>Access mode</p>
+                <div className="access-grid" role="group" aria-label="Settings access mode">
+                  {(["Full", "Local", "Review", "Locked"] as AccessMode[]).map((mode) => (
+                    <button className={mode === accessMode ? "selected" : ""} key={mode} type="button" onClick={() => setAccessMode(mode)}>{mode}</button>
+                  ))}
+                </div>
+                <p className="skills-muted">{accessSummary}</p>
+              </div>
+            )}
+          </section>
+        )}
       </section>
 
       <aside className="inspector" aria-label="Progress and memory">
         <section className="panel">
           <div className="panel-heading">
             <h2>Plan Progress</h2>
-            <span>
-              {completed} / {planItems.length} completed
-            </span>
+            <span>{completed} / {planItems.length} completed</span>
           </div>
-          <div className="progress-track">
-            <span style={{ width: `${progress}%` }} />
-          </div>
+          <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
           <p className="progress-percent">{progress}%</p>
           <div className="compact-list">
             {planItems.map((item, index) => (
@@ -318,24 +584,12 @@ export function App() {
             <span>Updated just now</span>
           </div>
           <dl>
-            <div>
-              <dt>Project</dt>
-              <dd>Zeus Coding Agent</dd>
-            </div>
-            <div>
-              <dt>Tech</dt>
-              <dd>Tauri, React, Rust, SQLite</dd>
-            </div>
-            <div>
-              <dt>Provider</dt>
-              <dd>MiniMax-M3</dd>
-            </div>
-            <div>
-              <dt>Harness</dt>
-              <dd>Approval before rule changes</dd>
-            </div>
+            <div><dt>Project</dt><dd>Zeus Coding Agent</dd></div>
+            <div><dt>Tech</dt><dd>Tauri, React, Rust, SQLite</dd></div>
+            <div><dt>Provider</dt><dd>MiniMax-M3</dd></div>
+            <div><dt>Harness</dt><dd>Approval before rule changes</dd></div>
           </dl>
-          <button type="button">View Memory</button>
+          <button type="button" onClick={() => setActiveView("Memory")}>View Memory</button>
         </section>
 
         <section className="panel access-panel">
@@ -345,9 +599,7 @@ export function App() {
           </div>
           <div className="access-grid" role="group" aria-label="Access mode">
             {(["Full", "Local", "Review", "Locked"] as AccessMode[]).map((mode) => (
-              <button className={mode === accessMode ? "selected" : ""} key={mode} type="button" onClick={() => setAccessMode(mode)}>
-                {mode}
-              </button>
+              <button className={mode === accessMode ? "selected" : ""} key={mode} type="button" onClick={() => setAccessMode(mode)}>{mode}</button>
             ))}
           </div>
           <p>{accessSummary}</p>
@@ -362,9 +614,7 @@ export function App() {
             <p>No harness changes applied in this session.</p>
           ) : (
             history.map((entry) => (
-              <p key={`${entry.proposalId}-${entry.at}`}>
-                {entry.action} · {new Date(entry.at).toLocaleTimeString()}
-              </p>
+              <p key={`${entry.proposalId}-${entry.at}`}>{entry.action} / {new Date(entry.at).toLocaleTimeString()}</p>
             ))
           )}
         </section>
