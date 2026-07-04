@@ -100,7 +100,7 @@ Progress:
 
 ### Phase 5: Verification and Packaging
 
-Status: in progress
+Status: complete
 
 Acceptance:
 
@@ -112,11 +112,12 @@ Acceptance:
 
 Progress:
 
-- [ ] Run typecheck.
-- [ ] Run tests.
-- [ ] Run frontend build.
-- [ ] Run Tauri build/check.
-- [ ] Update this document with exact command output.
+- [x] Run typecheck.
+- [x] Run tests.
+- [x] Run frontend build.
+- [x] Run Tauri build/check.
+- [x] Update this document with exact command output.
+- [x] Publish public GitHub repository.
 
 ## Risks and Mitigations
 
@@ -160,3 +161,4 @@ Tauri packaging can only fully prove the current host OS locally. Cross-platform
 - README prerequisites were expanded to include Node/npm, Rust/Cargo, Git, WebView2, Windows C++ build tools, macOS Xcode tools, Linux Tauri packages, and `MINIMAX_API_KEY`.
 - Git publishing preparation: initialized a nested Git repository in `C:\Users\thoma\Zeus` on `main` because the parent `C:\Users\thoma` directory is also a Git repository. This prevents accidentally publishing the whole home directory.
 - Pre-commit hygiene: README asset references were checked and all files existed; `git diff --cached --check` passed after trimming extra blank EOF lines; a targeted staged-diff scan found no committed secret values. Temporary root screenshots, logs, build output, dependency folders, and the obsolete spec zip are ignored.
+- GitHub publication: committed initial build as `b220d17 feat: initial Zeus desktop app`, created public repository `https://github.com/benclawbot/Zeus`, pushed `main`, and verified the remote branch/README through `gh`.
