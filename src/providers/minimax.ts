@@ -10,6 +10,11 @@ export interface MinimaxChatOptions {
   model?: string;
   baseUrl?: string;
   temperature?: number;
+  /**
+   * Optional skill id. When set, the Rust side loads the SKILL.md body and
+   * prepends it to the system prompt for this turn only.
+   */
+  skillId?: string;
 }
 
 export interface MinimaxChatResponse {
