@@ -260,7 +260,7 @@ def cmd_propose(args) -> int:
         d = diff(orig, proposed, str(path.relative_to(r)))
         if not d.strip(): continue
         rid = risk(d); pid = new_id(f"proposal-{pat['skill_used']}")
-        obj={"proposal_id": pid, "created_at": now(), "target_skill": pat["skill_used"], "target_path": str(path.relative_to(r)), "pattern": pat, "risk": rid, "auto_apply_eligible": rid == "low", "rationale": rationale, "original_sha256": sha(orig), "proposed_sha256": sha(proposed), "diff": d, "proposed_content": proposed, "status": "proposed", "rollback": {"strategy": "restore pre-apply version snapshot"}}
+        obj={"proposal_id": pid, "created_at": now(), "target_skill": pat["skill_used"], "target_path": str(path.relative_to(r)), "pattern": pat, "risk": rid, "auto_apply_eligible": False, "rationale": rationale, "original_sha256": sha(orig), "proposed_sha256": sha(proposed), "diff": d, "proposed_content": proposed, "status": "proposed", "rollback": {"strategy": "restore pre-apply version snapshot"}}
         out=data(r)/"proposals"/f"{pid}.json"; write_json(out,obj); made.append(str(out))
     print(json.dumps({"ok": True, "count": len(made), "created": made}, indent=2)); return 0
 
@@ -288,7 +288,10 @@ def cmd_apply(args) -> int:
         target=skill_md(r, meta["skill"]); snapshot(r, meta["skill"], txt(target), {"reason":"pre-rollback snapshot", "rollback_to":args.rollback}); write(target, txt(vd/"SKILL.md")); print(json.dumps({"ok": True, "rolled_back": meta["skill"], "restored_version": args.rollback}, indent=2)); return 0
     pp=Path(args.proposal); pp=pp if pp.is_absolute() else (r/pp).resolve(); prop=read_json(pp)
     if prop.get("status") != "validated" or not prop.get("validation",{}).get("passed"): raise SystemExit("Proposal is not validated")
-    if prop.get("risk") != "low" and not args.approve: raise SystemExit("Medium/high risk proposal requires --approve")
+    # SECURITY: risk() is a keyword heuristic and must never gate the approval
+    # requirement. ALL proposals require explicit human --approve.
+    if not args.approve:
+        raise SystemExit(f"Proposal risk='{prop.get('risk')}' — --approve required for ALL proposals, no exceptions")
     target=skill_md(r, prop["target_skill"]); cur=txt(target)
     if sha(cur) != prop.get("original_sha256"): raise SystemExit("Target changed since validation; regenerate.")
     meta=snapshot(r, prop["target_skill"], cur, {"reason":"pre-apply snapshot", "proposal_id":prop["proposal_id"]}); write(target, prop["proposed_content"])
