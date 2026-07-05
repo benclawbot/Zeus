@@ -1,70 +1,154 @@
-# Zeus
+# Zeus — The God Coding Agent
 
-![Zeus banner](docs/assets/zeus-banner.svg)
+![Zeus — The God Coding Agent](docs/assets/zeus-banner.svg)
 
-Zeus is a local-first desktop coding-agent shell built with Tauri, React, TypeScript, and Rust. The current build focuses on a compact Codex-like task screen, visible harness-evolution controls, access-mode state, local memory scaffolding, and a MiniMax M3 provider adapter wired through the Rust/Tauri bridge.
+Zeus is a local-first desktop coding-agent shell built with Tauri, React, TypeScript, and Rust. The current production-ready surface is a focused desktop task UI with real provider dispatch, MiniMax M3 chat, local SQLite-backed session state, skill discovery and injection, image/file attachment handling, project-scoped sessions, slash commands, and visible harness-evolution controls.
 
-This repository is early but runnable. The shipped app is a desktop UI foundation with real build/test/package plumbing and a first provider adapter; it does not yet execute arbitrary local coding tasks end to end.
+The app is intentionally honest about its current scope: Zeus is ready as a runnable desktop agent shell and provider/memory/harness foundation. It does **not** yet execute arbitrary local shell commands, apply repository file edits, enforce filesystem/network policies, or autonomously modify code end to end.
 
-## Current Status
+## Production-Ready and Wired In
 
-The first build is complete enough to run, test, and package on Windows. Cross-platform packaging is configured through Tauri and GitHub Actions for Windows, macOS, and Linux, though only the Windows local package was verified in this workspace.
+These capabilities are present in the current codebase and wired through the app surface.
 
-Implemented today: compact three-panel Zeus shell, bottom-only file attachment controls, one-line composer that grows upward like Codex, harness proposal actions in UI state, access-mode selection, MiniMax M3 Rust command bridge, cross-platform icon assets, automated React/Rust tests, clean npm audit, and Windows MSI/NSIS packaging.
+### Desktop App Foundation
 
-Not implemented yet: real session persistence, SQLite-backed memory tables, policy-enforced shell execution, diff/log panels, file attachment handling, and full harness-rule generation from completed sessions.
+- Tauri 2 desktop application with a React + TypeScript frontend and Rust backend.
+- Compact three-panel coding-agent interface with Home, Sessions, Skills, Memory, Harness Evolution, and Settings views.
+- Bottom composer designed as the only file-input surface.
+- Composer grows upward from a compact one-line input and keeps the task screen inside a single viewport.
+- Run/stop state for active chat requests.
+- Cross-platform build configuration through Tauri scripts.
 
-## Screenshots
+### Provider Dispatch and Chat
 
-Main Zeus task screen, constrained to one browser/window viewport with no body scrolling:
+- Rust-side provider trait and dispatcher for chat backends.
+- Built-in provider registry for MiniMax, OpenAI, and Anthropic on the Rust side.
+- MiniMax M3 is the default wired frontend provider.
+- MiniMax calls use the OpenAI-compatible chat-completions endpoint at `https://api.minimax.io/v1` and read `MINIMAX_API_KEY` from the environment.
+- OpenAI and Anthropic Rust providers are registered and implement real API request paths using `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` respectively.
+- Provider responses are normalized into a shared `{ content, model, usage }` shape.
+- MiniMax reasoning blocks are stripped before being shown to the user.
+- Missing API keys and provider failures return public errors without exposing secret values.
 
-![Zeus main screen](docs/assets/zeus-main-screen.png)
+### Local Persistence and Memory Foundation
 
-Composer growth check: the input starts as a compact one-line control and expands upward as more text is entered:
+- SQLite database is opened inside the Tauri app data directory as `zeus.db`.
+- Schema initialization and idempotent migrations are wired in Rust.
+- Persistent tables exist for harness proposals, harness history, access mode, and sessions.
+- Sessions store label, project id/name, last-seen timestamp, serialized chat transcript, and compact-context anchor.
+- Access mode is persisted so the selected mode survives relaunch.
+- A default harness proposal is seeded on first run.
 
-![Zeus composer growth](docs/assets/zeus-composer-growth.png)
+### Sessions, Projects, and Context
+
+- New sessions are created from the UI and saved to SQLite.
+- Recent sessions are restored from Rust on app startup.
+- Session rename is wired from the sidebar and persisted.
+- Project grouping is available through `projectId` and `projectName` on sessions.
+- New project creation is available from the UI and sessions can be grouped under projects.
+- `/new` starts a new session.
+- `/compact` keeps the recent chat window and stores a compact anchor so older turns stop being sent to the model.
+- Context sent to providers is built from the persisted chat window and excludes UI-only thinking placeholders.
+- `/goal` sets or displays an active session goal and surfaces it in the Memory view.
+
+### Skills System
+
+- Skills are discovered from a configurable/local skills directory.
+- `ZEUS_SKILLS_DIR` is supported, with packaged resource and development-directory fallbacks.
+- Skill folders are validated by `SKILL.md` files with YAML frontmatter.
+- Skill summaries include id, name, description, and whether references, scripts, assets, or OpenAI agent metadata are present.
+- Invalid skill folders are skipped instead of blocking the whole registry load.
+- Skill details can be loaded from the UI.
+- Active skill instructions are injected on the Rust side into the next provider call rather than shipping full skill bodies through frontend state.
+- Skill chips are excluded from ordinary chat-history context because the active skill body is injected separately.
+
+### Attachments and Image Paste
+
+- Bottom composer file attachment handling is wired.
+- Pasted images from the clipboard are converted into image attachments.
+- Image attachments get preview URLs when the runtime supports them.
+- Attached files are included in the prompt as structured attachment metadata for the current turn.
+- Attachments clear after a successful provider response.
+
+### Harness Evolution Workflow
+
+- Harness proposal state is visible in the UI.
+- Proposal transitions support approved, rejected, applied-once, edited, and rolled-back states.
+- Proposal edits can be made inline from the UI.
+- Proposal history entries are recorded for auditability.
+- Rust persistence supports proposal edits, history snapshots, and rollback behavior.
+- A seeded proposal appears automatically on first run so the harness panel is never empty.
+
+### Access Modes
+
+- Access modes are exposed in the UI: Full, Local, Review, and Locked.
+- Mode descriptions are shown in the app.
+- The selected access mode is persisted through Rust/SQLite.
+
+Important limitation: access modes are currently persisted UI state. They do not yet enforce shell, filesystem, network, dependency, or prompt-injection policies.
+
+### Testing and Quality Gates
+
+The repository includes scripts for:
+
+```bash
+npm run typecheck
+npm run test
+npm run build
+npm run tauri:build
+cd src-tauri && cargo test
+cd src-tauri && cargo fmt -- --check
+```
+
+Current tests cover the frontend shell, composer behavior, session/project flows, slash commands, harness proposal editing, context-window helpers, provider dispatch, skill injection, persistence, and provider defaults.
+
+## Not Yet Production Ready
+
+The following are intentionally **not** described as production-ready because they are not fully wired as end-to-end agent capabilities yet:
+
+- Arbitrary local shell command execution.
+- Repository file editing or patch application by the agent.
+- Policy-enforced filesystem, shell, dependency, network, or secret guards.
+- Autonomous code-change loops that modify a repo end to end.
+- Diff/log panels for real task execution.
+- Automatic harness-rule generation from completed sessions.
+- Signed multi-platform release publishing.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  User["User"] --> UI["React + TypeScript UI"]
-  UI --> State["Local UI state\nsessions, access mode,\nharness proposal draft"]
-  UI --> Tauri["Tauri command bridge"]
-  Tauri --> Rust["Rust core"]
-  Rust --> Minimax["MiniMax M3\napi.minimax.io/v1"]
-  Rust --> FutureMemory["SQLite memory\nplanned"]
-  Rust --> FutureRunner["Policy-aware command runner\nplanned"]
-  UI --> Package["Tauri desktop package\nWindows, macOS, Linux"]
+  User[User] --> UI[React + TypeScript UI]
+  UI --> Composer[Composer / slash commands / attachments]
+  UI --> Sessions[Sessions, projects, memory panels]
+  UI --> Tauri[Tauri command bridge]
+  Tauri --> Rust[Rust core]
+  Rust --> SQLite[(SQLite app data: zeus.db)]
+  Rust --> Skills[Local skills directory]
+  Rust --> Providers[Provider dispatcher]
+  Providers --> MiniMax[MiniMax M3]
+  Providers --> OpenAI[OpenAI]
+  Providers --> Anthropic[Anthropic]
+  UI --> Harness[Harness evolution UI]
+  Harness --> SQLite
 ```
 
-The frontend owns the current app shell, compact visual system, and temporary UI state. The Rust core owns native commands and provider calls. MiniMax M3 is exposed through a Tauri command that reads `MINIMAX_API_KEY`, defaults to `https://api.minimax.io/v1`, and sends OpenAI-compatible chat requests to `MiniMax-M3`.
+The frontend owns the visual shell, composer, views, temporary UI state, and provider-facing context assembly. The Rust core owns native commands, SQLite persistence, provider dispatch, provider HTTP calls, skill discovery, and skill injection.
 
 ## Prerequisites
 
-You need these tools before running or packaging Zeus:
-
-```bash
-node --version
-npm --version
-rustc --version
-cargo --version
-```
-
-Required versions and tools:
-
 | Requirement | Notes |
 | --- | --- |
-| Node.js | Node.js 22 or newer is recommended. This build was verified with Node 24.13.0. |
-| npm | Used for frontend dependencies and scripts. This build was verified with npm 11.6.2. |
-| Rust stable | Required by Tauri. Install with `rustup` from https://rustup.rs/. |
+| Node.js | Node.js 22 or newer is recommended. |
+| npm | Used for frontend dependencies and scripts. |
+| Rust stable | Required by Tauri. Install with `rustup`. |
 | Cargo | Installed with Rust and used for the Tauri/Rust core. |
 | Git | Required to clone and contribute to the repository. |
 | WebView runtime | Windows needs Microsoft Edge WebView2 Runtime. Current Windows 10/11 machines usually already have it. |
 | C++ build tools on Windows | Install Microsoft Visual Studio Build Tools with the Desktop development with C++ workload if Rust native dependencies fail to compile. |
 | Xcode tools on macOS | Install Xcode Command Line Tools with `xcode-select --install`. |
-| Linux Tauri packages | Install WebKitGTK, AppIndicator, librsvg, and build tooling for your distro. Ubuntu example below. |
-| MiniMax API key | Required only for live MiniMax M3 calls. Set `MINIMAX_API_KEY` in your environment or `.env`. |
+| Linux Tauri packages | Install WebKitGTK, AppIndicator, librsvg, and build tooling for your distro. |
+| Provider API key | Required for live provider calls. MiniMax uses `MINIMAX_API_KEY`; OpenAI uses `OPENAI_API_KEY`; Anthropic uses `ANTHROPIC_API_KEY`. |
 
 Ubuntu packaging dependencies:
 
@@ -82,11 +166,7 @@ sudo apt-get install -y \
   file
 ```
 
-Windows note: in this workspace Rust was installed at `C:\Users\thoma\.cargo\bin` but was not on the shell `PATH`. If commands cannot find Cargo, add that directory to `PATH` or launch a new terminal after installing Rust.
-
 ## Installation
-
-Clone and install:
 
 ```bash
 git clone https://github.com/benclawbot/Zeus.git
@@ -94,11 +174,12 @@ cd Zeus
 npm install
 ```
 
-Configure MiniMax if you want live provider calls:
+Configure a provider key for live chat:
 
 ```bash
 cp .env.example .env
 # add MINIMAX_API_KEY=your_key_here
+# optionally add OPENAI_API_KEY=... or ANTHROPIC_API_KEY=...
 ```
 
 Run the web dev surface:
@@ -125,8 +206,6 @@ Package the desktop app:
 npm run tauri:build
 ```
 
-On Windows, the verified local build produced `src-tauri/target/release/zeus.exe`, `src-tauri/target/release/bundle/msi/Zeus_0.1.0_x64_en-US.msi`, and `src-tauri/target/release/bundle/nsis/Zeus_0.1.0_x64-setup.exe`.
-
 ## Development Commands
 
 ```bash
@@ -138,32 +217,38 @@ cd src-tauri && cargo test
 cd src-tauri && cargo fmt -- --check
 ```
 
-## Verification From This Build
+## Configuration
 
-The current tree was verified with TypeScript type checking, Vitest React tests, Vite production build, Rust unit tests, Rust formatting check, npm audit, runtime browser measurements, and Tauri packaging.
+### Provider Keys
 
-Browser viewport verification at 2048x1152 showed body overflow hidden, document height equal to viewport height, composer visible inside the window, no page vertical overflow, and no console errors. Composer verification showed the textarea starting at 24px high and growing to 148px with multi-line input while staying visible.
+Zeus reads provider keys from the process environment. `.env` is loaded on startup when present.
 
-## Roadmap
+```bash
+MINIMAX_API_KEY=your_minimax_key
+OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+```
 
-Current: desktop shell, visual constraints, MiniMax M3 adapter, tests, packaging, screenshots, and documentation are complete for the first build.
+### Skills Directory
 
-Next: persist sessions, plans, memory snapshots, harness proposals, and change history in SQLite.
+Set `ZEUS_SKILLS_DIR` to point Zeus at a local skills folder:
 
-Next: implement the policy-aware Rust command runner for shell execution, file edits, network guards, secret guards, and dependency guardrails.
+```bash
+ZEUS_SKILLS_DIR=/path/to/skills
+```
 
-Next: add real file attachments from the bottom composer only, including attachment chips and context ingestion.
+If unset, Zeus checks packaged resources and development paths.
 
-Next: add diff and log panels launched from running tasks.
+## Suggested GitHub Description
 
-Next: generate harness-evolution proposals after sessions and surface them automatically at the start of the next session.
+Use this as the repository description:
 
-Next: add model/provider settings for MiniMax and future OpenAI-compatible providers without storing secrets in committed files.
-
-Next: verify packaging on macOS and Linux runners and publish signed release artifacts.
+```text
+Local-first Tauri coding-agent shell with MiniMax M3, SQLite sessions, skills, attachments, and visible harness evolution.
+```
 
 ## Security Notes
 
-Do not commit `.env` or local API keys. MiniMax calls are routed through the Rust side so the key can be read from the process environment instead of being bundled into the frontend.
-
-Access modes are currently visible UI state. Enforcement of file, shell, network, dependency, and prompt-injection policies is planned work in the Rust core.
+- Do not commit `.env` or local API keys.
+- Provider calls are routed through the Rust side so secrets can stay in the process environment rather than frontend code.
+- Access modes are currently persisted UI state only. Enforcement of shell, file, network, dependency, and secret policies is future work.
