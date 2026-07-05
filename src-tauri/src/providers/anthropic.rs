@@ -58,20 +58,23 @@ impl ChatProvider for AnthropicProvider {
         _skill_message: Option<&'a ChatMessage>,
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = std::env::var(ENV_VAR)
-                .map_err(|_| ProviderError::MissingApiKey { provider: self.id().to_string() })?;
+            let api_key = std::env::var(ENV_VAR).map_err(|_| ProviderError::MissingApiKey {
+                provider: self.id().to_string(),
+            })?;
 
             // Split out the system prompt — Anthropic's API requires it as
             // a top-level field, not as a message in the array.
             let (system, user_assistant): (Vec<&str>, Vec<&ChatMessage>) =
-                messages.iter().fold((Vec::new(), Vec::new()), |(mut sys, mut rest), msg| {
-                    if msg.role == "system" {
-                        sys.push(&msg.content);
-                    } else {
-                        rest.push(msg);
-                    }
-                    (sys, rest)
-                });
+                messages
+                    .iter()
+                    .fold((Vec::new(), Vec::new()), |(mut sys, mut rest), msg| {
+                        if msg.role == "system" {
+                            sys.push(&msg.content);
+                        } else {
+                            rest.push(msg);
+                        }
+                        (sys, rest)
+                    });
 
             let anthropic_messages: Vec<Value> = user_assistant
                 .iter()
@@ -99,13 +102,14 @@ impl ChatProvider for AnthropicProvider {
                 .json(&payload)
                 .send()
                 .await
-                .map_err(|_| ProviderError::Network { provider: self.id().to_string() })?;
+                .map_err(|_| ProviderError::Network {
+                    provider: self.id().to_string(),
+                })?;
 
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|_| ProviderError::Network { provider: self.id().to_string() })?;
+            let body = response.text().await.map_err(|_| ProviderError::Network {
+                provider: self.id().to_string(),
+            })?;
 
             if !status.is_success() {
                 return Err(ProviderError::Http {
@@ -114,8 +118,10 @@ impl ChatProvider for AnthropicProvider {
                 });
             }
 
-            let parsed: AnthropicResponse = serde_json::from_str(&body)
-                .map_err(|_| ProviderError::Parse { provider: self.id().to_string() })?;
+            let parsed: AnthropicResponse =
+                serde_json::from_str(&body).map_err(|_| ProviderError::Parse {
+                    provider: self.id().to_string(),
+                })?;
 
             let content = parsed
                 .content
@@ -128,7 +134,9 @@ impl ChatProvider for AnthropicProvider {
                 .to_string();
 
             if content.is_empty() {
-                return Err(ProviderError::EmptyContent { provider: self.id().to_string() });
+                return Err(ProviderError::EmptyContent {
+                    provider: self.id().to_string(),
+                });
             }
 
             Ok(ChatResponse {

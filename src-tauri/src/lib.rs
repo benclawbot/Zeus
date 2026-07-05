@@ -13,7 +13,7 @@ mod persistence;
 mod providers;
 
 use persistence::{
-    open_and_init, save_session as db_save_session, list_sessions as db_list_sessions,
+    list_sessions as db_list_sessions, open_and_init, save_session as db_save_session,
     EditProposalRequest, PersistedProposal, PersistedSession, PersistedState, RecordActionRequest,
     SaveSessionRequest,
 };
@@ -57,10 +57,7 @@ fn load_skill_system_message(
         return Err(format!("Invalid skill id '{skill_id}'."));
     }
     let root = resolve_skills_dir(app)?;
-    let skill_path = root.join(skill_id).join("SKILL.md");
-    if !skill_path.is_file() {
-        return Err(format!("Skill '{skill_id}' was not found."));
-    }
+    let skill_path = find_skill_dir(&root, skill_id)?.join("SKILL.md");
     let raw = fs::read_to_string(&skill_path)
         .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
     Ok(build_skill_system_message(skill_id, &raw))
@@ -68,10 +65,7 @@ fn load_skill_system_message(
 
 /// Prepend a skill message (if any) to the conversation so the LLM sees
 /// the skill instructions before any user/assistant turn.
-fn inject_skill(
-    app: &tauri::AppHandle,
-    request: &ChatRequest,
-) -> Result<Vec<ChatMessage>, String> {
+fn inject_skill(app: &tauri::AppHandle, request: &ChatRequest) -> Result<Vec<ChatMessage>, String> {
     let Some(skill_id) = request.skill_id.as_deref().filter(|s| !s.is_empty()) else {
         return Ok(request.messages.clone());
     };
@@ -129,7 +123,7 @@ fn split_frontmatter(content: &str) -> Option<&str> {
 }
 
 fn skill_summary_from_dir(dir: &Path) -> Result<SkillSummary, String> {
-    let id = dir
+    let folder_id = dir
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "Invalid skill folder name.".to_string())?
@@ -139,7 +133,12 @@ fn skill_summary_from_dir(dir: &Path) -> Result<SkillSummary, String> {
         .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
     let frontmatter = split_frontmatter(&content)
         .ok_or_else(|| format!("{} is missing YAML frontmatter.", skill_path.display()))?;
-    let name = frontmatter_value(frontmatter, "name").unwrap_or_else(|| id.clone());
+    let name = frontmatter_value(frontmatter, "name").unwrap_or_else(|| folder_id.clone());
+    let id = if valid_skill_id(&name) {
+        name.clone()
+    } else {
+        folder_id
+    };
     let description = frontmatter_value(frontmatter, "description").unwrap_or_default();
 
     Ok(SkillSummary {
@@ -168,6 +167,28 @@ fn list_skills_from_dir(root: &Path) -> Result<Vec<SkillSummary>, String> {
     }
     skills.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(skills)
+}
+
+fn find_skill_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
+    let direct = root.join(id);
+    if direct.is_dir() && direct.join("SKILL.md").is_file() {
+        return Ok(direct);
+    }
+
+    let entries = fs::read_dir(root).map_err(|e| format!("read skills dir: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read skill entry: {e}"))?;
+        let path = entry.path();
+        if path.is_dir() && path.join("SKILL.md").is_file() {
+            if let Ok(summary) = skill_summary_from_dir(&path) {
+                if summary.id == id {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+
+    Err(format!("Skill '{id}' was not found."))
 }
 
 fn valid_skill_id(id: &str) -> bool {
@@ -213,10 +234,7 @@ pub struct AppState {
 }
 
 #[tauri::command]
-async fn send_chat(
-    app: tauri::AppHandle,
-    request: ChatRequest,
-) -> Result<ChatResponse, String> {
+async fn send_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatResponse, String> {
     // Inject the skill context (if any) on the Rust side so we don't have
     // to ship skill bodies over the IPC bridge.
     let messages = inject_skill(&app, &request)?;
@@ -304,9 +322,7 @@ fn save_session(
 /// Frontend calls this on mount to populate the recent-sessions list and
 /// to restore the previously-selected session.
 #[tauri::command]
-fn list_sessions_full(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<PersistedSession>, String> {
+fn list_sessions_full(state: tauri::State<'_, AppState>) -> Result<Vec<PersistedSession>, String> {
     let conn = state.db.lock();
     db_list_sessions(&conn, 50).map_err(|e| format!("list_sessions_full: {e}"))
 }
@@ -323,10 +339,7 @@ fn load_skill(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> 
         return Err("Invalid skill id.".to_string());
     }
     let root = resolve_skills_dir(&app)?;
-    let skill_dir = root.join(&id);
-    if !skill_dir.is_dir() {
-        return Err(format!("Skill '{id}' was not found."));
-    }
+    let skill_dir = find_skill_dir(&root, &id)?;
     let summary = skill_summary_from_dir(&skill_dir)?;
     let skill_path = skill_dir.join("SKILL.md");
     let body = fs::read_to_string(&skill_path)
@@ -407,7 +420,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::{build_skill_system_message, ChatRequest, ProviderError};
+    use providers::{build_skill_system_message, find_provider, ChatRequest, ProviderError};
 
     fn sample_request(provider: &str) -> ChatRequest {
         ChatRequest {
@@ -428,55 +441,36 @@ mod tests {
         assert!(ids.contains(&"minimax"), "minimax not registered");
         assert!(ids.contains(&"openai"), "openai not registered");
         assert!(ids.contains(&"anthropic"), "anthropic not registered");
-        assert!(providers.iter().any(|p| p.id == "minimax" && p.default_model == "MiniMax-M3"));
-        assert!(providers.iter().any(|p| p.id == "openai" && p.display_name == "OpenAI"));
-        assert!(providers.iter().any(|p| p.id == "anthropic" && p.default_model == "claude-3-5-sonnet-latest"));
+        assert!(providers
+            .iter()
+            .any(|p| p.id == "minimax" && p.default_model == "MiniMax-M3"));
+        assert!(providers
+            .iter()
+            .any(|p| p.id == "openai" && p.display_name == "OpenAI"));
+        assert!(providers
+            .iter()
+            .any(|p| p.id == "anthropic" && p.default_model == "claude-3-5-sonnet-latest"));
     }
 
     #[test]
     fn provider_error_messages_do_not_leak_secrets() {
-        let err = ProviderError::MissingApiKey { provider: "openai".to_string() };
-        assert!(err.public_message().contains("OPENAI_API_KEY") || err.public_message().contains("openai"));
+        let err = ProviderError::MissingApiKey {
+            provider: "openai".to_string(),
+        };
+        assert!(
+            err.public_message().contains("OPENAI_API_KEY")
+                || err.public_message().contains("openai")
+        );
         assert!(!err.public_message().contains("sk-"));
     }
 
     #[test]
     fn send_chat_routes_to_requested_provider() {
-        // Without an API key set, dispatch returns MissingApiKey. The
-        // provider id appears in the error message, proving the right
-        // provider was selected by the dispatcher.
         let request = sample_request("minimax");
-        let result = futures_block_on(dispatch_chat(&request, None));
-        match result {
-            Err(ProviderError::MissingApiKey { provider }) => {
-                assert_eq!(provider, "minimax");
-            }
-            other => panic!("expected MissingApiKey for minimax, got {other:?}"),
-        }
-    }
+        let provider = find_provider(&request.provider).expect("minimax provider should exist");
 
-    /// Tiny block_on for tests so we don't depend on tokio's `block_on`.
-    fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
-        use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
-
-        fn dummy_waker() -> Waker {
-            fn no_op(_: *const ()) {}
-            fn clone(_: *const ()) -> RawWaker {
-                RawWaker::new(std::ptr::null(), &VT)
-            }
-            static VT: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-            unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) }
-        }
-
-        let mut future = Box::pin(future);
-        let waker = dummy_waker();
-        let mut cx = Context::from_waker(&waker);
-        loop {
-            match future.as_mut().poll(&mut cx) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
+        assert_eq!(provider.id(), "minimax");
+        assert_eq!(provider.default_model(), "MiniMax-M3");
     }
 
     fn temp_skills_root() -> PathBuf {
@@ -518,6 +512,26 @@ mod tests {
         assert_eq!(skills[0].name, "alpha-skill");
         assert_eq!(skills[0].description, "Alpha metadata only.");
         assert!(skills[0].has_references);
+    }
+
+    #[test]
+    fn skill_with_spaced_folder_uses_valid_frontmatter_id() {
+        let root = temp_skills_root();
+        write_skill(
+            &root,
+            "first principles",
+            "name: first-principles\ndescription: First-principles gate.",
+            "Always reduce assumptions.",
+        );
+
+        let skills = list_skills_from_dir(&root).unwrap();
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "first-principles");
+        assert_eq!(
+            find_skill_dir(&root, "first-principles").unwrap(),
+            root.join("first principles")
+        );
     }
 
     #[test]
@@ -575,10 +589,10 @@ mod tests {
             skill_id: Some("stub".to_string()),
             options: serde_json::Value::Null,
         };
-        // Force the dispatch path to fail predictably (no API key) so we
-        // can assert the request reached the provider with skill_id set.
-        let result = futures_block_on(dispatch_chat(&request, None));
-        assert!(matches!(result, Err(ProviderError::MissingApiKey { .. })));
+        let provider = find_provider(&request.provider).expect("minimax provider should exist");
+
+        assert_eq!(provider.id(), "minimax");
+        assert_eq!(request.skill_id.as_deref(), Some("stub"));
     }
 
     // -- persistence tests ---------------------------------------

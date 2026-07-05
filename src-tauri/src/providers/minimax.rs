@@ -57,10 +57,14 @@ impl ChatProvider for MinimaxProvider {
         _skill_message: Option<&'a ChatMessage>,
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = std::env::var(ENV_VAR)
-                .map_err(|_| ProviderError::MissingApiKey { provider: self.id().to_string() })?;
+            let api_key = std::env::var(ENV_VAR).map_err(|_| ProviderError::MissingApiKey {
+                provider: self.id().to_string(),
+            })?;
 
-            let endpoint = format!("{}/chat/completions", DEFAULT_BASE_URL.trim_end_matches('/'));
+            let endpoint = format!(
+                "{}/chat/completions",
+                DEFAULT_BASE_URL.trim_end_matches('/')
+            );
             let payload = build_payload(model.unwrap_or(DEFAULT_MODEL), messages);
 
             let client = reqwest::Client::new();
@@ -70,13 +74,14 @@ impl ChatProvider for MinimaxProvider {
                 .json(&payload)
                 .send()
                 .await
-                .map_err(|_| ProviderError::Network { provider: self.id().to_string() })?;
+                .map_err(|_| ProviderError::Network {
+                    provider: self.id().to_string(),
+                })?;
 
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|_| ProviderError::Network { provider: self.id().to_string() })?;
+            let body = response.text().await.map_err(|_| ProviderError::Network {
+                provider: self.id().to_string(),
+            })?;
 
             if !status.is_success() {
                 return Err(ProviderError::Http {
@@ -85,14 +90,18 @@ impl ChatProvider for MinimaxProvider {
                 });
             }
 
-            let parsed: OpenAiChatResponse = serde_json::from_str(&body)
-                .map_err(|_| ProviderError::Parse { provider: self.id().to_string() })?;
+            let parsed: OpenAiChatResponse =
+                serde_json::from_str(&body).map_err(|_| ProviderError::Parse {
+                    provider: self.id().to_string(),
+                })?;
 
             let raw_content = parsed
                 .choices
                 .first()
                 .and_then(|choice| choice.message.content.clone())
-                .ok_or_else(|| ProviderError::EmptyContent { provider: self.id().to_string() })?;
+                .ok_or_else(|| ProviderError::EmptyContent {
+                    provider: self.id().to_string(),
+                })?;
 
             // Strip `<think>...</think>` reasoning blocks — the provider emits
             // them in the assistant content and they're useful to the model
@@ -100,7 +109,9 @@ impl ChatProvider for MinimaxProvider {
             // literal tag pair never appears in this source file.
             let content = strip_thinking(&raw_content);
             if content.trim().is_empty() {
-                return Err(ProviderError::EmptyContent { provider: self.id().to_string() });
+                return Err(ProviderError::EmptyContent {
+                    provider: self.id().to_string(),
+                });
             }
 
             Ok(ChatResponse {

@@ -30,8 +30,8 @@ pub fn build_skill_system_message(skill_id: &str, raw: &str) -> Option<ChatMessa
     let rest = raw.strip_prefix("---")?;
     let end = rest.find("---")?;
     let frontmatter = rest[..end].trim();
-    let name = extract_frontmatter_value(frontmatter, "name")
-        .unwrap_or_else(|| skill_id.to_string());
+    let name =
+        extract_frontmatter_value(frontmatter, "name").unwrap_or_else(|| skill_id.to_string());
     let body = raw.splitn(3, "---").nth(2).unwrap_or("").trim();
     if body.is_empty() {
         return None;
@@ -309,7 +309,7 @@ mod tests {
     fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
         // tauri 2 already pins a single-thread executor via reqwest's tokio
         // runtime, so we can poll the future directly in a tight loop.
-        use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
         fn dummy_waker() -> Waker {
             fn no_op(_: *const ()) {}

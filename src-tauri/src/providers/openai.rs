@@ -58,10 +58,14 @@ impl ChatProvider for OpenAiProvider {
         _skill_message: Option<&'a ChatMessage>,
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = std::env::var(ENV_VAR)
-                .map_err(|_| ProviderError::MissingApiKey { provider: self.id().to_string() })?;
+            let api_key = std::env::var(ENV_VAR).map_err(|_| ProviderError::MissingApiKey {
+                provider: self.id().to_string(),
+            })?;
 
-            let endpoint = format!("{}/chat/completions", DEFAULT_BASE_URL.trim_end_matches('/'));
+            let endpoint = format!(
+                "{}/chat/completions",
+                DEFAULT_BASE_URL.trim_end_matches('/')
+            );
             let payload = serde_json::json!({
                 "model": model.unwrap_or(DEFAULT_MODEL),
                 "messages": messages,
@@ -74,13 +78,14 @@ impl ChatProvider for OpenAiProvider {
                 .json(&payload)
                 .send()
                 .await
-                .map_err(|_| ProviderError::Network { provider: self.id().to_string() })?;
+                .map_err(|_| ProviderError::Network {
+                    provider: self.id().to_string(),
+                })?;
 
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|_| ProviderError::Network { provider: self.id().to_string() })?;
+            let body = response.text().await.map_err(|_| ProviderError::Network {
+                provider: self.id().to_string(),
+            })?;
 
             if !status.is_success() {
                 return Err(ProviderError::Http {
@@ -89,15 +94,19 @@ impl ChatProvider for OpenAiProvider {
                 });
             }
 
-            let parsed: OpenAiChatResponse = serde_json::from_str(&body)
-                .map_err(|_| ProviderError::Parse { provider: self.id().to_string() })?;
+            let parsed: OpenAiChatResponse =
+                serde_json::from_str(&body).map_err(|_| ProviderError::Parse {
+                    provider: self.id().to_string(),
+                })?;
 
             let content = parsed
                 .choices
                 .first()
                 .and_then(|choice| choice.message.content.clone())
                 .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| ProviderError::EmptyContent { provider: self.id().to_string() })?;
+                .ok_or_else(|| ProviderError::EmptyContent {
+                    provider: self.id().to_string(),
+                })?;
 
             Ok(ChatResponse {
                 content,

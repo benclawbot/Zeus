@@ -149,16 +149,28 @@ fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<_>>()?;
     if !columns.iter().any(|c| c == "messages_json") {
-        conn.execute("ALTER TABLE sessions ADD COLUMN messages_json TEXT NOT NULL DEFAULT '[]'", [])?;
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN messages_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
     }
     if !columns.iter().any(|c| c == "compact_from_id") {
-        conn.execute("ALTER TABLE sessions ADD COLUMN compact_from_id INTEGER", [])?;
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN compact_from_id INTEGER",
+            [],
+        )?;
     }
     if !columns.iter().any(|c| c == "project_id") {
-        conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT 'zeus'", [])?;
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT 'zeus'",
+            [],
+        )?;
     }
     if !columns.iter().any(|c| c == "project_name") {
-        conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT NOT NULL DEFAULT 'Zeus'", [])?;
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN project_name TEXT NOT NULL DEFAULT 'Zeus'",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -244,6 +256,7 @@ pub fn list_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<Pe
 }
 
 /// Load a single session by id. Returns `None` if the row doesn't exist.
+#[allow(dead_code)]
 pub fn get_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<PersistedSession>> {
     conn.query_row(
         "SELECT id, label, project_id, project_name, last_seen_at, messages_json, compact_from_id
