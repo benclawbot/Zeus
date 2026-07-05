@@ -32,6 +32,21 @@ import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, type ProviderInfo } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
+import {
+  runShellCommand,
+  readWorkspaceFile,
+  writeWorkspaceFile,
+  applyWorkspaceEdit,
+  runAgentTask,
+  parseShellWords,
+  type ShellCommandResult,
+  type WriteWorkspaceFileResult,
+  type ApplyWorkspaceEditResult,
+  type ReadWorkspaceFileResult,
+  type AgentRunResult,
+  type AgentStepRequest,
+} from "./providers/workspace";
+import { ToolRunPanel, type ToolRunEntry } from "./components/ToolRunPanel";
 import "./styles.css";
 
 type AccessMode = "Full" | "Local" | "Review" | "Locked";
@@ -77,6 +92,54 @@ interface AttachedFile {
   previewUrl?: string;
 }
 
+// Parse a fenced `tool` block from the model's response. The model is told
+// (via SYSTEM_PROMPT) to emit exactly one block per turn, with one JSON step
+// per line. We extract the steps; the surrounding text stays in the chat
+// bubble so the user sees the model's commentary.
+function parseToolBlock(text: string): AgentStepRequest[] | null {
+  const match = text.match(/```tool\s*\n([\s\S]*?)\n```/);
+  if (!match) return null;
+  const steps: AgentStepRequest[] = [];
+  for (const rawLine of match[1].split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const space = line.indexOf(" ");
+    if (space < 0) continue;
+    const kind = line.slice(0, space).trim();
+    const json = line.slice(space + 1).trim();
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(json); } catch { continue; }
+    if (kind === "readFile" && typeof parsed.path === "string") {
+      steps.push({ kind: "readFile", path: parsed.path });
+    } else if (kind === "writeFile" && typeof parsed.path === "string" && typeof parsed.content === "string") {
+      steps.push({
+        kind: "writeFile",
+        path: parsed.path,
+        content: parsed.content,
+        create: parsed.create === true,
+        overwrite: parsed.overwrite === true,
+      });
+    } else if (kind === "editFile" && typeof parsed.path === "string" && typeof parsed.find === "string" && typeof parsed.replace === "string") {
+      steps.push({
+        kind: "editFile",
+        path: parsed.path,
+        find: parsed.find,
+        replace: parsed.replace,
+        replaceAll: parsed.replaceAll === true,
+      });
+    } else if (kind === "runCommand" && typeof parsed.program === "string" && Array.isArray(parsed.args)) {
+      steps.push({
+        kind: "runCommand",
+        program: parsed.program,
+        args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
+        cwd: typeof parsed.cwd === "string" ? parsed.cwd : undefined,
+        timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
+      });
+    }
+  }
+  return steps.length > 0 ? steps : null;
+}
+
 interface GoalState {
   objective: string;
   status: "active" | "complete";
@@ -100,7 +163,17 @@ const mergeCandidateRules = [
   { label: "Debugging and root-cause analysis", ids: ["5-why", "debugging-and-error-recovery"] },
 ];
 
-const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.";
+const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
+  "When the user asks you to inspect or modify files in the workspace, or to run a shell command, emit a fenced `tool` block listing the steps you want to execute. Each step is one line in JSON.\n" +
+  "Example:\n" +
+  "```tool\n" +
+  "readFile {\"path\":\"src/foo.ts\"}\n" +
+  "runCommand {\"program\":\"npm\",\"args\":[\"test\"]}\n" +
+  "editFile {\"path\":\"src/foo.ts\",\"find\":\"old\",\"replace\":\"new\",\"replaceAll\":false}\n" +
+  "```\n" +
+  "Available step kinds: readFile, writeFile, editFile, runCommand.\n" +
+  "After the steps run, the workspace tool panel shows the diff/log; you will see the results in the next turn and can ask for more steps.\n" +
+  "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.";
 const COMPACT_KEEP_LAST = 6;
 const PROJECT_NAME = "Zeus";
 const DEFAULT_PROJECT: ProjectRef = { id: "zeus", name: "Zeus" };
@@ -187,6 +260,11 @@ export function App() {
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
   const [provider] = useState("minimax");
+  // Tool execution results live in the chat as zeus bubbles (so they persist
+  // with the session) AND in a parallel ToolRunEntry[] feed so the workspace
+  // panel can render diffs, policy decisions, and step logs without
+  // re-parsing chat text. Newest entries first.
+  const [toolRuns, setToolRuns] = useState<ToolRunEntry[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -401,6 +479,163 @@ export function App() {
     setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
   }
 
+  function recordToolRun(entry: ToolRunEntry) {
+    setToolRuns((entries) => [entry, ...entries].slice(0, 50));
+  }
+
+  function adoptProposedHarnessRule(rule: string) {
+    // When the agent run auto-generates a harness rule, replace the current
+    // pending proposal with one derived from it. This closes the loop between
+    // real agent execution and the harness evolution surface.
+    const id = `agent-${Date.now()}`;
+    setProposal({
+      id,
+      title: "Agent-suggested harness rule",
+      summary: rule.length > 140 ? `${rule.slice(0, 137)}...` : rule,
+      body: rule,
+      status: "ready",
+    });
+    setProposalEditing(false);
+    const at = new Date().toISOString();
+    const newEntry: HarnessHistoryEntry = { proposalId: id, action: "ready", at };
+    setHistory((entries) => [newEntry, ...entries].slice(0, 4));
+  }
+
+  function summarizeRun(result: ShellCommandResult): string {
+    const head = result.exitCode === 0 ? "ran" : result.timedOut ? "timed out" : `exit ${result.exitCode ?? "?"}`;
+    const tail = result.stdout.trim() || result.stderr.trim();
+    const trimmed = tail.length > 320 ? `${tail.slice(0, 317)}...` : tail;
+    const policy = `policy: ${result.policy.commandClass} / ${result.policy.accessMode}${result.policy.approvalRequired && !result.policy.approved ? " (needs approval)" : ""}`;
+    return `${head} \`${result.program} ${result.args.join(" ")}` +
+      `${result.timedOut ? " [timed out]" : ""}` +
+      ` (${result.durationMs}ms)` +
+      `${trimmed ? `\n\n${trimmed}` : ""}\n\n${policy}`;
+  }
+
+  function summarizeWrite(result: WriteWorkspaceFileResult): string {
+    return `wrote ${result.path} (${result.bytesWritten} bytes${result.created ? ", created" : ""})`;
+  }
+
+  function summarizeEdit(result: ApplyWorkspaceEditResult): string {
+    return `edited ${result.path} (${result.replacements} replacement${result.replacements === 1 ? "" : "s"}, ${result.bytesWritten} bytes)`;
+  }
+
+  function summarizeRead(result: ReadWorkspaceFileResult): string {
+    const preview = result.content.length > 480 ? `${result.content.slice(0, 477)}...` : result.content;
+    return `read ${result.path} (${result.bytesRead} bytes${result.truncated ? ", truncated" : ""})\n\n\`\`\`\n${preview}\n\`\`\``;
+  }
+
+  function summarizeAgentRun(result: AgentRunResult): string {
+    return `agent run ${result.completed ? "completed" : "failed"} — ${result.summary}` +
+      (result.filesTouched.length ? `\n\nfiles touched: ${result.filesTouched.join(", ")}` : "") +
+      (result.proposedHarnessRule ? `\n\nproposed harness rule: ${result.proposedHarnessRule}` : "");
+  }
+
+  async function handleShellCommand(input: string): Promise<boolean> {
+    const trimmed = input.replace(/^\/run\s+/, "").trim();
+    if (!trimmed) { appendZeusMessage("Usage: /run <command>"); return true; }
+    if (!isTauri) { appendZeusMessage("Shell execution is only available inside the Zeus desktop runtime."); return true; }
+    let words: string[];
+    try { words = parseShellWords(trimmed); } catch (err) {
+      appendZeusMessage(`Shell parse failed: ${err instanceof Error ? err.message : String(err)}`);
+      return true;
+    }
+    if (words.length === 0) { appendZeusMessage("Empty shell command."); return true; }
+    const [program, ...args] = words;
+    setRunState("running");
+    try {
+      const result = await runShellCommand({ program, args });
+      recordToolRun({ kind: "shell", at: new Date().toISOString(), shell: result });
+      appendZeusMessage(summarizeRun(result));
+      setRunState(result.exitCode === 0 ? "idle" : "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "shell", at: new Date().toISOString(), error: message });
+      appendZeusMessage(`Shell failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat }), 0);
+    }
+    return true;
+  }
+
+  async function handleReadCommand(input: string): Promise<boolean> {
+    const path = input.replace(/^\/read\s+/, "").trim();
+    if (!path) { appendZeusMessage("Usage: /read <path>"); return true; }
+    if (!isTauri) { appendZeusMessage("Workspace file reads are only available inside the Zeus desktop runtime."); return true; }
+    setRunState("running");
+    try {
+      const result = await readWorkspaceFile(path);
+      recordToolRun({ kind: "read", at: new Date().toISOString(), read: result, path });
+      appendZeusMessage(summarizeRead(result));
+      setRunState("idle");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "read", at: new Date().toISOString(), error: message, path });
+      appendZeusMessage(`Read failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat }), 0);
+    }
+    return true;
+  }
+
+  async function handleWriteCommand(input: string): Promise<boolean> {
+    // Format: /write <path> :: <content>
+    const body = input.replace(/^\/write\s+/, "").trim();
+    const sep = body.indexOf("::");
+    if (sep < 0) { appendZeusMessage("Usage: /write <path> :: <content>"); return true; }
+    const path = body.slice(0, sep).trim();
+    const content = body.slice(sep + 2).replace(/^\n/, "");
+    if (!path) { appendZeusMessage("Write target path is required."); return true; }
+    if (!isTauri) { appendZeusMessage("Workspace file writes are only available inside the Zeus desktop runtime."); return true; }
+    setRunState("running");
+    try {
+      const result = await writeWorkspaceFile({ path, content, create: true, overwrite: true });
+      recordToolRun({ kind: "write", at: new Date().toISOString(), write: result, path });
+      appendZeusMessage(summarizeWrite(result));
+      setRunState("idle");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "write", at: new Date().toISOString(), error: message, path });
+      appendZeusMessage(`Write failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat }), 0);
+    }
+    return true;
+  }
+
+  async function handleEditCommand(input: string): Promise<boolean> {
+    // Format: /edit <path> :: <find> => <replace>
+    const body = input.replace(/^\/edit\s+/, "").trim();
+    const sep = body.indexOf("::");
+    if (sep < 0) { appendZeusMessage("Usage: /edit <path> :: <find> => <replace>"); return true; }
+    const path = body.slice(0, sep).trim();
+    const tail = body.slice(sep + 2);
+    const arrow = tail.indexOf("=>");
+    if (arrow < 0) { appendZeusMessage("Usage: /edit <path> :: <find> => <replace>"); return true; }
+    const find = tail.slice(0, arrow).replace(/\n$/, "");
+    const replace = tail.slice(arrow + 2).replace(/^\n/, "");
+    if (!path) { appendZeusMessage("Edit target path is required."); return true; }
+    if (!isTauri) { appendZeusMessage("Workspace file edits are only available inside the Zeus desktop runtime."); return true; }
+    setRunState("running");
+    try {
+      const result = await applyWorkspaceEdit({ path, find, replace, replaceAll: false });
+      recordToolRun({ kind: "edit", at: new Date().toISOString(), edit: result, path });
+      appendZeusMessage(summarizeEdit(result));
+      setRunState("idle");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "edit", at: new Date().toISOString(), error: message, path });
+      appendZeusMessage(`Edit failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat }), 0);
+    }
+    return true;
+  }
+
   function handleGoalCommand(prompt: string) {
     const objective = prompt.slice("/goal".length).trim();
     if (!objective) {
@@ -480,6 +715,10 @@ export function App() {
     if (prompt === "/compact") { setMessage(""); compactContext(); return; }
     if (prompt === "/stop") { setMessage(""); stopRun(); return; }
     if (prompt === "/goal" || prompt.startsWith("/goal ")) { setMessage(""); handleGoalCommand(prompt); return; }
+    if (prompt.startsWith("/run")) { setMessage(""); void handleShellCommand(prompt); return; }
+    if (prompt.startsWith("/read")) { setMessage(""); void handleReadCommand(prompt); return; }
+    if (prompt.startsWith("/write")) { setMessage(""); void handleWriteCommand(prompt); return; }
+    if (prompt.startsWith("/edit")) { setMessage(""); void handleEditCommand(prompt); return; }
 
     const skillForTurn = activeSkillId;
     const userMessage: ChatMessage = { id: nextMessageId(), role: "user", text: prompt, skillId: skillForTurn ?? undefined };
@@ -521,6 +760,33 @@ export function App() {
       setAttachedFiles([]);
       // Persist the new transcript after the state updater runs.
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
+
+      // Model-driven tool call: if the response includes a fenced `tool`
+      // block, run those steps through runAgentTask and surface the result.
+      // The user sees the model's prose + the tool run panel below; if the
+      // agent run proposes a harness rule, we adopt it as a pending proposal.
+      const steps = parseToolBlock(clean);
+      if (steps && steps.length > 0) {
+        if (!isTauri) {
+          appendZeusMessage("Workspace tool steps require the Zeus desktop runtime.");
+          return;
+        }
+        appendZeusMessage(`running ${steps.length} agent step${steps.length === 1 ? "" : "s"}...`);
+        try {
+          const result = await runAgentTask({
+            objective: prompt,
+            steps,
+            stopOnError: true,
+          });
+          recordToolRun({ kind: "agent", at: new Date().toISOString(), agent: result });
+          appendZeusMessage(summarizeAgentRun(result));
+          if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          recordToolRun({ kind: "agent", at: new Date().toISOString(), error: message });
+          appendZeusMessage(`Agent run failed: ${message}`);
+        }
+      }
     } catch (error) {
       if (controller.signal.aborted) return;
       const text = error instanceof Error ? error.message : "Chat request failed.";
@@ -929,6 +1195,8 @@ export function App() {
                 </div>
               </div>
             </section>
+
+            <ToolRunPanel entries={toolRuns} />
           </>
         ) : (
           <section className="utility-view" aria-label={`${activeView} view`}>

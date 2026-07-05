@@ -322,6 +322,64 @@ describe("App", () => {
     expect(composer.value).toBe("");
   });
 
+  it("/run via direct text run reports when not in the desktop runtime", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+    await user.type(composer, "/run npm test{enter}");
+
+    // In jsdom, isTauriRuntime is false, so the command is dispatched but the
+    // workspace invocation is rejected with the runtime-required error. We
+    // verify the dispatch path: the slash command is recognized, the composer
+    // is cleared, and the panel surface is present.
+    expect(composer.value).toBe("");
+    expect(screen.getByLabelText("Workspace tool runs")).toBeInTheDocument();
+    expect(screen.getByText(/Shell execution is only available inside the Zeus desktop runtime/i)).toBeInTheDocument();
+  });
+
+  it("/read dispatches to the read path with a non-empty argument", async () => {
+      const user = userEvent.setup();
+      render(<App />);
+
+      const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+      await user.type(composer, "/read README.md{enter}");
+
+      // In jsdom isTauri is false; the dispatch path lands on the runtime
+      // guard. We verify the slash command is recognized and the panel exists.
+      expect(composer.value).toBe("");
+      expect(screen.getByLabelText("Workspace tool runs")).toBeInTheDocument();
+      expect(screen.getByText(/Workspace file reads are only available/i)).toBeInTheDocument();
+    });
+
+  it("/write requires a separator and shows usage otherwise", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+    await user.type(composer, "/write missing-separator{enter}");
+
+    expect(composer.value).toBe("");
+    expect(screen.getByText("Usage: /write <path> :: <content>")).toBeInTheDocument();
+  });
+
+  it("/edit requires both separators and shows usage otherwise", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+    await user.type(composer, "/edit path::find{enter}");
+
+    expect(composer.value).toBe("");
+    expect(screen.getByText("Usage: /edit <path> :: <find> => <replace>")).toBeInTheDocument();
+  });
+
+  it("shows the empty tool-run panel on the Home view", () => {
+    render(<App />);
+    expect(screen.getByText("Tool runs")).toBeInTheDocument();
+    expect(screen.getByText("no runs yet")).toBeInTheDocument();
+  });
+
   it("renames recent sessions and creates project groups", async () => {
     const user = userEvent.setup();
     render(<App />);

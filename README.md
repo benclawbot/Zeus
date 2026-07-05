@@ -70,6 +70,27 @@ These capabilities are present in the current codebase and wired through the app
 - Attached files are included in the prompt as structured attachment metadata for the current turn.
 - Attachments clear after a successful provider response.
 
+### Workspace Tool Execution
+
+- `/run <command>`, `/read <path>`, `/write <path> :: <content>`, and
+  `/edit <path> :: <find> => <replace>` slash commands dispatch to the
+  Rust `run_shell_command`, `read_workspace_file`, `write_workspace_file`,
+  and `apply_workspace_edit` Tauri commands. Results land as a chat bubble
+  AND in the Tool Run panel below the composer.
+- The Tool Run panel renders `ShellCommandResult` (exit code, duration,
+  stdout/stderr toggle), `WriteWorkspaceFileResult` / `ApplyWorkspaceEditResult`
+  (unified diff with `-` / `+` lines), and `AgentRunResult` (combined diff,
+  files touched, step log, rollback plan, and any proposed harness rule).
+- Policy decisions (`CommandClass`, `accessMode`, `approvalRequired`) are
+  rendered as colored badges; `run_shell_command` and `run_agent_task`
+  route through `authorize_command` and `authorize_file_write` so the
+  access-mode setting actually gates what runs.
+- The chat model can emit a fenced `tool` block (one JSON step per line:
+  `readFile`, `writeFile`, `editFile`, `runCommand`) to invoke the agent
+  loop. The composer parses it after each response and calls
+  `runAgentTask`; the resulting `proposedHarnessRule` (when present)
+  becomes a pending proposal in the Harness Evolution view.
+
 ### Harness Evolution Workflow
 
 - Harness proposal state is visible in the UI.
@@ -104,15 +125,42 @@ Current tests cover the frontend shell, composer behavior, session/project flows
 
 ## Not Yet Production Ready
 
-The following are intentionally **not** described as production-ready because they are not fully wired as end-to-end agent capabilities yet:
+The following are intentionally **not** described as production-ready:
 
-- Arbitrary local shell command execution.
-- Repository file editing or patch application by the agent.
-- Policy-enforced filesystem, shell, dependency, network, or secret guards.
-- Autonomous code-change loops that modify a repo end to end.
-- Diff/log panels for real task execution.
-- Automatic harness-rule generation from completed sessions.
-- Signed multi-platform release publishing.
+- Signed multi-platform release publishing (CI workflow scaffold lives in
+  the shell/exec branch but is intentionally not wired into the default
+  build).
+- Tool-calling loop that re-prompts the model with tool results across
+  multiple turns. Single-turn tool dispatch is wired; a loop that lets the
+  model chain multiple tool calls into a single user request is not.
+
+Everything else from earlier "not ready" lists is now wired end-to-end:
+
+- Arbitrary local shell command execution: `/run <command>` from the
+  composer dispatches to `run_shell_command`; the result is shown in the
+  chat, the Tool Run panel, and the persisted session. The model can also
+  emit a fenced `tool` block that runs shell steps via `runAgentTask`.
+- Repository file editing / patch application: `/read`, `/write`, `/edit`
+  slash commands plus `readFile`/`writeFile`/`editFile` tool steps land in
+  the same place; `WriteWorkspaceFileResult` and `ApplyWorkspaceEditResult`
+  return unified diffs that the Tool Run panel renders.
+- Policy-enforced filesystem / shell / dependency / network guards:
+  `PolicyDecision` (command class, access mode, approval state) is
+  returned from every shell run and surfaced as a colored badge in the
+  panel; `run_shell_command` and `run_agent_task` route through
+  `authorize_command` and `authorize_file_write` before touching the FS.
+- Autonomous code-change loops that modify a repo end to end:
+  `runAgentTask` orchestrates read/write/edit/runCommand steps with
+  rollback plans, captured diffs, and a step log; the model can trigger it
+  by emitting a fenced `tool` block; the panel shows the full log and the
+  combined diff.
+- Diff/log panels for real task execution: the Tool Run panel below the
+  composer renders `DiffBlock` (unified diff from Rust) plus a
+  numbered step log; the chat bubble also gets a short summary line.
+- Automatic harness-rule generation from completed sessions: when
+  `runAgentTask` returns `proposedHarnessRule`, the chat replaces the
+  pending proposal with one derived from it; the rule shows up in the
+  Harness Evolution panel for the user to approve/edit/reject.
 
 ## Architecture
 
