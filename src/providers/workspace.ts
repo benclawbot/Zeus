@@ -1,6 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "./minimax";
 
+const SESSION_WORKSPACE_DIR_KEY = "zeus.sessionWorkspaceDir";
+
+export function getSelectedWorkspaceDir(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const value = window.localStorage.getItem(SESSION_WORKSPACE_DIR_KEY)?.trim();
+  return value || undefined;
+}
+
+function withSelectedWorkspace<T extends { workspaceDir?: string }>(request: T): T {
+  return { ...request, workspaceDir: request.workspaceDir ?? getSelectedWorkspaceDir() };
+}
+
 export interface PolicyDecision {
   accessMode: string;
   commandClass: string;
@@ -89,12 +101,12 @@ function ensureRuntime(feature: string): void {
 
 export async function runShellCommand(request: ShellCommandRequest): Promise<ShellCommandResult> {
   ensureRuntime("Shell execution");
-  return invoke<ShellCommandResult>("run_shell_command", { request });
+  return invoke<ShellCommandResult>("run_shell_command", { request: withSelectedWorkspace(request) });
 }
 
 export async function readWorkspaceFile(path: string, maxBytes?: number, workspaceDir?: string): Promise<ReadWorkspaceFileResult> {
   ensureRuntime("Workspace file reads");
-  return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: { path, maxBytes, workspaceDir } });
+  return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: withSelectedWorkspace({ path, maxBytes, workspaceDir }) });
 }
 
 export async function writeWorkspaceFile(args: {
@@ -107,7 +119,7 @@ export async function writeWorkspaceFile(args: {
   approved?: boolean;
 }): Promise<WriteWorkspaceFileResult> {
   ensureRuntime("Workspace file writes");
-  return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: args });
+  return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: withSelectedWorkspace(args) });
 }
 
 export async function applyWorkspaceEdit(args: {
@@ -119,12 +131,12 @@ export async function applyWorkspaceEdit(args: {
   approved?: boolean;
 }): Promise<ApplyWorkspaceEditResult> {
   ensureRuntime("Workspace file edits");
-  return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: args });
+  return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace(args) });
 }
 
 export async function runAgentTask(request: AgentRunRequest): Promise<AgentRunResult> {
   ensureRuntime("Agent task execution");
-  return invoke<AgentRunResult>("run_agent_task", { request });
+  return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace(request) });
 }
 
 export function parseShellWords(input: string): string[] {
