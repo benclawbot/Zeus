@@ -75,7 +75,7 @@ export function WorkspaceDirectoryControl() {
         aria-label="Working directory path"
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
-        placeholder="Use app working directory"
+        placeholder="Paste folder path to restrict this session"
         style={{
           width: "min(360px, 42vw)",
           border: "1px solid #d9ddea",
@@ -85,7 +85,7 @@ export function WorkspaceDirectoryControl() {
           background: "#ffffff",
         }}
       />
-      <button type="button" onClick={save} style={buttonStyle}>Save</button>
+      <button type="button" onClick={save} style={buttonStyle}>Use folder</button>
       {saved ? <button type="button" onClick={clear} style={buttonStyle}>Clear</button> : null}
       <span
         title={saved || "App process working directory"}
