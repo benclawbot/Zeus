@@ -56,6 +56,30 @@ const BUILTINS: BuiltinCommand[] = [
     description: "Set or view the active objective for this Zeus session.",
     kind: "builtin",
   },
+  {
+    id: "run",
+    label: "/run",
+    description: "Run a guarded workspace shell command. Example: /run npm test",
+    kind: "builtin",
+  },
+  {
+    id: "read",
+    label: "/read",
+    description: "Read a file inside the configured workspace. Example: /read package.json",
+    kind: "builtin",
+  },
+  {
+    id: "write",
+    label: "/write",
+    description: "Create or overwrite a workspace file. Format: /write path :: content",
+    kind: "builtin",
+  },
+  {
+    id: "edit",
+    label: "/edit",
+    description: "Replace text in a workspace file. Format: /edit path :: find => replace",
+    kind: "builtin",
+  },
 ];
 
 /**

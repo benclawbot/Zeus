@@ -11,6 +11,7 @@ use tauri::Manager;
 
 mod persistence;
 mod providers;
+mod workspace;
 
 use persistence::{
     list_sessions as db_list_sessions, open_and_init, save_session as db_save_session,
@@ -20,6 +21,14 @@ use persistence::{
 use providers::{
     build_skill_system_message, dispatch_chat, list_provider_info, ChatMessage, ChatRequest,
     ChatResponse, ProviderInfo,
+};
+use workspace::{
+    apply_workspace_edit as apply_workspace_edit_impl, read_workspace_file as read_workspace_file_impl,
+    run_agent_task as run_agent_task_impl, run_shell_command as run_shell_command_impl,
+    write_workspace_file as write_workspace_file_impl, AgentRunRequest, AgentRunResult,
+    ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult, ReadWorkspaceFileRequest,
+    ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult, WriteWorkspaceFileRequest,
+    WriteWorkspaceFileResult,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -233,6 +242,12 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
 }
 
+fn current_access_mode(conn: &Connection) -> Result<Option<String>, String> {
+    persistence::load_state(conn)
+        .map(|state| state.access_mode)
+        .map_err(|e| format!("load access mode: {e}"))
+}
+
 #[tauri::command]
 async fn send_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatResponse, String> {
     // Inject the skill context (if any) on the Rust side so we don't have
@@ -375,6 +390,61 @@ fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn run_shell_command(
+    state: tauri::State<'_, AppState>,
+    request: ShellCommandRequest,
+) -> Result<ShellCommandResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    run_shell_command_impl(request, access_mode.as_deref())
+}
+
+#[tauri::command]
+fn read_workspace_file(
+    request: ReadWorkspaceFileRequest,
+) -> Result<ReadWorkspaceFileResult, String> {
+    read_workspace_file_impl(request)
+}
+
+#[tauri::command]
+fn write_workspace_file(
+    state: tauri::State<'_, AppState>,
+    request: WriteWorkspaceFileRequest,
+) -> Result<WriteWorkspaceFileResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    write_workspace_file_impl(request, access_mode.as_deref())
+}
+
+#[tauri::command]
+fn apply_workspace_edit(
+    state: tauri::State<'_, AppState>,
+    request: ApplyWorkspaceEditRequest,
+) -> Result<ApplyWorkspaceEditResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    apply_workspace_edit_impl(request, access_mode.as_deref())
+}
+
+#[tauri::command]
+fn run_agent_task(
+    state: tauri::State<'_, AppState>,
+    request: AgentRunRequest,
+) -> Result<AgentRunResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    Ok(run_agent_task_impl(request, access_mode.as_deref()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load .env (if present) into the process environment so
@@ -412,6 +482,11 @@ pub fn run() {
             list_sessions_full,
             list_skills,
             load_skill,
+            run_shell_command,
+            read_workspace_file,
+            write_workspace_file,
+            apply_workspace_edit,
+            run_agent_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");
