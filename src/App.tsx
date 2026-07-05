@@ -30,7 +30,7 @@ import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./pr
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
-import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, type ProviderInfo } from "./providers/providers";
+import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import {
   runShellCommand,
@@ -175,6 +175,7 @@ const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
   "After the steps run, the workspace tool panel shows the diff/log; you will see the results in the next turn and can ask for more steps.\n" +
   "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.";
 const COMPACT_KEEP_LAST = 6;
+const MAX_TOOL_TURNS = 6;
 const PROJECT_NAME = "Zeus";
 const DEFAULT_PROJECT: ProjectRef = { id: "zeus", name: "Zeus" };
 const FALLBACK_IMAGE_PREVIEW = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
@@ -265,6 +266,12 @@ export function App() {
   // panel can render diffs, policy decisions, and step logs without
   // re-parsing chat text. Newest entries first.
   const [toolRuns, setToolRuns] = useState<ToolRunEntry[]>([]);
+  // Provider API key state. The Rust side holds the actual values; the
+  // frontend only tracks whether each provider is configured (for the
+  // Settings panel + to know if chat is likely to fail) plus draft
+  // strings the user is currently typing.
+  const [providerKeysStatus, setProviderKeysStatus] = useState<ProviderKeysStatus>({ minimax: false, openai: false, anthropic: false });
+  const [providerKeyDrafts, setProviderKeyDrafts] = useState<{ minimax: string; openai: string; anthropic: string }>({ minimax: "", openai: "", anthropic: "" });
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -739,66 +746,125 @@ export function App() {
     const attachmentsText = attachmentPrompt(attachedFiles);
     const promptWithAttachments = attachmentsText ? `${prompt}\n\nAttached files:\n${attachmentsText}` : prompt;
 
+    // Seed messages: system prompt + compact context + the user's prompt.
+    // The recursive runChatTurn appends the model's last reply and any tool
+    // results, so subsequent iterations see the full picture.
+    const seedMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...contextMessages,
+      { role: "user", content: promptWithAttachments },
+    ];
+
+    await runChatTurn(seedMessages, thinkingMessage.id, controller.signal, 0, prompt);
+
+    if (!controller.signal.aborted) setRunState("idle");
+    abortRef.current = null;
+    return;
+  }
+
+  // Recursive multi-turn chat driver. After each model response, scans for
+  // a fenced `tool` block. If found, runs the steps through runAgentTask,
+  // appends the result to the chat, then re-prompts the model with the
+  // updated history so it can either chain another tool call or produce
+  // a final answer. Bounded by MAX_TOOL_TURNS to prevent runaway loops.
+  async function runChatTurn(
+    seedMessages: { role: "system" | "user" | "assistant"; content: string }[],
+    thinkingBubbleId: number,
+    signal: AbortSignal,
+    depth: number,
+    originalPrompt: string,
+  ): Promise<void> {
+    if (signal.aborted) return;
+    const skillForTurn = activeSkillId;
     try {
       const response = await dispatchChat({
         provider,
         skillId: skillForTurn ?? undefined,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...contextMessages,
-          { role: "user", content: promptWithAttachments },
-        ],
+        messages: seedMessages,
       });
-      if (controller.signal.aborted) return;
+      if (signal.aborted) return;
       const clean = stripThinkingTags(response.content);
       let nextChat: ChatMessage[] = [];
       setChat((entries) => {
-        nextChat = entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text: clean, thinking: false } : entry);
+        nextChat = entries.map((entry) => entry.id === thinkingBubbleId ? { ...entry, text: clean, thinking: false } : entry);
         return nextChat;
       });
-      setRunState("idle");
       setAttachedFiles([]);
-      // Persist the new transcript after the state updater runs.
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
 
-      // Model-driven tool call: if the response includes a fenced `tool`
-      // block, run those steps through runAgentTask and surface the result.
-      // The user sees the model's prose + the tool run panel below; if the
-      // agent run proposes a harness rule, we adopt it as a pending proposal.
+      // No tool block: the model gave a final answer. Done.
       const steps = parseToolBlock(clean);
-      if (steps && steps.length > 0) {
-        if (!isTauri) {
-          appendZeusMessage("Workspace tool steps require the Zeus desktop runtime.");
-          return;
-        }
-        appendZeusMessage(`running ${steps.length} agent step${steps.length === 1 ? "" : "s"}...`);
-        try {
-          const result = await runAgentTask({
-            objective: prompt,
-            steps,
-            stopOnError: true,
-          });
-          recordToolRun({ kind: "agent", at: new Date().toISOString(), agent: result });
-          appendZeusMessage(summarizeAgentRun(result));
-          if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          recordToolRun({ kind: "agent", at: new Date().toISOString(), error: message });
-          appendZeusMessage(`Agent run failed: ${message}`);
-        }
+      if (!steps || steps.length === 0) return;
+
+      // Bound recursion. If the model keeps asking for tools past the cap,
+      // surface a clear message instead of silently stopping.
+      if (depth >= MAX_TOOL_TURNS) {
+        appendZeusMessage(`Stopped after ${MAX_TOOL_TURNS} tool turns. The model kept requesting workspace actions without producing a final answer.`);
+        return;
       }
+
+      if (!isTauri) {
+        appendZeusMessage("Workspace tool steps require the Zeus desktop runtime.");
+        return;
+      }
+
+      // Run the requested steps. Show progress and the result in the chat.
+      appendZeusMessage(`running ${steps.length} agent step${steps.length === 1 ? "" : "s"}...`);
+      let agentResult: AgentRunResult | null = null;
+      let agentError: string | null = null;
+      try {
+        const result = await runAgentTask({
+          objective: originalPrompt,
+          steps,
+          stopOnError: false,
+        });
+        agentResult = result;
+        recordToolRun({ kind: "agent", at: new Date().toISOString(), agent: result });
+        appendZeusMessage(summarizeAgentRun(result));
+        if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
+      } catch (err) {
+        agentError = err instanceof Error ? err.message : String(err);
+        recordToolRun({ kind: "agent", at: new Date().toISOString(), error: agentError });
+        appendZeusMessage(`Agent run failed: ${agentError}`);
+      }
+
+      if (signal.aborted) return;
+
+      // Build the next-turn messages: prior history + model reply + tool
+      // result. The model sees the result and can chain another tool call
+      // or emit a final summary.
+      const toolSummary = agentResult
+        ? `Tool result for the \`tool\` block you just emitted:\n\n${summarizeAgentRun(agentResult)}\n\nFiles touched: ${agentResult.filesTouched.join(", ") || "(none)"}\nDiff:\n\`\`\`\n${agentResult.diff || "(no diff)"}\n\`\`\`\n\nNow either emit another \`tool\` block if more steps are needed, or respond to the user with a plain-text summary.`
+        : `Tool result for the \`tool\` block you just emitted:\n\nFAILED: ${agentError}\n\nEither retry with a corrected \`tool\` block or respond to the user explaining what went wrong.`;
+
+      // Append a fresh thinking bubble for the next turn.
+      const nextThinkingId = nextMessageId();
+      setChat((entries) => [...entries, { id: nextThinkingId, role: "zeus", text: "", thinking: true }]);
+      // Snapshot the latest chat into a fresh context for the recursive call.
+      const nextHistorySnapshot = nextChat as UiChatBubble[];
+      const nextContextMessages = buildContextMessages(nextHistorySnapshot, compactFromId);
+      const nextMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...nextContextMessages,
+      ];
+
+      await runChatTurn(nextMessages, nextThinkingId, signal, depth + 1, originalPrompt);
     } catch (error) {
-      if (controller.signal.aborted) return;
-      const text = error instanceof Error ? error.message : "Chat request failed.";
+      if (signal.aborted) return;
+      const rawText = error instanceof Error ? error.message : "Chat request failed.";
+      // If the error looks like a missing/invalid provider key, append a
+      // clear hint pointing the user at the Settings panel.
+      const looksLikeKeyIssue = /api[_\s-]?key|missing\s+api|unauthor/i.test(rawText);
+      const text = looksLikeKeyIssue
+        ? `${rawText}\n\nSet your provider key in Settings (provider API keys section) to enable chat.`
+        : rawText;
       let nextChat: ChatMessage[] = [];
       setChat((entries) => {
-        nextChat = entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text, thinking: false } : entry);
+        nextChat = entries.map((entry) => entry.id === thinkingBubbleId ? { ...entry, text, thinking: false } : entry);
         return nextChat;
       });
       setRunState("error");
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
-    } finally {
-      abortRef.current = null;
     }
   }
 
@@ -940,6 +1006,44 @@ export function App() {
       .catch((error) => { if (cancelled) return; setSkillsError(error instanceof Error ? error.message : "Skill loading failed."); setSkillDetailStatus("error"); });
     return () => { cancelled = true; };
   }, [activeView, selectedSkillId]);
+
+  // Load provider API key status (which providers have a key configured)
+  // whenever the Settings view opens. We never see the actual key values
+  // — just a boolean per provider.
+  useEffect(() => {
+    if (activeView !== "Settings") return;
+    if (!isTauri) {
+      setProviderKeysStatus({ minimax: false, openai: false, anthropic: false });
+      return;
+    }
+    let cancelled = false;
+    getProviderKeys().then((status) => { if (cancelled) return; setProviderKeysStatus(status); })
+      .catch((err) => { if (cancelled) return; console.warn("get_provider_keys failed", err); });
+    return () => { cancelled = true; };
+  }, [activeView, isTauri]);
+
+  async function handleSaveProviderKey(provider: "minimax" | "openai" | "anthropic", value: string) {
+    if (!isTauri) return;
+    const payload = { [provider]: value } as { minimax?: string; openai?: string; anthropic?: string };
+    try {
+      await setProviderKeys(payload);
+      setProviderKeysStatus((current) => ({ ...current, [provider]: value.trim().length > 0 }));
+      setProviderKeyDrafts((current) => ({ ...current, [provider]: "" }));
+    } catch (err) {
+      console.warn("set_provider_keys failed", err);
+    }
+  }
+
+  async function handleClearProviderKey(provider: "minimax" | "openai" | "anthropic") {
+    if (!isTauri) return;
+    try {
+      await setProviderKeys({ [provider]: "" });
+      setProviderKeysStatus((current) => ({ ...current, [provider]: false }));
+      setProviderKeyDrafts((current) => ({ ...current, [provider]: "" }));
+    } catch (err) {
+      console.warn("clear provider key failed", err);
+    }
+  }
 
   return (
     <main className="app-shell">
@@ -1290,11 +1394,52 @@ export function App() {
               </div>
             )}
             {activeView === "Settings" && (
-              <div className="utility-card">
+              <div className="utility-card settings-card">
                 <p className="section-label">Access mode</p>
                 <p>Active mode: <strong>{accessMode}</strong></p>
                 <p className="skills-muted">{accessSummary}</p>
                 <p className="skills-muted">Change the mode from the listbox in the composer.</p>
+
+                <p className="section-label">Provider API keys</p>
+                <p className="skills-muted">Keys are stored in the app data folder and never leave your machine. The frontend never sees the raw value — only whether a key is configured.</p>
+                {([
+                  { id: "minimax" as const, label: "MiniMax (MINIMAX_API_KEY)", help: "Default provider. Get a key from https://api.minimax.io." },
+                  { id: "openai" as const, label: "OpenAI (OPENAI_API_KEY)", help: "Set if you want to route through OpenAI's API." },
+                  { id: "anthropic" as const, label: "Anthropic (ANTHROPIC_API_KEY)", help: "Set if you want to route through Anthropic's API." },
+                ]).map((row) => (
+                  <form
+                    key={row.id}
+                    aria-label={row.label}
+                    className="provider-key-row"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const value = providerKeyDrafts[row.id];
+                      if (!value.trim()) return;
+                      void handleSaveProviderKey(row.id, value);
+                    }}
+                  >
+                    <div className="provider-key-meta">
+                      <strong>{row.label}</strong>
+                      <span className={providerKeysStatus[row.id] ? "provider-key-status ok" : "provider-key-status missing"}>
+                        {providerKeysStatus[row.id] ? "configured" : "not configured"}
+                      </span>
+                    </div>
+                    <p className="skills-muted">{row.help}</p>
+                    <div className="provider-key-input-row">
+                      <input
+                        aria-label={`${row.label} value`}
+                        onChange={(event) => setProviderKeyDrafts((current) => ({ ...current, [row.id]: event.target.value }))}
+                        placeholder={providerKeysStatus[row.id] ? "•••••••• (leave blank to keep current)" : "paste your key here"}
+                        type="password"
+                        value={providerKeyDrafts[row.id]}
+                      />
+                      <button type="submit" disabled={!providerKeyDrafts[row.id].trim()}>Save</button>
+                      {providerKeysStatus[row.id] ? (
+                        <button type="button" onClick={() => void handleClearProviderKey(row.id)}>Clear</button>
+                      ) : null}
+                    </div>
+                  </form>
+                ))}
               </div>
             )}
           </section>
@@ -1332,7 +1477,7 @@ export function App() {
             <div><dt>Session</dt><dd>{activeSession ? `${activeSession.projectName} / ${activeSession.label}` : "none"}</dd></div>
             <div><dt>Goal</dt><dd>{activeGoal?.objective ?? "none"}</dd></div>
             <div><dt>Tech</dt><dd>Tauri, React, Rust, SQLite</dd></div>
-            <div><dt>Provider</dt><dd>{activeProviderLabel}</dd></div>
+            <div><dt>Provider</dt><dd>{activeProviderLabel}{providerKeysStatus.minimax ? "" : activeProviderId === "minimax" ? " (key missing)" : ""}</dd></div>
             <div><dt>Access</dt><dd>{accessMode} — {accessSummary}</dd></div>
             <div><dt>Last action</dt><dd>{history[0] ? `${history[0].action} at ${new Date(history[0].at).toLocaleTimeString()}` : "none"}</dd></div>
           </dl>

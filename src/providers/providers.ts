@@ -32,3 +32,32 @@ export async function setAccessMode(mode: string): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("set_access_mode", { mode });
 }
+
+export interface ProviderKeysStatus {
+  minimax: boolean;
+  openai: boolean;
+  anthropic: boolean;
+}
+
+/**
+ * Returns which providers have a configured API key. The actual values
+ * are NEVER returned to the frontend (security: never round-trip
+ * secrets through the IPC bridge). The frontend uses this to render
+ * the Settings panel and to know whether the chat should be enabled.
+ */
+export async function getProviderKeys(): Promise<ProviderKeysStatus> {
+  if (!isTauriRuntime()) {
+    return { minimax: false, openai: false, anthropic: false };
+  }
+  return invoke<ProviderKeysStatus>("get_provider_keys");
+}
+
+/**
+ * Save / update provider API keys. Empty strings clear the key. After
+ * this call returns, the next `send_chat` invocation will see the new
+ * keys in the process environment.
+ */
+export async function setProviderKeys(keys: { minimax?: string; openai?: string; anthropic?: string }): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("set_provider_keys", { request: keys });
+}

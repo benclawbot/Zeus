@@ -375,10 +375,25 @@ describe("App", () => {
   });
 
   it("shows the empty tool-run panel on the Home view", () => {
-    render(<App />);
-    expect(screen.getByText("Tool runs")).toBeInTheDocument();
-    expect(screen.getByText("no runs yet")).toBeInTheDocument();
-  });
+      render(<App />);
+      expect(screen.getByText("Tool runs")).toBeInTheDocument();
+      expect(screen.getByText("no runs yet")).toBeInTheDocument();
+    });
+
+    it("shows the Settings view with a provider API keys form", async () => {
+      const user = userEvent.setup();
+      render(<App />);
+
+      await user.click(screen.getByRole("button", { name: "Settings" }));
+
+      // Three provider rows should be visible, each labeled with the env var name.
+      expect(screen.getByText("MiniMax (MINIMAX_API_KEY)")).toBeInTheDocument();
+      expect(screen.getByText("OpenAI (OPENAI_API_KEY)")).toBeInTheDocument();
+      expect(screen.getByText("Anthropic (ANTHROPIC_API_KEY)")).toBeInTheDocument();
+      // In jsdom isTauri is false, so each provider shows "not configured".
+      const rows = screen.getAllByText("not configured");
+      expect(rows.length).toBe(3);
+    });
 
   it("renames recent sessions and creates project groups", async () => {
     const user = userEvent.setup();

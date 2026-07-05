@@ -1569,3 +1569,103 @@ textarea:focus-visible {
   color: var(--text);
   line-height: 1.5;
 }
+
+/* ===== Settings panel: provider API keys ===== */
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-card .section-label {
+  margin-top: 6px;
+}
+
+.provider-key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.provider-key-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-key-meta strong {
+  font-size: 0.86rem;
+  color: var(--text);
+}
+
+.provider-key-status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.provider-key-status.ok {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.provider-key-status.missing {
+  background: #fef3c7;
+  color: var(--warn);
+}
+
+.provider-key-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.provider-key-input-row input {
+  flex: 1;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.84rem;
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.provider-key-input-row input:focus {
+  outline: 2px solid var(--purple);
+  outline-offset: 1px;
+}
+
+.provider-key-input-row button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 12px;
+  background: var(--purple-soft);
+  color: var(--purple);
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.provider-key-input-row button:hover {
+  background: var(--purple);
+  color: white;
+}
+
+.provider-key-input-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.provider-key-input-row button:disabled:hover {
+  background: var(--purple-soft);
+  color: var(--purple);
+}

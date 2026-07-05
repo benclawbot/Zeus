@@ -248,6 +248,119 @@ fn current_access_mode(conn: &Connection) -> Result<Option<String>, String> {
         .map_err(|e| format!("load access mode: {e}"))
 }
 
+/// Path to the JSON file holding user-supplied provider API keys.
+/// Resolved against the Tauri app data dir.
+fn provider_keys_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+    Ok(dir.join("provider-keys.json"))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderKeysFile {
+    #[serde(default)]
+    minimax: Option<String>,
+    #[serde(default)]
+    openai: Option<String>,
+    #[serde(default)]
+    anthropic: Option<String>,
+}
+
+/// Read provider API keys from disk and apply them to the process env.
+/// Safe to call multiple times — each call overwrites the previous value.
+fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = provider_keys_path(app)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let parsed: ProviderKeysFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    if let Some(value) = parsed.minimax.as_deref() { set_optional_env("MINIMAX_API_KEY", value); }
+    if let Some(value) = parsed.openai.as_deref() { set_optional_env("OPENAI_API_KEY", value); }
+    if let Some(value) = parsed.anthropic.as_deref() { set_optional_env("ANTHROPIC_API_KEY", value); }
+    Ok(())
+}
+
+fn set_optional_env(name: &str, value: &str) {
+    if value.is_empty() {
+        // SAFETY: std::env::remove_var is unsafe in recent Rust because env
+        // writes are not thread-safe with concurrent readers. We serialize
+        // via the std::env API and accept the documented caveat.
+        unsafe { std::env::remove_var(name); }
+    } else {
+        unsafe { std::env::set_var(name, value); }
+    }
+}
+
+/// Frontend payload: each field is the new value for that provider's key.
+/// An empty string clears the key.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetProviderKeysRequest {
+    minimax: Option<String>,
+    openai: Option<String>,
+    anthropic: Option<String>,
+}
+
+/// Save user-supplied provider API keys to disk and apply them to the
+/// current process env so the next `send_chat` sees them. Empty strings
+/// clear the key.
+#[tauri::command]
+fn set_provider_keys(
+    app: tauri::AppHandle,
+    request: SetProviderKeysRequest,
+) -> Result<ProviderKeysFile, String> {
+    let next = ProviderKeysFile {
+        minimax: normalize_key(request.minimax),
+        openai: normalize_key(request.openai),
+        anthropic: normalize_key(request.anthropic),
+    };
+    let path = provider_keys_path(&app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let serialized = serde_json::to_string_pretty(&next)
+        .map_err(|e| format!("serialize keys: {e}"))?;
+    fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))?;
+    load_provider_keys_into_env(&app)?;
+    Ok(next)
+}
+
+fn normalize_key(value: Option<String>) -> Option<String> {
+    value.map(|raw| raw.trim().to_string()).filter(|trimmed| !trimmed.is_empty())
+}
+
+/// Return the persisted provider API keys. The frontend never sees the raw
+/// values in long form — it uses this just to know which providers have a
+/// key configured (presence check).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderKeysStatus {
+    minimax: bool,
+    openai: bool,
+    anthropic: bool,
+}
+
+#[tauri::command]
+fn get_provider_keys(app: tauri::AppHandle) -> Result<ProviderKeysStatus, String> {
+    let path = provider_keys_path(&app)?;
+    if !path.exists() {
+        return Ok(ProviderKeysStatus { minimax: false, openai: false, anthropic: false });
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let parsed: ProviderKeysFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    Ok(ProviderKeysStatus {
+        minimax: parsed.minimax.as_deref().map(str::is_empty) == Some(false),
+        openai: parsed.openai.as_deref().map(str::is_empty) == Some(false),
+        anthropic: parsed.anthropic.as_deref().map(str::is_empty) == Some(false),
+    })
+}
+
 #[tauri::command]
 async fn send_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatResponse, String> {
     // Inject the skill context (if any) on the Rust side so we don't have
@@ -455,6 +568,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
+            // Apply user-saved provider API keys (set via the Settings UI)
+            // on top of whatever .env / process env already has. Missing
+            // file is not an error — the user simply hasn't saved keys yet.
+            let _ = load_provider_keys_into_env(&app.handle());
             // Resolve <app_data_dir>/zeus.db. Tauri creates the dir on
             // first access; open_and_init creates the file and schema.
             let db_path = match app.path().app_data_dir() {
@@ -487,6 +604,8 @@ pub fn run() {
             write_workspace_file,
             apply_workspace_edit,
             run_agent_task,
+            set_provider_keys,
+            get_provider_keys,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");
@@ -806,5 +925,29 @@ mod tests {
         let state = persistence::load_state(&conn).unwrap();
         assert_eq!(state.sessions[0].label, "Updated");
         assert_eq!(state.sessions.len(), 1); // not duplicated
+    }
+
+    #[test]
+    fn normalize_key_trims_and_drops_empty() {
+        assert_eq!(normalize_key(Some("  abc  ".to_string())), Some("abc".to_string()));
+        assert_eq!(normalize_key(Some("".to_string())), None);
+        assert_eq!(normalize_key(Some("   ".to_string())), None);
+        assert_eq!(normalize_key(None), None);
+    }
+
+    #[test]
+    fn provider_keys_round_trip_through_disk() {
+        // Round-trip via the in-memory file struct without going through
+        // the Tauri app handle (which would require a runtime).
+        let parsed = ProviderKeysFile {
+            minimax: Some("sk-test".to_string()),
+            openai: None,
+            anthropic: Some("ant-key".to_string()),
+        };
+        let serialized = serde_json::to_string(&parsed).expect("serialize");
+        let back: ProviderKeysFile = serde_json::from_str(&serialized).expect("parse");
+        assert_eq!(back.minimax.as_deref(), Some("sk-test"));
+        assert!(back.openai.is_none());
+        assert_eq!(back.anthropic.as_deref(), Some("ant-key"));
     }
 }

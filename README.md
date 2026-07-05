@@ -90,6 +90,17 @@ These capabilities are present in the current codebase and wired through the app
   loop. The composer parses it after each response and calls
   `runAgentTask`; the resulting `proposedHarnessRule` (when present)
   becomes a pending proposal in the Harness Evolution view.
+- Multi-turn chaining: after `runAgentTask` returns, the chat driver
+  re-prompts the model with the tool result appended to the conversation
+  history (recursive `runChatTurn`, bounded by `MAX_TOOL_TURNS = 6`).
+  The model can emit another `tool` block to chain actions or finally
+  emit a plain-text summary. Each turn gets its own thinking bubble and
+  its own Tool Run panel entry.
+- Provider API keys: Settings exposes password-style inputs for
+  `MINIMAX_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Saved keys
+  land in `<app_data>/provider-keys.json` and are injected into the
+  process env at startup so chat requests don't fail with "Missing API
+  key". The frontend never sees the raw key value.
 
 ### Harness Evolution Workflow
 
@@ -130,9 +141,6 @@ The following are intentionally **not** described as production-ready:
 - Signed multi-platform release publishing (CI workflow scaffold lives in
   the shell/exec branch but is intentionally not wired into the default
   build).
-- Tool-calling loop that re-prompts the model with tool results across
-  multiple turns. Single-turn tool dispatch is wired; a loop that lets the
-  model chain multiple tool calls into a single user request is not.
 
 Everything else from earlier "not ready" lists is now wired end-to-end:
 
@@ -161,6 +169,17 @@ Everything else from earlier "not ready" lists is now wired end-to-end:
   `runAgentTask` returns `proposedHarnessRule`, the chat replaces the
   pending proposal with one derived from it; the rule shows up in the
   Harness Evolution panel for the user to approve/edit/reject.
+- Multi-turn tool-calling loop: the chat driver recursively re-prompts
+  the model with the tool result, bounded by `MAX_TOOL_TURNS = 6`. The
+  model can chain any number of tool blocks within one user request and
+  finally emit a plain-text summary; the user sees each tool result as
+  its own chat bubble plus a panel entry.
+- Provider API key management: the Settings panel exposes password-style
+  inputs for `MINIMAX_API_KEY`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY`;
+  keys are persisted to `<app_data>/provider-keys.json` and injected into
+  the process env at startup so chat requests no longer fail silently
+  with "Missing API key". Chat errors that look like key/auth issues
+  surface a clear pointer to the Settings panel.
 
 ## Architecture
 
