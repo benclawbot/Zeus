@@ -32,5 +32,16 @@ export async function sendMinimaxChat(options: MinimaxChatOptions): Promise<Mini
     throw new Error("MiniMax is available inside the Zeus desktop runtime.");
   }
 
-  return invoke<MinimaxChatResponse>("send_minimax_chat", { request: options });
+  return invoke<MinimaxChatResponse>("send_chat", {
+    request: {
+      provider: "minimax",
+      messages: options.messages,
+      skillId: options.skillId,
+      options: {
+        model: options.model,
+        baseUrl: options.baseUrl,
+        temperature: options.temperature,
+      },
+    },
+  });
 }
