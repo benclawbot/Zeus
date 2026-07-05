@@ -1,11 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "./minimax";
-
-const SESSION_WORKSPACE_DIR_KEY = "zeus.sessionWorkspaceDir";
+import { ZEUS_WORKSPACE_DIR_KEY } from "../WorkspaceDirectoryControl";
 
 export function getSelectedWorkspaceDir(): string | undefined {
   if (typeof window === "undefined") return undefined;
-  const value = window.localStorage.getItem(SESSION_WORKSPACE_DIR_KEY)?.trim();
+  const value = window.localStorage.getItem(ZEUS_WORKSPACE_DIR_KEY)?.trim();
   return value || undefined;
 }
 
