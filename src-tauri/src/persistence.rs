@@ -30,11 +30,29 @@ pub struct PersistedHistoryEntry {
     pub at: String,
 }
 
+/// One stored session. `messages_json` carries the chat transcript as a
+/// JSON-serialized array (the frontend defines the shape — Rust stays
+/// dumb and just persists whatever the frontend hands it). `compact_from_id`
+/// anchors the LLM-context window: the LLM never sees messages older than
+/// that id even after a relaunch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub id: String,
     pub label: String,
     pub last_seen_at: String,
+    pub messages_json: String,
+    pub compact_from_id: Option<i64>,
+}
+
+/// Request payload for `save_session` (also re-used by the legacy
+/// `upsert_session` command — same shape, two names so the existing
+/// frontend wires don't have to change in lockstep with persistence).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SaveSessionRequest {
+    pub id: String,
+    pub label: String,
+    pub messages_json: String,
+    pub compact_from_id: Option<i64>,
 }
 
 /// Apply edit for a proposal: replace the proposal's stored summary and body
@@ -64,6 +82,7 @@ pub fn open_and_init(path: &std::path::Path) -> Result<Connection, String> {
     }
     let conn = Connection::open(path).map_err(|e| format!("open db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("init schema: {e}"))?;
+    migrate_schema(&conn).map_err(|e| format!("migrate schema: {e}"))?;
     Ok(conn)
 }
 
@@ -97,13 +116,32 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS sessions (
             id              TEXT PRIMARY KEY,
             label           TEXT NOT NULL,
-            last_seen_at    TEXT NOT NULL
+            last_seen_at    TEXT NOT NULL,
+            messages_json   TEXT NOT NULL DEFAULT '[]',
+            compact_from_id INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_history_proposal_at
             ON harness_history(proposal_id, at DESC);
     "#,
     )
+}
+
+/// Bring an older `sessions` table up to the current shape. SQLite's
+/// `CREATE TABLE IF NOT EXISTS` won't add columns to an existing table, so
+/// we explicitly check `PRAGMA table_info` and ALTER as needed. Idempotent.
+fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(sessions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !columns.iter().any(|c| c == "messages_json") {
+        conn.execute("ALTER TABLE sessions ADD COLUMN messages_json TEXT NOT NULL DEFAULT '[]'", [])?;
+    }
+    if !columns.iter().any(|c| c == "compact_from_id") {
+        conn.execute("ALTER TABLE sessions ADD COLUMN compact_from_id INTEGER", [])?;
+    }
+    Ok(())
 }
 
 fn now() -> String {
@@ -155,20 +193,7 @@ pub fn load_state(conn: &Connection) -> rusqlite::Result<PersistedState> {
         )
         .optional()?;
 
-    let sessions = {
-        let mut stmt = conn.prepare(
-            "SELECT id, label, last_seen_at FROM sessions
-             ORDER BY last_seen_at DESC LIMIT 20",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(PersistedSession {
-                id: row.get(0)?,
-                label: row.get(1)?,
-                last_seen_at: row.get(2)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let sessions = list_sessions(conn, 20)?;
 
     Ok(PersistedState {
         proposals,
@@ -176,6 +201,44 @@ pub fn load_state(conn: &Connection) -> rusqlite::Result<PersistedState> {
         access_mode,
         sessions,
     })
+}
+
+/// List the most-recently-seen `limit` sessions. Empty `messages_json`
+/// (the pre-migration default) is deserialized as `[]` on the frontend.
+pub fn list_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<PersistedSession>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, last_seen_at, messages_json, compact_from_id FROM sessions
+         ORDER BY last_seen_at DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(PersistedSession {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            last_seen_at: row.get(2)?,
+            messages_json: row.get(3)?,
+            compact_from_id: row.get(4)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+}
+
+/// Load a single session by id. Returns `None` if the row doesn't exist.
+pub fn get_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<PersistedSession>> {
+    conn.query_row(
+        "SELECT id, label, last_seen_at, messages_json, compact_from_id
+         FROM sessions WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(PersistedSession {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                last_seen_at: row.get(2)?,
+                messages_json: row.get(3)?,
+                compact_from_id: row.get(4)?,
+            })
+        },
+    )
+    .optional()
 }
 
 /// Upsert a proposal. Used both for first-write and on any future state change
@@ -297,7 +360,6 @@ pub fn rollback_proposal(
         )?;
     }
     let _ = latest_snapshot; // explicitly mark used to silence warnings if needed
-                             // Read current body for the snapshot (now either restored or original).
     let current = read_proposal(conn, proposal_id)?;
     append_history(conn, proposal_id, "rolled-back", &current.body, &updated_at)?;
     Ok(current)
@@ -313,11 +375,41 @@ pub fn set_access_mode(conn: &Connection, mode: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Persist a full session — label, transcript, and the compact anchor.
+/// Bumps `last_seen_at` so the row bubbles to the top of the recent list.
+/// Overwrites the row on conflict (same id) so re-saving a session is
+/// idempotent.
+pub fn save_session(conn: &Connection, request: &SaveSessionRequest) -> rusqlite::Result<()> {
+    let at = now();
+    conn.execute(
+        r#"INSERT INTO sessions (id, label, last_seen_at, messages_json, compact_from_id)
+           VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(id) DO UPDATE SET
+             label = excluded.label,
+             last_seen_at = excluded.last_seen_at,
+             messages_json = excluded.messages_json,
+             compact_from_id = excluded.compact_from_id"#,
+        params![
+            request.id,
+            request.label,
+            at,
+            request.messages_json,
+            request.compact_from_id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Backwards-compatible upsert used by the existing `upsert_session` Tauri
+/// command. Stores an empty transcript and no compact anchor — equivalent
+/// to a freshly-created session that the frontend hasn't filled in yet.
 pub fn upsert_session(conn: &Connection, id: &str, label: &str) -> rusqlite::Result<()> {
     let at = now();
     conn.execute(
         r#"INSERT INTO sessions (id, label, last_seen_at) VALUES (?1, ?2, ?3)
-           ON CONFLICT(id) DO UPDATE SET label = excluded.label, last_seen_at = excluded.last_seen_at"#,
+           ON CONFLICT(id) DO UPDATE SET
+             label = excluded.label,
+             last_seen_at = excluded.last_seen_at"#,
         params![id, label, at],
     )?;
     Ok(())
@@ -365,5 +457,153 @@ fn action_to_status(action: &str) -> &str {
         "edited" => "edited",
         "rolled-back" => "rolled-back",
         _ => "ready",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> Connection {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_persist_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("persist.db");
+        let _ = std::fs::remove_file(&path);
+        open_and_init(&path).expect("open")
+    }
+
+    #[test]
+    fn save_session_persists_messages_and_compact_anchor() {
+        let conn = temp_db();
+        save_session(
+            &conn,
+            &SaveSessionRequest {
+                id: "sess-1".to_string(),
+                label: "Refactor auth".to_string(),
+                messages_json: r#"[{"id":1,"role":"user","text":"hi"}]"#.to_string(),
+                compact_from_id: Some(2),
+            },
+        )
+        .unwrap();
+
+        let row = get_session(&conn, "sess-1").unwrap().unwrap();
+        assert_eq!(row.label, "Refactor auth");
+        assert!(row.messages_json.contains("hi"));
+        assert_eq!(row.compact_from_id, Some(2));
+    }
+
+    #[test]
+    fn save_session_is_idempotent_for_same_id() {
+        let conn = temp_db();
+        save_session(
+            &conn,
+            &SaveSessionRequest {
+                id: "sess-1".to_string(),
+                label: "First".to_string(),
+                messages_json: "[]".to_string(),
+                compact_from_id: None,
+            },
+        )
+        .unwrap();
+        save_session(
+            &conn,
+            &SaveSessionRequest {
+                id: "sess-1".to_string(),
+                label: "Updated".to_string(),
+                messages_json: r#"[{"id":1,"role":"user","text":"new"}]"#.to_string(),
+                compact_from_id: Some(3),
+            },
+        )
+        .unwrap();
+        let all = list_sessions(&conn, 10).unwrap();
+        assert_eq!(all.len(), 1, "same id must not duplicate the row");
+        assert_eq!(all[0].label, "Updated");
+        assert!(all[0].messages_json.contains("new"));
+    }
+
+    #[test]
+    fn list_sessions_orders_by_last_seen_at_desc() {
+        let conn = temp_db();
+        save_session(
+            &conn,
+            &SaveSessionRequest {
+                id: "a".into(),
+                label: "alpha".into(),
+                messages_json: "[]".into(),
+                compact_from_id: None,
+            },
+        )
+        .unwrap();
+        // Force a later last_seen_at by sleeping a tick. chrono timestamps
+        // are RFC3339 with nanosecond precision so even a single sleep
+        // call guarantees ordering.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        save_session(
+            &conn,
+            &SaveSessionRequest {
+                id: "b".into(),
+                label: "beta".into(),
+                messages_json: "[]".into(),
+                compact_from_id: None,
+            },
+        )
+        .unwrap();
+        let all = list_sessions(&conn, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, "b");
+        assert_eq!(all[1].id, "a");
+    }
+
+    #[test]
+    fn migrate_schema_adds_columns_to_legacy_sessions_table() {
+        // Build a DB with the old (pre-migration) schema, then open it
+        // through `open_and_init` and verify the new columns exist.
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_migrate_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Hand-craft the legacy table.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('s1', 'legacy', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Re-open through open_and_init — migration should run.
+        let conn = open_and_init(&path).unwrap();
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(sessions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.contains(&"messages_json".to_string()));
+        assert!(columns.contains(&"compact_from_id".to_string()));
+
+        // Existing row should be readable, with default values for the
+        // new columns.
+        let row = get_session(&conn, "s1").unwrap().unwrap();
+        assert_eq!(row.label, "legacy");
+        assert_eq!(row.compact_from_id, None);
     }
 }

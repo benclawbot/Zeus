@@ -13,7 +13,9 @@ mod persistence;
 mod providers;
 
 use persistence::{
-    open_and_init, EditProposalRequest, PersistedProposal, PersistedState, RecordActionRequest,
+    open_and_init, save_session as db_save_session, list_sessions as db_list_sessions,
+    EditProposalRequest, PersistedProposal, PersistedSession, PersistedState, RecordActionRequest,
+    SaveSessionRequest,
 };
 use providers::{
     build_skill_system_message, dispatch_chat, list_provider_info, ChatMessage, ChatRequest,
@@ -282,6 +284,29 @@ fn upsert_session(
     persistence::upsert_session(&conn, &id, &label).map_err(|e| format!("upsert_session: {e}"))
 }
 
+/// Persist a full session — chat transcript + compact anchor. Frontend
+/// calls this after every assistant reply and on every /compact so the
+/// state survives a relaunch.
+#[tauri::command]
+fn save_session(
+    state: tauri::State<'_, AppState>,
+    request: SaveSessionRequest,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    db_save_session(&conn, &request).map_err(|e| format!("save_session: {e}"))
+}
+
+/// List every persisted session (with transcript + compact anchor).
+/// Frontend calls this on mount to populate the recent-sessions list and
+/// to restore the previously-selected session.
+#[tauri::command]
+fn list_sessions_full(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PersistedSession>, String> {
+    let conn = state.db.lock();
+    db_list_sessions(&conn, 50).map_err(|e| format!("list_sessions_full: {e}"))
+}
+
 #[tauri::command]
 fn list_skills(app: tauri::AppHandle) -> Result<Vec<SkillSummary>, String> {
     let root = resolve_skills_dir(&app)?;
@@ -366,6 +391,8 @@ pub fn run() {
             edit_proposal,
             set_access_mode,
             upsert_session,
+            save_session,
+            list_sessions_full,
             list_skills,
             load_skill,
         ])

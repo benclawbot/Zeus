@@ -19,11 +19,13 @@ import {
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { dispatchChat } from "./providers/registry";
 import { isTauriRuntime } from "./providers/minimax";
 import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
 import { useSlashMenu, type SlashItem } from "./providers/slash";
+import { buildContextMessages, type UiChatBubble } from "./providers/context";
+import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import "./styles.css";
 
@@ -42,13 +44,25 @@ interface ChatMessage {
 
 const planItems = [
   { label: "Initialize Tauri + React project", status: "Completed" },
-  { label: "Wire MiniMax M3 adapter", status: "In Progress" },
-  { label: "Implement local memory model", status: "Pending" },
-  { label: "Add harness approvals", status: "Pending" },
-  { label: "Package desktop builds", status: "Pending" },
+  { label: "Wire MiniMax M3 adapter", status: "Completed" },
+  { label: "Pluggable chat providers (OpenAI + Anthropic)", status: "Completed" },
+  { label: "Slash-command composer + skill registry", status: "Completed" },
+  { label: "Local memory model + SQLite persistence", status: "Completed" },
+  { label: "Harness approvals", status: "Completed" },
+  { label: "Package desktop builds", status: "In Progress" },
 ];
 
-const recentSessions = ["Rust CLI Todo App", "API Integration", "Refactor Auth Module", "Add Unit Tests", "UI Bug Fix"];
+interface SessionRef {
+  id: string;
+  label: string;
+}
+
+/**
+ * Seed labels shown on a fresh install before the user has created any
+ * sessions. Clicking one creates a real persisted row so the seed list
+ * disappears after the first interaction.
+ */
+const SEED_SESSION_LABELS = ["Rust CLI Todo App", "API Integration", "Refactor Auth Module", "Add Unit Tests", "UI Bug Fix"];
 
 const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
   { label: "Home", icon: Home },
@@ -88,6 +102,7 @@ export function App() {
   const [history, setHistory] = useState<HarnessHistoryEntry[]>([]);
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [compactFromId, setCompactFromId] = useState<number | null>(null);
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [skillsStatus, setSkillsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -95,7 +110,18 @@ export function App() {
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
   const [skillDetailStatus, setSkillDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [selectedSession, setSelectedSession] = useState(recentSessions[0]);
+  const [recentSessions, setRecentSessions] = useState<SessionRef[]>(
+    // Seed the list with a couple of canned labels so the UI has something
+    // to render on a fresh install (or in the test environment, which
+    // can't hit the Tauri runtime). The Tauri mount effect replaces
+    // these with the real persisted list once Rust answers.
+    SEED_SESSION_LABELS.map((label) => ({ id: label, label })),
+  );
+  const [activeSession, setActiveSession] = useState<SessionRef | null>(
+    SEED_SESSION_LABELS.length > 0 ? { id: SEED_SESSION_LABELS[0], label: SEED_SESSION_LABELS[0] } : null,
+  );
+  const [sessionsStatus, setSessionsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [sessionsError, setSessionsError] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
   const [provider] = useState("minimax");
@@ -130,23 +156,81 @@ export function App() {
     setHistory((entries) => [result.historyEntry, ...entries].slice(0, 4));
   }
 
+  // Persist the active session if there's any meaningful state to save
+  // (chat non-empty OR a non-default compact anchor). Debounced internally
+  // via the React state — callers fire-and-forget, errors are logged but
+  // never thrown into the UI.
+  const persistActiveSession = React.useCallback(
+    (overrides?: { id?: string; label?: string; chat?: ChatMessage[]; compactFromId?: number | null }) => {
+      const id = overrides?.id ?? activeSession?.id;
+      const label = overrides?.label ?? activeSession?.label;
+      if (!id) return;
+      const chatSnapshot = overrides?.chat ?? chat;
+      const compactSnapshot = overrides?.compactFromId ?? compactFromId;
+      const payload = {
+        id,
+        label: label ?? "Untitled Session",
+        messagesJson: JSON.stringify(chatSnapshot),
+        compactFromId: compactSnapshot,
+      };
+      saveSession(payload).catch((err) => {
+        // Persistence failure shouldn't break the active UI; just log.
+        // The next successful save will overwrite any stale row.
+        console.warn("saveSession failed", err);
+      });
+    },
+    [activeSession, chat, compactFromId],
+  );
+
   function startNewSession() {
-    setSelectedSession("Untitled Session");
+    const id = newSessionId();
+    const ref: SessionRef = { id, label: "Untitled Session" };
+    setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== id)].slice(0, 20));
+    setActiveSession(ref);
     setChat([]);
+    setCompactFromId(null);
     setMessage("");
     setAttachedFiles([]);
     setActiveSkillId(null);
     setRunState("idle");
     setActiveView("Home");
+    // Persist the empty row so it shows up on the next launch.
+    saveSession({ id, label: ref.label, messagesJson: "[]", compactFromId: null }).catch(() => undefined);
   }
 
-  function selectSession(session: string) {
-    setSelectedSession(session);
+  function selectSession(session: SessionRef) {
+    // Save the outgoing session before swapping.
+    persistActiveSession();
+    setActiveSession(session);
     setChat([]);
+    setCompactFromId(null);
     setMessage("");
     setActiveSkillId(null);
     setRunState("idle");
     setActiveView("Home");
+    // Load the incoming session's transcript.
+    listSessions().then((rows) => {
+      const row = rows.find((r) => r.id === session.id);
+      if (!row) return;
+      let parsed: ChatMessage[] = [];
+      try {
+        const raw = JSON.parse(row.messagesJson);
+        if (Array.isArray(raw)) parsed = raw as ChatMessage[];
+      } catch {
+        parsed = [];
+      }
+      // Push message-id counter past any persisted ids so future
+      // messages never collide.
+      for (const entry of parsed) {
+        if (typeof entry.id === "number" && entry.id >= messageIdCounter) {
+          messageIdCounter = entry.id + 1;
+        }
+      }
+      setChat(parsed);
+      setCompactFromId(row.compactFromId);
+    }).catch((err) => {
+      console.warn("load session failed", err);
+    });
   }
 
   function addContextMention() {
@@ -163,23 +247,44 @@ export function App() {
 
   function activateSkill(id: string) {
     setActiveSkillId(id);
-    setChat((entries) => [...entries, { id: nextMessageId(), role: "zeus", text: `Skill attached: ${id}` }]);
+    let nextChat: ChatMessage[] = [];
+    setChat((entries) => {
+      nextChat = [...entries, { id: nextMessageId(), role: "zeus", text: `Skill attached: ${id}` }];
+      return nextChat;
+    });
+    setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
   }
 
   function detachSkill() { setActiveSkillId(null); }
 
   function compactContext() {
+    // Anchor the LLM-context window at the first kept entry's id. Future
+    // turns send only entries with id >= compactFromId, so the dropped
+    // turns never re-enter the model's context window.
+    let firstKeptId: number | null = null;
+    let nextChat: ChatMessage[] = [];
     setChat((entries) => {
       const recent = entries.slice(-COMPACT_KEEP_LAST);
+      firstKeptId = recent.length > 0 ? recent[0].id : null;
       const note: ChatMessage = { id: nextMessageId(), role: "zeus", text: `Context compacted. Kept the last ${recent.length} turn(s).` };
-      return [...recent, note];
+      nextChat = [...recent, note];
+      return nextChat;
     });
+    setCompactFromId(firstKeptId);
+    // Persist after the next tick so the `setChat` updater above has
+    // already produced the new array (we read `nextChat` from closure).
+    setTimeout(() => persistActiveSession({ compactFromId: firstKeptId, chat: nextChat }), 0);
   }
 
   function stopRun() {
     if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
     setRunState("idle");
-    setChat((entries) => [...entries, { id: nextMessageId(), role: "zeus", text: "Run stopped." }]);
+    let nextChat: ChatMessage[] = [];
+    setChat((entries) => {
+      nextChat = [...entries, { id: nextMessageId(), role: "zeus", text: "Run stopped." }];
+      return nextChat;
+    });
+    setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
   }
 
   function stripThinkingTags(text: string): string {
@@ -220,24 +325,42 @@ export function App() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // Snapshot the chat at dispatch time so the history we send reflects
+    // exactly what the user saw, even if a concurrent setter updates chat
+    // while the await is in flight.
+    const historySnapshot = chat as UiChatBubble[];
+    const contextMessages = buildContextMessages(historySnapshot, compactFromId);
+
     try {
       const response = await dispatchChat({
         provider,
         skillId: skillForTurn ?? undefined,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
+          ...contextMessages,
           { role: "user", content: prompt },
         ],
       });
       if (controller.signal.aborted) return;
       const clean = stripThinkingTags(response.content);
-      setChat((entries) => entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text: clean, thinking: false } : entry));
+      let nextChat: ChatMessage[] = [];
+      setChat((entries) => {
+        nextChat = entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text: clean, thinking: false } : entry);
+        return nextChat;
+      });
       setRunState("idle");
+      // Persist the new transcript after the state updater runs.
+      setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
     } catch (error) {
       if (controller.signal.aborted) return;
       const text = error instanceof Error ? error.message : "Chat request failed.";
-      setChat((entries) => entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text, thinking: false } : entry));
+      let nextChat: ChatMessage[] = [];
+      setChat((entries) => {
+        nextChat = entries.map((entry) => entry.id === thinkingMessage.id ? { ...entry, text, thinking: false } : entry);
+        return nextChat;
+      });
       setRunState("error");
+      setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
     } finally {
       abortRef.current = null;
     }
@@ -277,6 +400,54 @@ export function App() {
     composer.style.height = "0px";
     composer.style.height = `${Math.min(composer.scrollHeight, 160)}px`;
   }
+
+  // Load persisted sessions on first mount. Done once per app lifetime
+  // (status === "idle" guards re-runs); the recent-sessions list is then
+  // mutated locally as the user creates new sessions.
+  useEffect(() => {
+    if (!isTauri || sessionsStatus !== "idle") return;
+    let cancelled = false;
+    setSessionsStatus("loading");
+    listSessions()
+      .then((rows) => {
+        if (cancelled) return;
+        const refs: SessionRef[] = rows.map((row) => ({ id: row.id, label: row.label }));
+        setRecentSessions(refs.slice(0, 20));
+        setSessionsStatus("ready");
+        // Restore the most recently seen session, or fall back to the
+        // first seed if the DB is empty.
+        if (refs.length > 0) {
+          const head = refs[0];
+          setActiveSession(head);
+          const row = rows.find((r) => r.id === head.id);
+          if (row) {
+            let parsed: ChatMessage[] = [];
+            try {
+              const raw = JSON.parse(row.messagesJson);
+              if (Array.isArray(raw)) parsed = raw as ChatMessage[];
+            } catch {
+              parsed = [];
+            }
+            for (const entry of parsed) {
+              if (typeof entry.id === "number" && entry.id >= messageIdCounter) {
+                messageIdCounter = entry.id + 1;
+              }
+            }
+            setChat(parsed);
+            setCompactFromId(row.compactFromId);
+          }
+        } else if (SEED_SESSION_LABELS.length > 0) {
+          const first = SEED_SESSION_LABELS[0];
+          setActiveSession({ id: first, label: first });
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSessionsError(err instanceof Error ? err.message : "Session discovery failed.");
+        setSessionsStatus("error");
+      });
+    return () => { cancelled = true; };
+  }, [isTauri, sessionsStatus]);
 
   useEffect(() => {
     const node = conversationRef.current;
@@ -325,11 +496,17 @@ export function App() {
         </nav>
         <section className="recent-block" aria-labelledby="recent-title">
           <div className="section-label" id="recent-title">Recent Sessions<Clock3 size={14} /></div>
-          {recentSessions.map((session, index) => (
-            <button className={session === selectedSession ? "recent-item active" : "recent-item"} key={session} type="button" onClick={() => selectSession(session)}>
-              <span>{session}</span><time>{index === 0 ? "2m ago" : index === 1 ? "1h ago" : `${index}d ago`}</time>
-            </button>
-          ))}
+          {recentSessions.length === 0 && sessionsStatus === "loading" ? (
+            <p className="skills-muted">Loading sessions...</p>
+          ) : recentSessions.length === 0 && sessionsStatus === "error" ? (
+            <p className="skills-error">{sessionsError}</p>
+          ) : (
+            recentSessions.map((session, index) => (
+              <button className={session.id === activeSession?.id ? "recent-item active" : "recent-item"} key={session.id} type="button" onClick={() => selectSession(session)}>
+                <span>{session.label}</span><time>{index === 0 ? "just now" : `${index}d ago`}</time>
+              </button>
+            ))
+          )}
         </section>
         <section className="harness-card" aria-labelledby="harness-title">
           <p className="section-label">Next session review</p>
@@ -412,7 +589,7 @@ export function App() {
         ) : activeView === "Home" ? (
           <>
             <div className="workspace-header">
-              <span className="session-pill" aria-label="Current session">{selectedSession}</span>
+              <span className="session-pill" aria-label="Current session">{activeSession?.label ?? "Untitled Session"}</span>
               {activeSkillId ? <span className="session-pill skill">skill: {activeSkillId}</span> : null}
             </div>
             <div className="conversation" aria-label="Conversation" ref={conversationRef}>
@@ -486,7 +663,13 @@ export function App() {
                   ))}
                 </div>
                 <div className="send-cluster">
-                  <span>{slash.visible ? "Up Down navigate - Enter to pick" : runState === "running" ? "Generating..." : "Enter to send / Shift+Enter newline"}</span>
+                  <span>{
+                    slash.visible
+                      ? (runState === "running" ? "Slash picker open - run in progress, Esc to close" : "Up Down navigate - Enter to pick")
+                      : runState === "running"
+                        ? "Generating... press the stop button to cancel"
+                        : "Enter to send / Shift+Enter newline"
+                  }</span>
                   {runState === "running" ? (
                     <button aria-label="Stop run" className="stop-button" onClick={stopRun} type="button"><Square size={14} /></button>
                   ) : (
@@ -500,22 +683,26 @@ export function App() {
           <section className="utility-view" aria-label={`${activeView} view`}>
             <div className="skills-header">
               <div><p className="section-label">{activeView}</p><h2>{activeView === "Harness Evolution" ? proposal.title : activeView}</h2></div>
-              <span>{activeView === "Sessions" ? selectedSession : "state-backed"}</span>
+              <span>{activeView === "Sessions" ? (activeSession?.label ?? "none") : "state-backed"}</span>
             </div>
             {activeView === "Sessions" && (
               <div className="utility-grid">
-                {recentSessions.map((session, index) => (
-                  <button className={session === selectedSession ? "utility-row selected" : "utility-row"} key={session} type="button" onClick={() => selectSession(session)}>
-                    <strong>{session}</strong><span>{index === 0 ? "2m ago" : index === 1 ? "1h ago" : `${index}d ago`}</span>
-                  </button>
-                ))}
+                {recentSessions.length === 0 ? (
+                  <p className="skills-muted">No sessions yet. Click "New Session" to start one.</p>
+                ) : (
+                  recentSessions.map((session, index) => (
+                    <button className={session.id === activeSession?.id ? "utility-row selected" : "utility-row"} key={session.id} type="button" onClick={() => selectSession(session)}>
+                      <strong>{session.label}</strong><span>{index === 0 ? "just now" : `${index}d ago`}</span>
+                    </button>
+                  ))
+                )}
               </div>
             )}
             {activeView === "Memory" && (
               <div className="utility-card">
                 <dl>
                   <div><dt>Project</dt><dd>Zeus Coding Agent</dd></div>
-                  <div><dt>Current Session</dt><dd>{selectedSession}</dd></div>
+                  <div><dt>Current Session</dt><dd>{activeSession?.label ?? "none"}</dd></div>
                   <div><dt>Provider</dt><dd>MiniMax-M3 through api.minimax.io/v1</dd></div>
                   <div><dt>Skills</dt><dd>{skillsStatus === "ready" ? `${skills.length} indexed locally` : "Open Skills to index local metadata"}</dd></div>
                   <div><dt>Active Skill</dt><dd>{activeSkillId ?? "none"}</dd></div>

@@ -153,7 +153,7 @@ describe("App", () => {
     const sessionsView = screen.getByLabelText("Sessions view");
     expect(sessionsView).toBeInTheDocument();
 
-    await user.click(within(sessionsView).getByRole("button", { name: "API Integration 1h ago" }));
+    await user.click(within(sessionsView).getByRole("button", { name: "API Integration 1d ago" }));
     expect(screen.getByLabelText("Message composer")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "View Memory" }));
