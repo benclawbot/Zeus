@@ -23,6 +23,7 @@ use providers::{
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillSummary {
     pub id: String,
     pub name: String,
@@ -159,7 +160,10 @@ fn list_skills_from_dir(root: &Path) -> Result<Vec<SkillSummary>, String> {
         let entry = entry.map_err(|e| format!("read skill entry: {e}"))?;
         let path = entry.path();
         if path.is_dir() && path.join("SKILL.md").is_file() {
-            skills.push(skill_summary_from_dir(&path)?);
+            match skill_summary_from_dir(&path) {
+                Ok(summary) => skills.push(summary),
+                Err(error) => eprintln!("Skipping invalid skill {}: {error}", path.display()),
+            }
         }
     }
     skills.sort_by(|a, b| a.id.cmp(&b.id));

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// All persistent state the app loads on startup and saves during a session.
 /// Returned by the `load_state` Tauri command.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedState {
     pub proposals: Vec<PersistedProposal>,
     pub history: Vec<PersistedHistoryEntry>,
@@ -12,6 +13,7 @@ pub struct PersistedState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedProposal {
     pub id: String,
     pub title: String,
@@ -22,6 +24,7 @@ pub struct PersistedProposal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedHistoryEntry {
     pub id: i64,
     pub proposal_id: String,
@@ -36,9 +39,12 @@ pub struct PersistedHistoryEntry {
 /// anchors the LLM-context window: the LLM never sees messages older than
 /// that id even after a relaunch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedSession {
     pub id: String,
     pub label: String,
+    pub project_id: String,
+    pub project_name: String,
     pub last_seen_at: String,
     pub messages_json: String,
     pub compact_from_id: Option<i64>,
@@ -48,9 +54,12 @@ pub struct PersistedSession {
 /// `upsert_session` command — same shape, two names so the existing
 /// frontend wires don't have to change in lockstep with persistence).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveSessionRequest {
     pub id: String,
     pub label: String,
+    pub project_id: String,
+    pub project_name: String,
     pub messages_json: String,
     pub compact_from_id: Option<i64>,
 }
@@ -59,6 +68,7 @@ pub struct SaveSessionRequest {
 /// with `new_summary`/`new_body`, bump `updated_at`, and append an `edited`
 /// entry to harness_history.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EditProposalRequest {
     pub proposal_id: String,
     pub new_summary: String,
@@ -70,6 +80,7 @@ pub struct EditProposalRequest {
 /// bookkeeping and audit trail, never mutating state outside what the action
 /// naturally implies.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecordActionRequest {
     pub proposal_id: String,
     pub action: String,
@@ -116,6 +127,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS sessions (
             id              TEXT PRIMARY KEY,
             label           TEXT NOT NULL,
+            project_id      TEXT NOT NULL DEFAULT 'zeus',
+            project_name    TEXT NOT NULL DEFAULT 'Zeus',
             last_seen_at    TEXT NOT NULL,
             messages_json   TEXT NOT NULL DEFAULT '[]',
             compact_from_id INTEGER
@@ -140,6 +153,12 @@ fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !columns.iter().any(|c| c == "compact_from_id") {
         conn.execute("ALTER TABLE sessions ADD COLUMN compact_from_id INTEGER", [])?;
+    }
+    if !columns.iter().any(|c| c == "project_id") {
+        conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT 'zeus'", [])?;
+    }
+    if !columns.iter().any(|c| c == "project_name") {
+        conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT NOT NULL DEFAULT 'Zeus'", [])?;
     }
     Ok(())
 }
@@ -207,16 +226,18 @@ pub fn load_state(conn: &Connection) -> rusqlite::Result<PersistedState> {
 /// (the pre-migration default) is deserialized as `[]` on the frontend.
 pub fn list_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<PersistedSession>> {
     let mut stmt = conn.prepare(
-        "SELECT id, label, last_seen_at, messages_json, compact_from_id FROM sessions
+        "SELECT id, label, project_id, project_name, last_seen_at, messages_json, compact_from_id FROM sessions
          ORDER BY last_seen_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], |row| {
         Ok(PersistedSession {
             id: row.get(0)?,
             label: row.get(1)?,
-            last_seen_at: row.get(2)?,
-            messages_json: row.get(3)?,
-            compact_from_id: row.get(4)?,
+            project_id: row.get(2)?,
+            project_name: row.get(3)?,
+            last_seen_at: row.get(4)?,
+            messages_json: row.get(5)?,
+            compact_from_id: row.get(6)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -225,16 +246,18 @@ pub fn list_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<Pe
 /// Load a single session by id. Returns `None` if the row doesn't exist.
 pub fn get_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<PersistedSession>> {
     conn.query_row(
-        "SELECT id, label, last_seen_at, messages_json, compact_from_id
+        "SELECT id, label, project_id, project_name, last_seen_at, messages_json, compact_from_id
          FROM sessions WHERE id = ?1",
         params![id],
         |row| {
             Ok(PersistedSession {
                 id: row.get(0)?,
                 label: row.get(1)?,
-                last_seen_at: row.get(2)?,
-                messages_json: row.get(3)?,
-                compact_from_id: row.get(4)?,
+                project_id: row.get(2)?,
+                project_name: row.get(3)?,
+                last_seen_at: row.get(4)?,
+                messages_json: row.get(5)?,
+                compact_from_id: row.get(6)?,
             })
         },
     )
@@ -382,16 +405,20 @@ pub fn set_access_mode(conn: &Connection, mode: &str) -> rusqlite::Result<()> {
 pub fn save_session(conn: &Connection, request: &SaveSessionRequest) -> rusqlite::Result<()> {
     let at = now();
     conn.execute(
-        r#"INSERT INTO sessions (id, label, last_seen_at, messages_json, compact_from_id)
-           VALUES (?1, ?2, ?3, ?4, ?5)
+        r#"INSERT INTO sessions (id, label, project_id, project_name, last_seen_at, messages_json, compact_from_id)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
            ON CONFLICT(id) DO UPDATE SET
              label = excluded.label,
+             project_id = excluded.project_id,
+             project_name = excluded.project_name,
              last_seen_at = excluded.last_seen_at,
              messages_json = excluded.messages_json,
              compact_from_id = excluded.compact_from_id"#,
         params![
             request.id,
             request.label,
+            request.project_id,
+            request.project_name,
             at,
             request.messages_json,
             request.compact_from_id,
@@ -406,7 +433,7 @@ pub fn save_session(conn: &Connection, request: &SaveSessionRequest) -> rusqlite
 pub fn upsert_session(conn: &Connection, id: &str, label: &str) -> rusqlite::Result<()> {
     let at = now();
     conn.execute(
-        r#"INSERT INTO sessions (id, label, last_seen_at) VALUES (?1, ?2, ?3)
+        r#"INSERT INTO sessions (id, label, project_id, project_name, last_seen_at) VALUES (?1, ?2, 'zeus', 'Zeus', ?3)
            ON CONFLICT(id) DO UPDATE SET
              label = excluded.label,
              last_seen_at = excluded.last_seen_at"#,
@@ -484,6 +511,8 @@ mod tests {
             &SaveSessionRequest {
                 id: "sess-1".to_string(),
                 label: "Refactor auth".to_string(),
+                project_id: "zeus".to_string(),
+                project_name: "Zeus".to_string(),
                 messages_json: r#"[{"id":1,"role":"user","text":"hi"}]"#.to_string(),
                 compact_from_id: Some(2),
             },
@@ -504,6 +533,8 @@ mod tests {
             &SaveSessionRequest {
                 id: "sess-1".to_string(),
                 label: "First".to_string(),
+                project_id: "zeus".to_string(),
+                project_name: "Zeus".to_string(),
                 messages_json: "[]".to_string(),
                 compact_from_id: None,
             },
@@ -514,6 +545,8 @@ mod tests {
             &SaveSessionRequest {
                 id: "sess-1".to_string(),
                 label: "Updated".to_string(),
+                project_id: "docs".to_string(),
+                project_name: "Docs".to_string(),
                 messages_json: r#"[{"id":1,"role":"user","text":"new"}]"#.to_string(),
                 compact_from_id: Some(3),
             },
@@ -533,6 +566,8 @@ mod tests {
             &SaveSessionRequest {
                 id: "a".into(),
                 label: "alpha".into(),
+                project_id: "zeus".into(),
+                project_name: "Zeus".into(),
                 messages_json: "[]".into(),
                 compact_from_id: None,
             },
@@ -547,6 +582,8 @@ mod tests {
             &SaveSessionRequest {
                 id: "b".into(),
                 label: "beta".into(),
+                project_id: "zeus".into(),
+                project_name: "Zeus".into(),
                 messages_json: "[]".into(),
                 compact_from_id: None,
             },

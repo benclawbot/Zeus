@@ -7,6 +7,7 @@ describe("transitionHarnessProposal", () => {
       id: "hp-1",
       title: "Run tests before final response",
       summary: "Persist the recurring verification rule.",
+      body: "Persist the recurring verification rule.",
       status: "ready",
     };
 

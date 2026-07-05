@@ -1,0 +1,6 @@
+# Enforce LF line endings on all text files so Windows runners, Mac
+# developers, and CI all see the same bytes regardless of their local
+# core.autocrlf setting. Without this, GitHub's Windows runners check
+# out CSS/TS files with CRLF, which broke tests in CI when an assertion
+# matched against \n literals in styles.css.
+* text=auto eol=lf

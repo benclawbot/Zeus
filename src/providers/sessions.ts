@@ -9,6 +9,8 @@ import { isTauriRuntime } from "./minimax";
 export interface PersistedSession {
   id: string;
   label: string;
+  projectId: string;
+  projectName: string;
   lastSeenAt: string;
   /** JSON-serialized array of `ChatMessage` from the frontend. */
   messagesJson: string;
@@ -19,6 +21,8 @@ export interface PersistedSession {
 export interface SaveSessionArgs {
   id: string;
   label: string;
+  projectId: string;
+  projectName: string;
   messagesJson: string;
   compactFromId: number | null;
 }

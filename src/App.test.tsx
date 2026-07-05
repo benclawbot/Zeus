@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -36,7 +36,7 @@ describe("App", () => {
   it("keeps the main app shell constrained to a single viewport", () => {
     render(<App />);
 
-    const css = readFileSync(resolve("src/styles.css"), "utf8");
+    const css = readFileSync(resolve("src/styles.css"), "utf8").replace(/\r\n/g, "\n");
 
     expect(screen.getByRole("main")).toHaveClass("app-shell");
     expect(css).toContain("body {\n  margin: 0;\n  min-width: 320px;\n  min-height: 100vh;\n  overflow: hidden;");
@@ -48,7 +48,7 @@ describe("App", () => {
   it("starts the composer as a compact one-line input that can grow upward", () => {
     render(<App />);
 
-    const css = readFileSync(resolve("src/styles.css"), "utf8");
+    const css = readFileSync(resolve("src/styles.css"), "utf8").replace(/\r\n/g, "\n");
     const input = screen.getByLabelText("Message Zeus");
 
     expect(input).toHaveAttribute("rows", "1");
@@ -141,6 +141,25 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "Remove notes.md" }));
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+  });
+
+  it("accepts pasted screenshots as image attachments in the composer", async () => {
+    render(<App />);
+
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+    const screenshot = new File(["fake-image"], "bug-screenshot.png", { type: "image/png" });
+
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [screenshot],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => screenshot }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("bug-screenshot.png")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("img", { name: "bug-screenshot.png preview" })).toBeInTheDocument();
   });
 
   it("exposes the access mode as a native listbox in the composer", () => {
@@ -289,6 +308,38 @@ describe("App", () => {
 
     expect(screen.getByText(/Run stopped/i)).toBeInTheDocument();
     expect(composer.value).toBe("");
+  });
+
+  it("/goal via direct text run creates an active goal summary", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+    await user.type(composer, "/goal Fix screenshot paste{enter}");
+
+    expect(screen.getByText("Goal set: Fix screenshot paste")).toBeInTheDocument();
+    expect(screen.getByText("Fix screenshot paste")).toBeInTheDocument();
+    expect(composer.value).toBe("");
+  });
+
+  it("renames recent sessions and creates project groups", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /Rename Untitled Session/ }));
+    const renameInput = screen.getByLabelText("Session name") as HTMLInputElement;
+    await user.clear(renameInput);
+    await user.type(renameInput, "Visual bug triage");
+    await user.click(screen.getByRole("button", { name: "Save session name" }));
+
+    expect(screen.getAllByText("Visual bug triage").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    const projectInput = screen.getByLabelText("New project name") as HTMLInputElement;
+    await user.type(projectInput, "Ocean Wallpaper");
+    await user.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(screen.getAllByText("Ocean Wallpaper").length).toBeGreaterThan(0);
   });
 
   it("registers multiple providers on the Rust side", async () => {

@@ -35,6 +35,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -110,6 +111,7 @@ button {
 .compact-row,
 .task-row,
 .recent-item,
+.recent-item-row,
 .new-session,
 .nav-item {
   display: flex;
@@ -191,7 +193,7 @@ kbd {
 }
 
 .nav-item.active,
-.recent-item.active {
+.recent-item-row.active {
   color: var(--purple);
   background: var(--purple-soft);
 }
@@ -212,11 +214,75 @@ kbd {
   padding-top: 18px;
 }
 
+.recent-item-row {
+  justify-content: space-between;
+  gap: 4px;
+  border-radius: 6px;
+}
+
 .recent-item {
   justify-content: space-between;
-  width: 100%;
+  flex: 1;
   border-radius: 6px;
   padding: 8px 9px;
+  min-width: 0;
+}
+
+.recent-item span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+}
+
+.recent-item small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+
+.recent-rename {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.recent-rename:hover {
+  border-color: var(--line);
+  background: #fff;
+}
+
+.recent-edit {
+  display: grid;
+  grid-template-columns: 1fr 30px;
+  gap: 6px;
+  width: 100%;
+  padding: 4px;
+}
+
+.recent-edit input,
+.project-create input {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 6px 8px;
+  color: var(--text);
+}
+
+.recent-edit button {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--purple);
 }
 
 .recent-item time,
@@ -623,6 +689,52 @@ kbd {
   max-width: 680px;
 }
 
+.sessions-manager {
+  display: grid;
+  gap: 12px;
+  max-width: 760px;
+}
+
+.project-create {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 8px;
+}
+
+.project-create button,
+.project-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 7px 10px;
+}
+
+.project-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-tabs button.selected {
+  border-color: #d8d0ff;
+  color: var(--purple);
+  background: var(--purple-soft);
+}
+
+.project-group {
+  display: grid;
+  gap: 8px;
+}
+
+.project-group h3 {
+  margin: 8px 0 0;
+  font-size: 0.9rem;
+}
+
 .utility-row {
   display: flex;
   justify-content: space-between;
@@ -787,6 +899,14 @@ kbd {
   text-overflow: ellipsis;
 }
 
+.attached-chip.image img {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+}
+
 .attached-chip button {
   width: 16px;
   height: 16px;
@@ -907,6 +1027,25 @@ kbd {
 .history-panel p {
   color: var(--muted);
   font-size: 0.88rem;
+}
+
+.proposal-body {
+  color: var(--text) !important;
+  line-height: 1.5;
+}
+
+.proposal-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.proposal-editor textarea {
+  width: 100%;
+  min-height: 120px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  resize: vertical;
 }
 
 button:focus-visible,

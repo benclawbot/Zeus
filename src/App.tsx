@@ -5,10 +5,14 @@ import {
   ChevronDown,
   Clock3,
   FileText,
+  FolderPlus,
   Home,
+  Image as ImageIcon,
   MemoryStick,
   MessageSquare,
   Paperclip,
+  Pencil,
+  Save,
   Send,
   Settings,
   ShieldCheck,
@@ -56,6 +60,27 @@ const planItems = [
 interface SessionRef {
   id: string;
   label: string;
+  projectId: string;
+  projectName: string;
+}
+
+interface ProjectRef {
+  id: string;
+  name: string;
+}
+
+interface AttachedFile {
+  id: string;
+  name: string;
+  type: string;
+  kind: "file" | "image";
+  previewUrl?: string;
+}
+
+interface GoalState {
+  objective: string;
+  status: "active" | "complete";
+  startedAt: string;
 }
 
 const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
@@ -78,6 +103,8 @@ const mergeCandidateRules = [
 const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.";
 const COMPACT_KEEP_LAST = 6;
 const PROJECT_NAME = "Zeus";
+const DEFAULT_PROJECT: ProjectRef = { id: "zeus", name: "Zeus" };
+const FALLBACK_IMAGE_PREVIEW = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 let messageIdCounter = 0;
 function nextMessageId() {
@@ -85,18 +112,48 @@ function nextMessageId() {
   return messageIdCounter;
 }
 
+function projectIdFromName(name: string): string {
+  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return normalized || `project-${Date.now().toString(36)}`;
+}
+
+function fileToAttachment(file: File): AttachedFile {
+  const kind = file.type.startsWith("image/") ? "image" : "file";
+  const previewUrl =
+    kind === "image" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function"
+      ? URL.createObjectURL(file)
+      : kind === "image"
+        ? FALLBACK_IMAGE_PREVIEW
+        : undefined;
+  return {
+    id: `${file.name}-${file.lastModified}-${file.size}-${Math.random().toString(36).slice(2)}`,
+    name: file.name || "pasted-image.png",
+    type: file.type || "application/octet-stream",
+    kind,
+    previewUrl,
+  };
+}
+
+function attachmentPrompt(attachments: AttachedFile[]): string {
+  return attachments.map((file) => `- ${file.name} (${file.type || "unknown type"}, ${file.kind})`).join("\n");
+}
+
 export function App() {
   const [activeView, setActiveView] = useState<AppView>("Home");
   const [accessMode, setAccessMode] = useState<AccessMode>("Full");
   const [proposal, setProposal] = useState<HarnessProposal>({
     id: "proposal-001",
-    title: "Harness proposal ready",
-    summary: "Generated after the last session and shown automatically at the start of this one.",
+    title: "Harness proposal: close visible workflow gaps",
+    summary: "Add the missing daily-use loops: skill discovery, image paste, session projects, proposal editing, memory clarity, and /goal.",
+    body: "When a session ends, Zeus should turn the observed friction into a concrete next-session proposal. This one proposes wiring the visible shell to real state: load local skills, let screenshots enter the composer, make recent sessions editable and project-scoped, show what the memory snapshot means, and expose a /goal command for active objectives.",
     status: "ready",
   });
+  const [proposalEditing, setProposalEditing] = useState(false);
+  const [proposalDraft, setProposalDraft] = useState("");
   const [history, setHistory] = useState<HarnessHistoryEntry[]>([]);
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [activeGoal, setActiveGoal] = useState<GoalState | null>(null);
   const [compactFromId, setCompactFromId] = useState<number | null>(null);
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -114,15 +171,20 @@ export function App() {
   // (no Tauri) still has a working session to type into.
   const [recentSessions, setRecentSessions] = useState<SessionRef[]>(() => {
     const id = "untitled";
-    return [{ id, label: "Untitled Session" }];
+    return [{ id, label: "Untitled Session", projectId: DEFAULT_PROJECT.id, projectName: DEFAULT_PROJECT.name }];
   });
-  const [activeSession, setActiveSession] = useState<SessionRef | null>(() => ({ id: "untitled", label: "Untitled Session" }));
+  const [activeSession, setActiveSession] = useState<SessionRef | null>(() => ({ id: "untitled", label: "Untitled Session", projectId: DEFAULT_PROJECT.id, projectName: DEFAULT_PROJECT.name }));
+  const [projects, setProjects] = useState<ProjectRef[]>([DEFAULT_PROJECT]);
+  const [activeProjectId, setActiveProjectId] = useState(DEFAULT_PROJECT.id);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingSessionName, setEditingSessionName] = useState("");
   // Provider list for the Memory panel. Populated from Rust on mount.
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [activeProviderId, setActiveProviderId] = useState<string>("minimax");
   const [sessionsStatus, setSessionsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [sessionsError, setSessionsError] = useState("");
-  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
   const [provider] = useState("minimax");
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -150,6 +212,18 @@ export function App() {
       .filter((rule) => rule.ids.length > 1);
   }, [skills]);
 
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? DEFAULT_PROJECT,
+    [projects, activeProjectId],
+  );
+
+  const projectSessionGroups = useMemo(() => {
+    return projects.map((project) => ({
+      ...project,
+      sessions: recentSessions.filter((session) => session.projectId === project.id),
+    }));
+  }, [projects, recentSessions]);
+
   // Label for the active provider, derived from the live `providers`
   // list populated by Rust's listProviders() command. Falls back to the
   // hardcoded default id until the list arrives.
@@ -165,6 +239,27 @@ export function App() {
     setHistory((entries) => [result.historyEntry, ...entries].slice(0, 4));
   }
 
+  function beginProposalEdit() {
+    setProposalDraft(proposal.body || proposal.summary);
+    setProposalEditing(true);
+  }
+
+  function saveProposalEdit() {
+    const nextBody = proposalDraft.trim();
+    if (!nextBody) return;
+    setProposal((current) => ({
+      ...current,
+      body: nextBody,
+      summary: nextBody.length > 140 ? `${nextBody.slice(0, 137)}...` : nextBody,
+      status: "edited",
+    }));
+    setHistory((entries) => [
+      { proposalId: proposal.id, action: "edited" as const, at: new Date().toISOString() },
+      ...entries,
+    ].slice(0, 4));
+    setProposalEditing(false);
+  }
+
   // Persist the active session if there's any meaningful state to save
   // (chat non-empty OR a non-default compact anchor). Debounced internally
   // via the React state — callers fire-and-forget, errors are logged but
@@ -177,7 +272,7 @@ export function App() {
   }, [isTauri]);
 
   const persistActiveSession = React.useCallback(
-    (overrides?: { id?: string; label?: string; chat?: ChatMessage[]; compactFromId?: number | null }) => {
+    (overrides?: { id?: string; label?: string; projectId?: string; projectName?: string; chat?: ChatMessage[]; compactFromId?: number | null }) => {
       const id = overrides?.id ?? activeSession?.id;
       const label = overrides?.label ?? activeSession?.label;
       if (!id) return;
@@ -186,6 +281,8 @@ export function App() {
       const payload = {
         id,
         label: label ?? "Untitled Session",
+        projectId: overrides?.projectId ?? activeSession?.projectId ?? DEFAULT_PROJECT.id,
+        projectName: overrides?.projectName ?? activeSession?.projectName ?? DEFAULT_PROJECT.name,
         messagesJson: JSON.stringify(chatSnapshot),
         compactFromId: compactSnapshot,
       };
@@ -200,7 +297,7 @@ export function App() {
 
   function startNewSession() {
     const id = newSessionId();
-    const ref: SessionRef = { id, label: "Untitled Session" };
+    const ref: SessionRef = { id, label: "Untitled Session", projectId: activeProject.id, projectName: activeProject.name };
     setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== id)].slice(0, 20));
     setActiveSession(ref);
     setChat([]);
@@ -211,7 +308,7 @@ export function App() {
     setRunState("idle");
     setActiveView("Home");
     // Persist the empty row so it shows up on the next launch.
-    saveSession({ id, label: ref.label, messagesJson: "[]", compactFromId: null }).catch(() => undefined);
+    saveSession({ id, label: ref.label, projectId: ref.projectId, projectName: ref.projectName, messagesJson: "[]", compactFromId: null }).catch(() => undefined);
   }
 
   function selectSession(session: SessionRef) {
@@ -249,11 +346,69 @@ export function App() {
     });
   }
 
-  function handleFileSelection(files: FileList | null) {
+  function handleFileSelection(files: FileList | File[] | null) {
     if (!files) return;
-    const names = Array.from(files).map((file) => file.name);
-    setAttachedFiles((current) => Array.from(new Set([...current, ...names])));
+    const next = Array.from(files).map(fileToAttachment);
+    setAttachedFiles((current) => [...current, ...next]);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+    if (files.length === 0) return;
+    event.preventDefault();
+    handleFileSelection(files);
+  }
+
+  function renameSession(session: SessionRef, label: string) {
+    const nextLabel = label.trim() || "Untitled Session";
+    const updated = { ...session, label: nextLabel };
+    setRecentSessions((current) => current.map((entry) => (entry.id === session.id ? updated : entry)));
+    if (activeSession?.id === session.id) setActiveSession(updated);
+    setEditingSessionId(null);
+    setEditingSessionName("");
+    persistActiveSession({
+      id: updated.id,
+      label: updated.label,
+      projectId: updated.projectId,
+      projectName: updated.projectName,
+    });
+  }
+
+  function createProject() {
+    const name = projectNameDraft.trim();
+    if (!name) return;
+    const baseId = projectIdFromName(name);
+    const existingIds = new Set(projects.map((project) => project.id));
+    let id = baseId;
+    let suffix = 2;
+    while (existingIds.has(id)) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    const project = { id, name };
+    setProjects((current) => [...current, project]);
+    setActiveProjectId(project.id);
+    setProjectNameDraft("");
+  }
+
+  function appendZeusMessage(text: string) {
+    let nextChat: ChatMessage[] = [];
+    setChat((entries) => {
+      nextChat = [...entries, { id: nextMessageId(), role: "zeus", text }];
+      return nextChat;
+    });
+    setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
+  }
+
+  function handleGoalCommand(prompt: string) {
+    const objective = prompt.slice("/goal".length).trim();
+    if (!objective) {
+      appendZeusMessage(activeGoal ? `Active goal: ${activeGoal.objective}` : "No active goal. Use /goal <objective> to set one.");
+      return;
+    }
+    setActiveGoal({ objective, status: "active", startedAt: new Date().toISOString() });
+    appendZeusMessage(`Goal set: ${objective}`);
   }
 
   function activateSkill(id: string) {
@@ -324,6 +479,7 @@ export function App() {
     if (prompt === "/new") { setMessage(""); startNewSession(); return; }
     if (prompt === "/compact") { setMessage(""); compactContext(); return; }
     if (prompt === "/stop") { setMessage(""); stopRun(); return; }
+    if (prompt === "/goal" || prompt.startsWith("/goal ")) { setMessage(""); handleGoalCommand(prompt); return; }
 
     const skillForTurn = activeSkillId;
     const userMessage: ChatMessage = { id: nextMessageId(), role: "user", text: prompt, skillId: skillForTurn ?? undefined };
@@ -341,6 +497,8 @@ export function App() {
     // while the await is in flight.
     const historySnapshot = chat as UiChatBubble[];
     const contextMessages = buildContextMessages(historySnapshot, compactFromId);
+    const attachmentsText = attachmentPrompt(attachedFiles);
+    const promptWithAttachments = attachmentsText ? `${prompt}\n\nAttached files:\n${attachmentsText}` : prompt;
 
     try {
       const response = await dispatchChat({
@@ -349,7 +507,7 @@ export function App() {
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           ...contextMessages,
-          { role: "user", content: prompt },
+          { role: "user", content: promptWithAttachments },
         ],
       });
       if (controller.signal.aborted) return;
@@ -360,6 +518,7 @@ export function App() {
         return nextChat;
       });
       setRunState("idle");
+      setAttachedFiles([]);
       // Persist the new transcript after the state updater runs.
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
     } catch (error) {
@@ -383,6 +542,10 @@ export function App() {
     else if (item.id === "new") startNewSession();
     else if (item.id === "compact") compactContext();
     else if (item.id === "stop") stopRun();
+    else if (item.id === "goal") {
+      setMessage("/goal ");
+      requestAnimationFrame(() => composerRef.current?.focus());
+    }
   }
 
   function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -431,8 +594,17 @@ export function App() {
     listSessions()
       .then((rows) => {
         if (cancelled) return;
-        const refs: SessionRef[] = rows.map((row) => ({ id: row.id, label: row.label }));
+        const refs: SessionRef[] = rows.map((row) => ({
+          id: row.id,
+          label: row.label,
+          projectId: row.projectId ?? DEFAULT_PROJECT.id,
+          projectName: row.projectName ?? DEFAULT_PROJECT.name,
+        }));
         setRecentSessions(refs.slice(0, 20));
+        const nextProjects = new Map<string, ProjectRef>();
+        nextProjects.set(DEFAULT_PROJECT.id, DEFAULT_PROJECT);
+        refs.forEach((ref) => nextProjects.set(ref.projectId, { id: ref.projectId, name: ref.projectName }));
+        setProjects(Array.from(nextProjects.values()));
         setSessionsStatus("ready");
         if (refs.length > 0) {
           const head = refs[0];
@@ -458,10 +630,10 @@ export function App() {
           // First launch: mint and persist a real session so the user
           // has a real (not seed) entry to type into.
           const id = newSessionId();
-          const ref: SessionRef = { id, label: "Untitled Session" };
+          const ref: SessionRef = { id, label: "Untitled Session", projectId: DEFAULT_PROJECT.id, projectName: DEFAULT_PROJECT.name };
           setRecentSessions([ref]);
           setActiveSession(ref);
-          saveSession({ id, label: ref.label, messagesJson: "[]", compactFromId: null })
+          saveSession({ id, label: ref.label, projectId: ref.projectId, projectName: ref.projectName, messagesJson: "[]", compactFromId: null })
             .catch((err) => console.warn("initial session save failed", err));
         }
       })
@@ -483,10 +655,15 @@ export function App() {
   useEffect(() => {
     if (activeView !== "Skills" || skillsStatus !== "idle") return;
     let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      if (cancelled) return;
+      setSkillsError("Skill discovery timed out. Check the bundled skills permission and registry path.");
+      setSkillsStatus("error");
+    }, 12000);
     setSkillsStatus("loading");
-    listSkills().then((items) => { if (cancelled) return; setSkills(items); setSkillsStatus("ready"); })
-      .catch((error) => { if (cancelled) return; setSkillsError(error instanceof Error ? error.message : "Skill discovery failed."); setSkillsStatus("error"); });
-    return () => { cancelled = true; };
+    listSkills().then((items) => { if (cancelled) return; window.clearTimeout(timeout); setSkills(items); setSkillsStatus("ready"); })
+      .catch((error) => { if (cancelled) return; window.clearTimeout(timeout); setSkillsError(error instanceof Error ? error.message : "Skill discovery failed."); setSkillsStatus("error"); });
+    return () => { cancelled = true; window.clearTimeout(timeout); };
   }, [activeView, skillsStatus]);
 
   useEffect(() => {
@@ -526,9 +703,36 @@ export function App() {
             <p className="skills-error">{sessionsError}</p>
           ) : (
             recentSessions.map((session, index) => (
-              <button className={session.id === activeSession?.id ? "recent-item active" : "recent-item"} key={session.id} type="button" onClick={() => selectSession(session)}>
-                <span>{session.label}</span><time>{index === 0 ? "just now" : `${index}d ago`}</time>
-              </button>
+              <div className={session.id === activeSession?.id ? "recent-item-row active" : "recent-item-row"} key={session.id}>
+                {editingSessionId === session.id ? (
+                  <div className="recent-edit">
+                    <input
+                      aria-label="Session name"
+                      onChange={(event) => setEditingSessionName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") renameSession(session, editingSessionName);
+                        if (event.key === "Escape") setEditingSessionId(null);
+                      }}
+                      value={editingSessionName}
+                    />
+                    <button aria-label="Save session name" type="button" onClick={() => renameSession(session, editingSessionName)}><Save size={13} /></button>
+                  </div>
+                ) : (
+                  <>
+                    <button className="recent-item" type="button" onClick={() => selectSession(session)}>
+                      <span>{session.label}<small>{session.projectName}</small></span><time>{index === 0 ? "just now" : `${index}d ago`}</time>
+                    </button>
+                    <button
+                      aria-label={`Rename ${session.label}`}
+                      className="recent-rename"
+                      type="button"
+                      onClick={() => { setEditingSessionId(session.id); setEditingSessionName(session.label); }}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                  </>
+                )}
+              </div>
             ))
           )}
         </section>
@@ -538,7 +742,7 @@ export function App() {
           <p>{proposal.summary}</p>
           <div className="proposal-actions">
             <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
-            <button type="button" onClick={() => recordProposal("edited")}>Edit</button>
+            <button type="button" onClick={beginProposalEdit}>Edit</button>
             <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
           </div>
           <div className="proposal-actions secondary">
@@ -673,7 +877,7 @@ export function App() {
                 </div>
               ) : null}
 
-              <textarea aria-label="Message Zeus" onChange={(event) => { setMessage(event.target.value); resizeComposer(); }} onKeyDown={handleComposerKeyDown} placeholder="Type / for skills and commands - Message Zeus..." ref={composerRef} rows={1} value={message} />
+              <textarea aria-label="Message Zeus" onChange={(event) => { setMessage(event.target.value); resizeComposer(); }} onKeyDown={handleComposerKeyDown} onPaste={handleComposerPaste} placeholder="Type / for skills and commands - Message Zeus..." ref={composerRef} rows={1} value={message} />
               <div className="composer-bottom">
                 <div className="composer-tools">
                   <input aria-label="Choose files" className="file-input" multiple onChange={(event) => handleFileSelection(event.target.files)} ref={fileInputRef} type="file" />
@@ -696,9 +900,16 @@ export function App() {
                     </select>
                   </label>
                   {attachedFiles.map((file) => (
-                    <span className="attached-chip" key={file}>
-                      <FileText size={14} />{file}
-                      <button aria-label={`Remove ${file}`} type="button" onClick={() => setAttachedFiles((current) => current.filter((item) => item !== file))}><X size={13} /></button>
+                    <span className={file.kind === "image" ? "attached-chip image" : "attached-chip"} key={file.id}>
+                      {file.kind === "image" && file.previewUrl ? (
+                        <img alt={`${file.name} preview`} src={file.previewUrl} />
+                      ) : file.kind === "image" ? (
+                        <ImageIcon size={14} />
+                      ) : (
+                        <FileText size={14} />
+                      )}
+                      {file.name}
+                      <button aria-label={`Remove ${file.name}`} type="button" onClick={() => setAttachedFiles((current) => current.filter((item) => item.id !== file.id))}><X size={13} /></button>
                     </span>
                   ))}
                 </div>
@@ -726,27 +937,55 @@ export function App() {
               <span>{activeView === "Sessions" ? (activeSession?.label ?? "none") : "state-backed"}</span>
             </div>
             {activeView === "Sessions" && (
-              <div className="utility-grid">
-                {recentSessions.length === 0 ? (
-                  <p className="skills-muted">No sessions yet. Click "New Session" to start one.</p>
-                ) : (
-                  recentSessions.map((session, index) => (
-                    <button className={session.id === activeSession?.id ? "utility-row selected" : "utility-row"} key={session.id} type="button" onClick={() => selectSession(session)}>
-                      <strong>{session.label}</strong><span>{index === 0 ? "just now" : `${index}d ago`}</span>
+              <div className="sessions-manager">
+                <div className="project-create">
+                  <input
+                    aria-label="New project name"
+                    onChange={(event) => setProjectNameDraft(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") createProject(); }}
+                    placeholder="New project name"
+                    value={projectNameDraft}
+                  />
+                  <button type="button" onClick={createProject}><FolderPlus size={15} />Create project</button>
+                </div>
+                <div className="project-tabs" aria-label="Projects">
+                  {projects.map((project) => (
+                    <button className={project.id === activeProjectId ? "selected" : ""} key={project.id} type="button" onClick={() => setActiveProjectId(project.id)}>
+                      {project.name}
                     </button>
-                  ))
-                )}
+                  ))}
+                </div>
+                <div className="utility-grid">
+                  {projectSessionGroups.map((group) => (
+                    <section className="project-group" key={group.id} aria-label={`${group.name} sessions`}>
+                      <h3>{group.name}</h3>
+                      {group.sessions.length === 0 ? (
+                        <p className="skills-muted">No sessions in this project yet. New Session will add one here.</p>
+                      ) : (
+                        group.sessions.map((session, index) => (
+                          <button className={session.id === activeSession?.id ? "utility-row selected" : "utility-row"} key={session.id} type="button" onClick={() => selectSession(session)}>
+                            <strong>{session.label}</strong><span>{index === 0 ? "just now" : `${index}d ago`}</span>
+                          </button>
+                        ))
+                      )}
+                    </section>
+                  ))}
+                </div>
               </div>
             )}
             {activeView === "Memory" && (
               <div className="utility-card">
+                <p className="skills-muted">Memory Snapshot shows the current local state Zeus should carry into the next turn: project, session, goal, provider, access mode, compact window, and active skill.</p>
                 <dl>
                   <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
+                  <div><dt>Session Project</dt><dd>{activeSession?.projectName ?? "none"}</dd></div>
                   <div><dt>Current Session</dt><dd>{activeSession ? `${activeSession.label} (${chat.length} turn(s))` : "none"}</dd></div>
+                  <div><dt>Goal</dt><dd>{activeGoal?.objective ?? "none"}</dd></div>
                   <div><dt>Provider</dt><dd>{activeProviderLabel}</dd></div>
                   <div><dt>Access</dt><dd>{accessMode}</dd></div>
                   <div><dt>Skills</dt><dd>{skillsStatus === "ready" ? `${skills.length} indexed locally` : (skillsStatus === "loading" ? "loading..." : skillsStatus === "error" ? "discovery failed" : "open Skills to index")}</dd></div>
                   <div><dt>Active Skill</dt><dd>{activeSkillId ?? "none"}</dd></div>
+                  <div><dt>Context Anchor</dt><dd>{compactFromId === null ? "full visible session" : `messages from #${compactFromId}`}</dd></div>
                 </dl>
                 <p className="skills-muted">{accessSummary}</p>
               </div>
@@ -754,9 +993,20 @@ export function App() {
             {activeView === "Harness Evolution" && (
               <div className="utility-card">
                 <p>{proposal.summary}</p>
+                {proposalEditing ? (
+                  <div className="proposal-editor">
+                    <textarea aria-label="Harness proposal body" value={proposalDraft} onChange={(event) => setProposalDraft(event.target.value)} />
+                    <div className="proposal-actions">
+                      <button type="button" onClick={saveProposalEdit}>Save proposal</button>
+                      <button type="button" onClick={() => setProposalEditing(false)}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="proposal-body">{proposal.body}</p>
+                )}
                 <div className="proposal-actions">
                   <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
-                  <button type="button" onClick={() => recordProposal("edited")}>Edit</button>
+                  <button type="button" onClick={beginProposalEdit}>Edit</button>
                   <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
                   <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
                   <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
@@ -811,6 +1061,8 @@ export function App() {
           </div>
           <dl>
             <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
+            <div><dt>Session</dt><dd>{activeSession ? `${activeSession.projectName} / ${activeSession.label}` : "none"}</dd></div>
+            <div><dt>Goal</dt><dd>{activeGoal?.objective ?? "none"}</dd></div>
             <div><dt>Tech</dt><dd>Tauri, React, Rust, SQLite</dd></div>
             <div><dt>Provider</dt><dd>{activeProviderLabel}</dd></div>
             <div><dt>Access</dt><dd>{accessMode} — {accessSummary}</dd></div>

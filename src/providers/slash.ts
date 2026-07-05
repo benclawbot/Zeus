@@ -50,6 +50,12 @@ const BUILTINS: BuiltinCommand[] = [
     description: "Cancel any in-flight model request.",
     kind: "builtin",
   },
+  {
+    id: "goal",
+    label: "/goal",
+    description: "Set or view the active objective for this Zeus session.",
+    kind: "builtin",
+  },
 ];
 
 /**

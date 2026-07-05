@@ -4,6 +4,7 @@ export interface HarnessProposal {
   id: string;
   title: string;
   summary: string;
+  body: string;
   status: HarnessProposalStatus;
 }
 
