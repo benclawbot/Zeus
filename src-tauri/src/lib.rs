@@ -20,7 +20,8 @@ use providers::{
 };
 use workspace::{
     apply_workspace_edit as apply_workspace_edit_impl, read_workspace_file as read_workspace_file_impl,
-    run_shell_command as run_shell_command_impl, write_workspace_file as write_workspace_file_impl,
+    run_agent_task as run_agent_task_impl, run_shell_command as run_shell_command_impl,
+    write_workspace_file as write_workspace_file_impl, AgentRunRequest, AgentRunResult,
     ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult, ReadWorkspaceFileRequest,
     ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult, WriteWorkspaceFileRequest,
     WriteWorkspaceFileResult,
@@ -111,16 +112,10 @@ fn split_frontmatter(content: &str) -> Option<&str> {
 }
 
 fn skill_summary_from_dir(dir: &Path) -> Result<SkillSummary, String> {
-    let id = dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "Invalid skill folder name.".to_string())?
-        .to_string();
+    let id = dir.file_name().and_then(|value| value.to_str()).ok_or_else(|| "Invalid skill folder name.".to_string())?.to_string();
     let skill_path = dir.join("SKILL.md");
-    let content = fs::read_to_string(&skill_path)
-        .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
-    let frontmatter = split_frontmatter(&content)
-        .ok_or_else(|| format!("{} is missing YAML frontmatter.", skill_path.display()))?;
+    let content = fs::read_to_string(&skill_path).map_err(|e| format!("read {}: {e}", skill_path.display()))?;
+    let frontmatter = split_frontmatter(&content).ok_or_else(|| format!("{} is missing YAML frontmatter.", skill_path.display()))?;
     Ok(SkillSummary {
         id: id.clone(),
         name: frontmatter_value(frontmatter, "name").unwrap_or_else(|| id.clone()),
@@ -155,12 +150,8 @@ fn valid_skill_id(id: &str) -> bool {
 
 fn skills_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Ok(env_dir) = std::env::var("ZEUS_SKILLS_DIR") {
-        candidates.push(PathBuf::from(env_dir));
-    }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("skills"));
-    }
+    if let Ok(env_dir) = std::env::var("ZEUS_SKILLS_DIR") { candidates.push(PathBuf::from(env_dir)); }
+    if let Ok(resource_dir) = app.path().resource_dir() { candidates.push(resource_dir.join("skills")); }
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("skills"));
         candidates.push(cwd.join("..").join("skills"));
@@ -170,20 +161,13 @@ fn skills_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
 }
 
 fn resolve_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    skills_dir_candidates(app)
-        .into_iter()
-        .find(|candidate| candidate.is_dir())
-        .ok_or_else(|| "No Zeus skills directory was found.".to_string())
+    skills_dir_candidates(app).into_iter().find(|candidate| candidate.is_dir()).ok_or_else(|| "No Zeus skills directory was found.".to_string())
 }
 
-pub struct AppState {
-    pub db: Arc<Mutex<Connection>>,
-}
+pub struct AppState { pub db: Arc<Mutex<Connection>> }
 
 fn current_access_mode(conn: &Connection) -> Result<Option<String>, String> {
-    persistence::load_state(conn)
-        .map(|state| state.access_mode)
-        .map_err(|e| format!("load access mode: {e}"))
+    persistence::load_state(conn).map(|state| state.access_mode).map_err(|e| format!("load access mode: {e}"))
 }
 
 #[tauri::command]
@@ -200,9 +184,7 @@ async fn send_minimax_chat(app: tauri::AppHandle, request: ChatRequest) -> Resul
 }
 
 #[tauri::command]
-fn list_providers() -> Vec<ProviderInfo> {
-    list_provider_info()
-}
+fn list_providers() -> Vec<ProviderInfo> { list_provider_info() }
 
 #[tauri::command]
 fn load_state(state: tauri::State<'_, AppState>) -> Result<PersistedState, String> {
@@ -213,9 +195,7 @@ fn load_state(state: tauri::State<'_, AppState>) -> Result<PersistedState, Strin
 #[tauri::command]
 fn record_proposal_action(state: tauri::State<'_, AppState>, request: RecordActionRequest) -> Result<PersistedProposal, String> {
     let conn = state.db.lock();
-    if request.action == "rolled-back" {
-        return persistence::rollback_proposal(&conn, &request.proposal_id).map_err(|e| format!("rollback: {e}"));
-    }
+    if request.action == "rolled-back" { return persistence::rollback_proposal(&conn, &request.proposal_id).map_err(|e| format!("rollback: {e}")); }
     persistence::record_action(&conn, &request).map_err(|e| format!("record_action: {e}"))
 }
 
@@ -257,69 +237,49 @@ fn list_skills(app: tauri::AppHandle) -> Result<Vec<SkillSummary>, String> {
 
 #[tauri::command]
 fn load_skill(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> {
-    if !valid_skill_id(&id) {
-        return Err("Invalid skill id.".to_string());
-    }
+    if !valid_skill_id(&id) { return Err("Invalid skill id.".to_string()); }
     let root = resolve_skills_dir(&app)?;
     let skill_dir = root.join(&id);
-    if !skill_dir.is_dir() {
-        return Err(format!("Skill '{id}' was not found."));
-    }
+    if !skill_dir.is_dir() { return Err(format!("Skill '{id}' was not found.")); }
     let summary = skill_summary_from_dir(&skill_dir)?;
-    let body = fs::read_to_string(skill_dir.join("SKILL.md"))
-        .map_err(|e| format!("read skill '{id}': {e}"))?;
+    let body = fs::read_to_string(skill_dir.join("SKILL.md")).map_err(|e| format!("read skill '{id}': {e}"))?;
     Ok(SkillDetail { summary, body })
 }
 
 #[tauri::command]
 fn run_shell_command(state: tauri::State<'_, AppState>, request: ShellCommandRequest) -> Result<ShellCommandResult, String> {
-    let access_mode = {
-        let conn = state.db.lock();
-        current_access_mode(&conn)?
-    };
+    let access_mode = { let conn = state.db.lock(); current_access_mode(&conn)? };
     run_shell_command_impl(request, access_mode.as_deref())
 }
 
 #[tauri::command]
-fn read_workspace_file(request: ReadWorkspaceFileRequest) -> Result<ReadWorkspaceFileResult, String> {
-    read_workspace_file_impl(request)
-}
+fn read_workspace_file(request: ReadWorkspaceFileRequest) -> Result<ReadWorkspaceFileResult, String> { read_workspace_file_impl(request) }
 
 #[tauri::command]
 fn write_workspace_file(state: tauri::State<'_, AppState>, request: WriteWorkspaceFileRequest) -> Result<WriteWorkspaceFileResult, String> {
-    let access_mode = {
-        let conn = state.db.lock();
-        current_access_mode(&conn)?
-    };
+    let access_mode = { let conn = state.db.lock(); current_access_mode(&conn)? };
     write_workspace_file_impl(request, access_mode.as_deref())
 }
 
 #[tauri::command]
 fn apply_workspace_edit(state: tauri::State<'_, AppState>, request: ApplyWorkspaceEditRequest) -> Result<ApplyWorkspaceEditResult, String> {
-    let access_mode = {
-        let conn = state.db.lock();
-        current_access_mode(&conn)?
-    };
+    let access_mode = { let conn = state.db.lock(); current_access_mode(&conn)? };
     apply_workspace_edit_impl(request, access_mode.as_deref())
 }
 
+#[tauri::command]
+fn run_agent_task(state: tauri::State<'_, AppState>, request: AgentRunRequest) -> Result<AgentRunResult, String> {
+    let access_mode = { let conn = state.db.lock(); current_access_mode(&conn)? };
+    Ok(run_agent_task_impl(request, access_mode.as_deref()))
+}
+
 fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
-    let exists: bool = conn
-        .query_row("SELECT 1 FROM proposals WHERE id = 'proposal-001'", [], |_| Ok(true))
-        .optional()?
-        .unwrap_or(false);
-    if exists {
-        return Ok(());
-    }
+    let exists: bool = conn.query_row("SELECT 1 FROM proposals WHERE id = 'proposal-001'", [], |_| Ok(true)).optional()?.unwrap_or(false);
+    if exists { return Ok(()); }
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         r#"INSERT INTO proposals (id, title, summary, body, status, updated_at)
-           VALUES ('proposal-001',
-                   'Harness proposal ready',
-                   'Generated after the last session and shown automatically at the start of this one.',
-                   '',
-                   'ready',
-                   ?1)"#,
+           VALUES ('proposal-001', 'Harness proposal ready', 'Generated after the last session and shown automatically at the start of this one.', '', 'ready', ?1)"#,
         [now],
     )?;
     Ok(())
@@ -328,17 +288,11 @@ fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
-
     tauri::Builder::default()
         .setup(|app| {
-            let db_path = match app.path().app_data_dir() {
-                Ok(dir) => dir.join("zeus.db"),
-                Err(_) => std::path::PathBuf::from("zeus.db"),
-            };
-            let conn = open_and_init(&db_path)
-                .map_err(|e| -> Box<dyn std::error::Error> { format!("db open: {e}").into() })?;
-            seed_default_state(&conn)
-                .map_err(|e| -> Box<dyn std::error::Error> { format!("seed: {e}").into() })?;
+            let db_path = match app.path().app_data_dir() { Ok(dir) => dir.join("zeus.db"), Err(_) => std::path::PathBuf::from("zeus.db") };
+            let conn = open_and_init(&db_path).map_err(|e| -> Box<dyn std::error::Error> { format!("db open: {e}").into() })?;
+            seed_default_state(&conn).map_err(|e| -> Box<dyn std::error::Error> { format!("seed: {e}").into() })?;
             app.manage(AppState { db: Arc::new(Mutex::new(conn)) });
             Ok(())
         })
@@ -359,6 +313,7 @@ pub fn run() {
             read_workspace_file,
             write_workspace_file,
             apply_workspace_edit,
+            run_agent_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");
