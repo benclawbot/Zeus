@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-export const ZEUS_WORKSPACE_DIR_KEY = "zeus.sessionWorkspaceDir";
+const ZEUS_WORKSPACE_DIR_KEY = "zeus.sessionWorkspaceDir";
 
 declare global {
   interface Window {
@@ -8,12 +8,12 @@ declare global {
   }
 }
 
-export function getSessionWorkspaceDir(): string | undefined {
+function getSessionWorkspaceDir(): string | undefined {
   if (typeof window === "undefined") return undefined;
   return window.localStorage.getItem(ZEUS_WORKSPACE_DIR_KEY)?.trim() || undefined;
 }
 
-export function setSessionWorkspaceDir(value: string): void {
+function setSessionWorkspaceDir(value: string): void {
   if (typeof window === "undefined") return;
   const cleaned = value.trim();
   if (cleaned) {
