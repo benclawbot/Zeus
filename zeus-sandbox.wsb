@@ -1,0 +1,14 @@
+<Configuration>
+  <VGpu>Enable</VGpu>
+  <Networking>Enable</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\ZeusScratch</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\ZeusScratch</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>explorer.exe C:\Users\WDAGUtilityAccount\Desktop\ZeusScratch</Command>
+  </LogonCommand>
+</Configuration>
