@@ -86,7 +86,9 @@ describe("App", () => {
         expect(within(workspace).queryByText(/Checking provider adapter MiniMax-M3/i)).not.toBeInTheDocument();
         expect(within(workspace).queryAllByRole("article")).toHaveLength(0);
         // The session pill shows the current session name inside the workspace.
-        expect(within(workspace).getByLabelText("Current session")).toHaveTextContent(/Rust CLI Todo App/);
+        // First-launch auto-creates a real "Untitled Session" in any
+        // environment, so the pill always has a real label.
+        expect(within(workspace).getByLabelText("Current session")).toHaveTextContent(/Untitled Session/);
       });
 
   it("auto-scrolls the conversation as chat content appears", () => {
@@ -129,13 +131,9 @@ describe("App", () => {
     expect(composer.value).not.toMatch(/\n/);
   });
 
-  it("wires composer context and attachment controls to local state", async () => {
+  it("wires the file attach controls in the composer", async () => {
     const user = userEvent.setup();
     render(<App />);
-
-    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
-    await user.click(screen.getByRole("button", { name: "Mention context" }));
-    expect(composer.value).toBe("@");
 
     const fileInput = screen.getByLabelText("Choose files") as HTMLInputElement;
     await user.upload(fileInput, new File(["notes"], "notes.md", { type: "text/markdown" }));
@@ -143,6 +141,30 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "Remove notes.md" }));
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+  });
+
+  it("exposes the access mode as a native listbox in the composer", () => {
+    render(<App />);
+
+    // The composer replaces the old @ button with a listbox that drives
+    // the same accessMode state the right panel used to.
+    const select = screen.getByLabelText("Access mode") as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+    expect(select.tagName).toBe("SELECT");
+    // All four modes are present, in the canonical order.
+    const options = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toEqual(["Full", "Local", "Review", "Locked"]);
+    // Default is "Full".
+    expect(select.value).toBe("Full");
+  });
+
+  it("changing the access-mode listbox updates the state", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const select = screen.getByLabelText("Access mode") as HTMLSelectElement;
+    await user.selectOptions(select, "Locked");
+    expect(select.value).toBe("Locked");
   });
 
   it("wires navigation and inspector shortcuts to state-backed views", async () => {
@@ -153,12 +175,21 @@ describe("App", () => {
     const sessionsView = screen.getByLabelText("Sessions view");
     expect(sessionsView).toBeInTheDocument();
 
-    await user.click(within(sessionsView).getByRole("button", { name: "API Integration 1d ago" }));
+    // No hardcoded seeds anymore. First launch auto-creates a single
+    // "Untitled Session" so the user always has a real session to type
+    // into (the in-memory ref isn't persisted until the user sends).
+    expect(within(sessionsView).getAllByText(/Untitled Session/).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: /New Session/ }));
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    const sessionsView2 = screen.getByLabelText("Sessions view");
+    // Click any Untitled Session row in the utility grid; multiple rows
+    // can match now that first-launch and New Session both create one.
+    const rows = within(sessionsView2).getAllByRole("button", { name: /Untitled Session/ });
+    await user.click(rows[0]);
     expect(screen.getByLabelText("Message composer")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "View Memory" }));
     expect(screen.getByLabelText("Memory view")).toBeInTheDocument();
-    expect(screen.getByText("Current Session")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Skills" }));
     expect(screen.getByLabelText("Skills registry")).toBeInTheDocument();
@@ -235,12 +266,16 @@ describe("App", () => {
 
       const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
       const workspace = screen.getByLabelText("Task execution");
-      // Sanity: default session shows in the workspace pill.
-      expect(within(workspace).getByLabelText("Current session")).toHaveTextContent(/Rust CLI Todo App/);
+      // Sanity: first-launch active session is "Untitled Session" (auto-
+      // created on mount).
+      expect(within(workspace).getByLabelText("Current session")).toHaveTextContent("Untitled Session");
 
       await user.type(composer, "/new{enter}");
 
-      // /new starts an Untitled Session — visible in the workspace pill.
+      // /new mints a fresh UUID and persists a new Untitled Session.
+      // The pill still says "Untitled Session" (the label is the same),
+      // but it's now backed by a different row in the recent-sessions
+      // list.
       expect(within(workspace).getByLabelText("Current session")).toHaveTextContent("Untitled Session");
       expect(composer.value).toBe("");
     });

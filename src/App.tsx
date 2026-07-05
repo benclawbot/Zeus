@@ -26,6 +26,7 @@ import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./pr
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
+import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, type ProviderInfo } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import "./styles.css";
 
@@ -57,13 +58,6 @@ interface SessionRef {
   label: string;
 }
 
-/**
- * Seed labels shown on a fresh install before the user has created any
- * sessions. Clicking one creates a real persisted row so the seed list
- * disappears after the first interaction.
- */
-const SEED_SESSION_LABELS = ["Rust CLI Todo App", "API Integration", "Refactor Auth Module", "Add Unit Tests", "UI Bug Fix"];
-
 const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
   { label: "Home", icon: Home },
   { label: "Sessions", icon: Archive },
@@ -83,6 +77,7 @@ const mergeCandidateRules = [
 
 const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.";
 const COMPACT_KEEP_LAST = 6;
+const PROJECT_NAME = "Zeus";
 
 let messageIdCounter = 0;
 function nextMessageId() {
@@ -110,16 +105,21 @@ export function App() {
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
   const [skillDetailStatus, setSkillDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [recentSessions, setRecentSessions] = useState<SessionRef[]>(
-    // Seed the list with a couple of canned labels so the UI has something
-    // to render on a fresh install (or in the test environment, which
-    // can't hit the Tauri runtime). The Tauri mount effect replaces
-    // these with the real persisted list once Rust answers.
-    SEED_SESSION_LABELS.map((label) => ({ id: label, label })),
-  );
-  const [activeSession, setActiveSession] = useState<SessionRef | null>(
-    SEED_SESSION_LABELS.length > 0 ? { id: SEED_SESSION_LABELS[0], label: SEED_SESSION_LABELS[0] } : null,
-  );
+  // recentSessions and activeSession are populated from Rust on mount.
+  // On a brand-new install the mount effect auto-creates a real
+  // "Untitled Session" so the user always has somewhere to type. We
+  // also seed the in-memory state with a real (unpersisted) ref so
+  // the UI is never empty during the brief window before the mount
+  // effect fires in the Tauri runtime, and so the browser dev env
+  // (no Tauri) still has a working session to type into.
+  const [recentSessions, setRecentSessions] = useState<SessionRef[]>(() => {
+    const id = "untitled";
+    return [{ id, label: "Untitled Session" }];
+  });
+  const [activeSession, setActiveSession] = useState<SessionRef | null>(() => ({ id: "untitled", label: "Untitled Session" }));
+  // Provider list for the Memory panel. Populated from Rust on mount.
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState<string>("minimax");
   const [sessionsStatus, setSessionsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [sessionsError, setSessionsError] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
@@ -150,6 +150,15 @@ export function App() {
       .filter((rule) => rule.ids.length > 1);
   }, [skills]);
 
+  // Label for the active provider, derived from the live `providers`
+  // list populated by Rust's listProviders() command. Falls back to the
+  // hardcoded default id until the list arrives.
+  const activeProviderLabel = useMemo(() => {
+    const found = providers.find((p) => p.id === activeProviderId);
+    if (found) return `${found.displayName} (${found.defaultModel})`;
+    return activeProviderId;
+  }, [providers, activeProviderId]);
+
   function recordProposal(action: Exclude<HarnessProposal["status"], "ready">) {
     const result = transitionHarnessProposal(proposal, action);
     setProposal(result.proposal);
@@ -160,6 +169,13 @@ export function App() {
   // (chat non-empty OR a non-default compact anchor). Debounced internally
   // via the React state — callers fire-and-forget, errors are logged but
   // never thrown into the UI.
+  // Mirror the access-mode change into SQLite so it survives a relaunch.
+  // Fire-and-forget; a failed write is logged but never breaks the UI.
+  const persistAccess = React.useCallback((mode: AccessMode) => {
+    if (!isTauri) return;
+    persistAccessMode(mode).catch((err) => console.warn("set_access_mode failed", err));
+  }, [isTauri]);
+
   const persistActiveSession = React.useCallback(
     (overrides?: { id?: string; label?: string; chat?: ChatMessage[]; compactFromId?: number | null }) => {
       const id = overrides?.id ?? activeSession?.id;
@@ -231,11 +247,6 @@ export function App() {
     }).catch((err) => {
       console.warn("load session failed", err);
     });
-  }
-
-  function addContextMention() {
-    setMessage((value) => `${value}${value.endsWith(" ") || value.length === 0 ? "" : " "}@`);
-    requestAnimationFrame(() => { composerRef.current?.focus(); resizeComposer(); });
   }
 
   function handleFileSelection(files: FileList | null) {
@@ -401,21 +412,28 @@ export function App() {
     composer.style.height = `${Math.min(composer.scrollHeight, 160)}px`;
   }
 
-  // Load persisted sessions on first mount. Done once per app lifetime
-  // (status === "idle" guards re-runs); the recent-sessions list is then
-  // mutated locally as the user creates new sessions.
+  // Load persisted sessions and provider list on first mount. The
+  // session list is then mutated locally as the user creates new ones.
+  // When the DB is empty we auto-create a real "Untitled Session" so the
+  // composer always has somewhere to write to — no fake seed rows.
   useEffect(() => {
     if (!isTauri || sessionsStatus !== "idle") return;
     let cancelled = false;
     setSessionsStatus("loading");
+    // Best-effort provider fetch; failure is non-fatal (the Memory panel
+    // falls back to the hardcoded default id).
+    listProvidersTauri().then((rows) => {
+      if (cancelled) return;
+      setProviders(rows);
+      if (rows.length > 0) setActiveProviderId(rows[0].id);
+    }).catch(() => undefined);
+
     listSessions()
       .then((rows) => {
         if (cancelled) return;
         const refs: SessionRef[] = rows.map((row) => ({ id: row.id, label: row.label }));
         setRecentSessions(refs.slice(0, 20));
         setSessionsStatus("ready");
-        // Restore the most recently seen session, or fall back to the
-        // first seed if the DB is empty.
         if (refs.length > 0) {
           const head = refs[0];
           setActiveSession(head);
@@ -436,9 +454,15 @@ export function App() {
             setChat(parsed);
             setCompactFromId(row.compactFromId);
           }
-        } else if (SEED_SESSION_LABELS.length > 0) {
-          const first = SEED_SESSION_LABELS[0];
-          setActiveSession({ id: first, label: first });
+        } else {
+          // First launch: mint and persist a real session so the user
+          // has a real (not seed) entry to type into.
+          const id = newSessionId();
+          const ref: SessionRef = { id, label: "Untitled Session" };
+          setRecentSessions([ref]);
+          setActiveSession(ref);
+          saveSession({ id, label: ref.label, messagesJson: "[]", compactFromId: null })
+            .catch((err) => console.warn("initial session save failed", err));
         }
       })
       .catch((err) => {
@@ -654,7 +678,23 @@ export function App() {
                 <div className="composer-tools">
                   <input aria-label="Choose files" className="file-input" multiple onChange={(event) => handleFileSelection(event.target.files)} ref={fileInputRef} type="file" />
                   <button aria-label="Attach file" type="button" onClick={() => fileInputRef.current?.click()}><Paperclip size={16} /></button>
-                  <button aria-label="Mention context" type="button" onClick={addContextMention}>@</button>
+                  <label className="composer-access">
+                    <span className="composer-access-label">Access</span>
+                    <select
+                      aria-label="Access mode"
+                      className="composer-access-select"
+                      onChange={(event) => {
+                        const next = event.target.value as AccessMode;
+                        setAccessMode(next);
+                        persistAccess(next);
+                      }}
+                      value={accessMode}
+                    >
+                      {(["Full", "Local", "Review", "Locked"] as AccessMode[]).map((mode) => (
+                        <option key={mode} value={mode}>{mode}</option>
+                      ))}
+                    </select>
+                  </label>
                   {attachedFiles.map((file) => (
                     <span className="attached-chip" key={file}>
                       <FileText size={14} />{file}
@@ -701,12 +741,14 @@ export function App() {
             {activeView === "Memory" && (
               <div className="utility-card">
                 <dl>
-                  <div><dt>Project</dt><dd>Zeus Coding Agent</dd></div>
-                  <div><dt>Current Session</dt><dd>{activeSession?.label ?? "none"}</dd></div>
-                  <div><dt>Provider</dt><dd>MiniMax-M3 through api.minimax.io/v1</dd></div>
-                  <div><dt>Skills</dt><dd>{skillsStatus === "ready" ? `${skills.length} indexed locally` : "Open Skills to index local metadata"}</dd></div>
+                  <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
+                  <div><dt>Current Session</dt><dd>{activeSession ? `${activeSession.label} (${chat.length} turn(s))` : "none"}</dd></div>
+                  <div><dt>Provider</dt><dd>{activeProviderLabel}</dd></div>
+                  <div><dt>Access</dt><dd>{accessMode}</dd></div>
+                  <div><dt>Skills</dt><dd>{skillsStatus === "ready" ? `${skills.length} indexed locally` : (skillsStatus === "loading" ? "loading..." : skillsStatus === "error" ? "discovery failed" : "open Skills to index")}</dd></div>
                   <div><dt>Active Skill</dt><dd>{activeSkillId ?? "none"}</dd></div>
                 </dl>
+                <p className="skills-muted">{accessSummary}</p>
               </div>
             )}
             {activeView === "Harness Evolution" && (
@@ -731,13 +773,10 @@ export function App() {
             )}
             {activeView === "Settings" && (
               <div className="utility-card">
-                <p>Access mode</p>
-                <div className="access-grid" role="group" aria-label="Settings access mode">
-                  {(["Full", "Local", "Review", "Locked"] as AccessMode[]).map((mode) => (
-                    <button className={mode === accessMode ? "selected" : ""} key={mode} type="button" onClick={() => setAccessMode(mode)}>{mode}</button>
-                  ))}
-                </div>
+                <p className="section-label">Access mode</p>
+                <p>Active mode: <strong>{accessMode}</strong></p>
                 <p className="skills-muted">{accessSummary}</p>
+                <p className="skills-muted">Change the mode from the listbox in the composer.</p>
               </div>
             )}
           </section>
@@ -768,28 +807,16 @@ export function App() {
         <section className="panel memory-panel">
           <div className="panel-heading">
             <h2>Memory Snapshot</h2>
-            <span>Updated just now</span>
+            <span>{activeSession ? `${chat.length} turn(s)` : "no session"}</span>
           </div>
           <dl>
-            <div><dt>Project</dt><dd>Zeus Coding Agent</dd></div>
+            <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
             <div><dt>Tech</dt><dd>Tauri, React, Rust, SQLite</dd></div>
-            <div><dt>Provider</dt><dd>MiniMax-M3</dd></div>
-            <div><dt>Harness</dt><dd>Approval before rule changes</dd></div>
+            <div><dt>Provider</dt><dd>{activeProviderLabel}</dd></div>
+            <div><dt>Access</dt><dd>{accessMode} — {accessSummary}</dd></div>
+            <div><dt>Last action</dt><dd>{history[0] ? `${history[0].action} at ${new Date(history[0].at).toLocaleTimeString()}` : "none"}</dd></div>
           </dl>
           <button type="button" onClick={() => setActiveView("Memory")}>View Memory</button>
-        </section>
-
-        <section className="panel access-panel">
-          <div className="panel-heading">
-            <h2>Access Mode</h2>
-            <ShieldCheck size={16} />
-          </div>
-          <div className="access-grid" role="group" aria-label="Access mode">
-            {(["Full", "Local", "Review", "Locked"] as AccessMode[]).map((mode) => (
-              <button className={mode === accessMode ? "selected" : ""} key={mode} type="button" onClick={() => setAccessMode(mode)}>{mode}</button>
-            ))}
-          </div>
-          <p>{accessSummary}</p>
         </section>
 
         <section className="panel history-panel">
