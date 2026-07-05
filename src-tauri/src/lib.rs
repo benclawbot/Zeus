@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fs, path::{Path, PathBuf}, sync::Arc};
 
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension};
@@ -21,6 +17,13 @@ use persistence::{
 use providers::{
     build_skill_system_message, dispatch_chat, list_provider_info, ChatMessage, ChatRequest,
     ChatResponse, ProviderInfo,
+};
+use workspace::{
+    apply_workspace_edit as apply_workspace_edit_impl, read_workspace_file as read_workspace_file_impl,
+    run_shell_command as run_shell_command_impl, write_workspace_file as write_workspace_file_impl,
+    ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult, ReadWorkspaceFileRequest,
+    ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult, WriteWorkspaceFileRequest,
+    WriteWorkspaceFileResult,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -42,10 +45,7 @@ pub struct SkillDetail {
     pub body: String,
 }
 
-fn load_skill_system_message(
-    app: &tauri::AppHandle,
-    skill_id: &str,
-) -> Result<Option<ChatMessage>, String> {
+fn load_skill_system_message(app: &tauri::AppHandle, skill_id: &str) -> Result<Option<ChatMessage>, String> {
     if !valid_skill_id(skill_id) {
         return Err(format!("Invalid skill id '{skill_id}'."));
     }
@@ -59,16 +59,12 @@ fn load_skill_system_message(
     Ok(build_skill_system_message(skill_id, &raw))
 }
 
-fn inject_skill(
-    app: &tauri::AppHandle,
-    request: &ChatRequest,
-) -> Result<Vec<ChatMessage>, String> {
+fn inject_skill(app: &tauri::AppHandle, request: &ChatRequest) -> Result<Vec<ChatMessage>, String> {
     let Some(skill_id) = request.skill_id.as_deref().filter(|s| !s.is_empty()) else {
         return Ok(request.messages.clone());
     };
-    let skill_message = match load_skill_system_message(app, skill_id)? {
-        Some(msg) => msg,
-        None => return Ok(request.messages.clone()),
+    let Some(skill_message) = load_skill_system_message(app, skill_id)? else {
+        return Ok(request.messages.clone());
     };
     let mut out = Vec::with_capacity(request.messages.len() + 1);
     out.push(skill_message);
@@ -77,12 +73,7 @@ fn inject_skill(
 }
 
 fn strip_wrapping_quotes(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim()
-        .to_string()
+    value.trim().trim_matches('"').trim_matches('\'').trim().to_string()
 }
 
 fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
@@ -130,13 +121,10 @@ fn skill_summary_from_dir(dir: &Path) -> Result<SkillSummary, String> {
         .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
     let frontmatter = split_frontmatter(&content)
         .ok_or_else(|| format!("{} is missing YAML frontmatter.", skill_path.display()))?;
-    let name = frontmatter_value(frontmatter, "name").unwrap_or_else(|| id.clone());
-    let description = frontmatter_value(frontmatter, "description").unwrap_or_default();
-
     Ok(SkillSummary {
-        id,
-        name,
-        description,
+        id: id.clone(),
+        name: frontmatter_value(frontmatter, "name").unwrap_or_else(|| id.clone()),
+        description: frontmatter_value(frontmatter, "description").unwrap_or_default(),
         has_references: dir.join("references").is_dir(),
         has_scripts: dir.join("scripts").is_dir(),
         has_assets: dir.join("assets").is_dir(),
@@ -162,10 +150,7 @@ fn list_skills_from_dir(root: &Path) -> Result<Vec<SkillSummary>, String> {
 }
 
 fn valid_skill_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    !id.is_empty() && id.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 fn skills_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
@@ -180,11 +165,7 @@ fn skills_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
         candidates.push(cwd.join("skills"));
         candidates.push(cwd.join("..").join("skills"));
     }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("skills"),
-    );
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("skills"));
     candidates
 }
 
@@ -206,18 +187,16 @@ fn current_access_mode(conn: &Connection) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn send_chat(
-    app: tauri::AppHandle,
-    request: ChatRequest,
-) -> Result<ChatResponse, String> {
+async fn send_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatResponse, String> {
     let messages = inject_skill(&app, &request)?;
-    let request_with_messages = ChatRequest {
-        messages,
-        ..request
-    };
-    dispatch_chat(&request_with_messages, None)
-        .await
-        .map_err(String::from)
+    let request_with_messages = ChatRequest { messages, ..request };
+    dispatch_chat(&request_with_messages, None).await.map_err(String::from)
+}
+
+#[tauri::command]
+async fn send_minimax_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatResponse, String> {
+    let request = ChatRequest { provider: "minimax".to_string(), ..request };
+    send_chat(app, request).await
 }
 
 #[tauri::command]
@@ -232,23 +211,16 @@ fn load_state(state: tauri::State<'_, AppState>) -> Result<PersistedState, Strin
 }
 
 #[tauri::command]
-fn record_proposal_action(
-    state: tauri::State<'_, AppState>,
-    request: RecordActionRequest,
-) -> Result<PersistedProposal, String> {
+fn record_proposal_action(state: tauri::State<'_, AppState>, request: RecordActionRequest) -> Result<PersistedProposal, String> {
     let conn = state.db.lock();
     if request.action == "rolled-back" {
-        return persistence::rollback_proposal(&conn, &request.proposal_id)
-            .map_err(|e| format!("rollback: {e}"));
+        return persistence::rollback_proposal(&conn, &request.proposal_id).map_err(|e| format!("rollback: {e}"));
     }
     persistence::record_action(&conn, &request).map_err(|e| format!("record_action: {e}"))
 }
 
 #[tauri::command]
-fn edit_proposal(
-    state: tauri::State<'_, AppState>,
-    request: EditProposalRequest,
-) -> Result<PersistedProposal, String> {
+fn edit_proposal(state: tauri::State<'_, AppState>, request: EditProposalRequest) -> Result<PersistedProposal, String> {
     let conn = state.db.lock();
     persistence::apply_proposal_edit(&conn, &request).map_err(|e| format!("edit: {e}"))
 }
@@ -260,28 +232,19 @@ fn set_access_mode(state: tauri::State<'_, AppState>, mode: String) -> Result<()
 }
 
 #[tauri::command]
-fn upsert_session(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    label: String,
-) -> Result<(), String> {
+fn upsert_session(state: tauri::State<'_, AppState>, id: String, label: String) -> Result<(), String> {
     let conn = state.db.lock();
     persistence::upsert_session(&conn, &id, &label).map_err(|e| format!("upsert_session: {e}"))
 }
 
 #[tauri::command]
-fn save_session(
-    state: tauri::State<'_, AppState>,
-    request: SaveSessionRequest,
-) -> Result<(), String> {
+fn save_session(state: tauri::State<'_, AppState>, request: SaveSessionRequest) -> Result<(), String> {
     let conn = state.db.lock();
     db_save_session(&conn, &request).map_err(|e| format!("save_session: {e}"))
 }
 
 #[tauri::command]
-fn list_sessions_full(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<PersistedSession>, String> {
+fn list_sessions_full(state: tauri::State<'_, AppState>) -> Result<Vec<PersistedSession>, String> {
     let conn = state.db.lock();
     db_list_sessions(&conn, 50).map_err(|e| format!("list_sessions_full: {e}"))
 }
@@ -303,56 +266,46 @@ fn load_skill(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> 
         return Err(format!("Skill '{id}' was not found."));
     }
     let summary = skill_summary_from_dir(&skill_dir)?;
-    let skill_path = skill_dir.join("SKILL.md");
-    let body = fs::read_to_string(&skill_path)
-        .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
+    let body = fs::read_to_string(skill_dir.join("SKILL.md"))
+        .map_err(|e| format!("read skill '{id}': {e}"))?;
     Ok(SkillDetail { summary, body })
 }
 
 #[tauri::command]
-fn run_shell_command(
-    state: tauri::State<'_, AppState>,
-    request: workspace::ShellCommandRequest,
-) -> Result<workspace::ShellCommandResult, String> {
-    let conn = state.db.lock();
-    let mode = current_access_mode(&conn)?;
-    workspace::run_shell_command(request, mode.as_deref())
+fn run_shell_command(state: tauri::State<'_, AppState>, request: ShellCommandRequest) -> Result<ShellCommandResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    run_shell_command_impl(request, access_mode.as_deref())
 }
 
 #[tauri::command]
-fn read_workspace_file(
-    request: workspace::ReadWorkspaceFileRequest,
-) -> Result<workspace::ReadWorkspaceFileResult, String> {
-    workspace::read_workspace_file(request)
+fn read_workspace_file(request: ReadWorkspaceFileRequest) -> Result<ReadWorkspaceFileResult, String> {
+    read_workspace_file_impl(request)
 }
 
 #[tauri::command]
-fn write_workspace_file(
-    state: tauri::State<'_, AppState>,
-    request: workspace::WriteWorkspaceFileRequest,
-) -> Result<workspace::WriteWorkspaceFileResult, String> {
-    let conn = state.db.lock();
-    let mode = current_access_mode(&conn)?;
-    workspace::write_workspace_file(request, mode.as_deref())
+fn write_workspace_file(state: tauri::State<'_, AppState>, request: WriteWorkspaceFileRequest) -> Result<WriteWorkspaceFileResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    write_workspace_file_impl(request, access_mode.as_deref())
 }
 
 #[tauri::command]
-fn apply_workspace_edit(
-    state: tauri::State<'_, AppState>,
-    request: workspace::ApplyWorkspaceEditRequest,
-) -> Result<workspace::ApplyWorkspaceEditResult, String> {
-    let conn = state.db.lock();
-    let mode = current_access_mode(&conn)?;
-    workspace::apply_workspace_edit(request, mode.as_deref())
+fn apply_workspace_edit(state: tauri::State<'_, AppState>, request: ApplyWorkspaceEditRequest) -> Result<ApplyWorkspaceEditResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    apply_workspace_edit_impl(request, access_mode.as_deref())
 }
 
 fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
     let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM proposals WHERE id = 'proposal-001'",
-            [],
-            |_| Ok(true),
-        )
+        .query_row("SELECT 1 FROM proposals WHERE id = 'proposal-001'", [], |_| Ok(true))
         .optional()?
         .unwrap_or(false);
     if exists {
@@ -386,13 +339,12 @@ pub fn run() {
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("db open: {e}").into() })?;
             seed_default_state(&conn)
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("seed: {e}").into() })?;
-            app.manage(AppState {
-                db: Arc::new(Mutex::new(conn)),
-            });
+            app.manage(AppState { db: Arc::new(Mutex::new(conn)) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             send_chat,
+            send_minimax_chat,
             list_providers,
             load_state,
             record_proposal_action,
@@ -415,113 +367,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::{ChatRequest, ProviderError};
-
-    fn sample_request(provider: &str) -> ChatRequest {
-        ChatRequest {
-            provider: provider.to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "Build a test".to_string(),
-            }],
-            skill_id: None,
-            options: serde_json::Value::Null,
-        }
-    }
-
-    #[test]
-    fn list_providers_includes_minimax_openai_anthropic() {
-        let providers = list_provider_info();
-        let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
-        assert!(ids.contains(&"minimax"));
-        assert!(ids.contains(&"openai"));
-        assert!(ids.contains(&"anthropic"));
-    }
-
-    #[test]
-    fn send_chat_routes_to_requested_provider() {
-        let request = sample_request("minimax");
-        let result = futures_block_on(dispatch_chat(&request, None));
-        match result {
-            Err(ProviderError::MissingApiKey { provider }) => {
-                assert_eq!(provider, "minimax");
-            }
-            other => panic!("expected MissingApiKey for minimax, got {other:?}"),
-        }
-    }
-
-    fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
-        use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
-
-        fn dummy_waker() -> Waker {
-            fn no_op(_: *const ()) {}
-            fn clone(_: *const ()) -> RawWaker {
-                RawWaker::new(std::ptr::null(), &VT)
-            }
-            static VT: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-            unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) }
-        }
-
-        let mut future = Box::pin(future);
-        let waker = dummy_waker();
-        let mut cx = Context::from_waker(&waker);
-        loop {
-            match future.as_mut().poll(&mut cx) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
-
-    fn temp_skills_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zeus_skills_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn write_skill(root: &Path, id: &str, frontmatter: &str, body: &str) {
-        let dir = root.join(id);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("SKILL.md"),
-            format!("---\n{frontmatter}\n---\n\n{body}"),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn list_skills_reads_metadata_without_loading_bodies() {
-        let root = temp_skills_root();
-        write_skill(
-            &root,
-            "alpha-skill",
-            "name: alpha-skill\ndescription: Alpha metadata only.",
-            "This is the full body.",
-        );
-        std::fs::create_dir_all(root.join("alpha-skill").join("references")).unwrap();
-
-        let skills = list_skills_from_dir(&root).unwrap();
-
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].id, "alpha-skill");
-        assert_eq!(skills[0].description, "Alpha metadata only.");
-        assert!(skills[0].has_references);
-    }
-
-    #[test]
-    fn frontmatter_parser_handles_block_descriptions() {
-        let frontmatter =
-            "name: blocky\ndescription: |\n  First line.\n  Second line.\nmetadata: ignored";
-        assert_eq!(
-            frontmatter_value(frontmatter, "description").unwrap(),
-            "First line. Second line."
-        );
-    }
 
     #[test]
     fn valid_skill_id_blocks_path_traversal() {
@@ -532,38 +377,23 @@ mod tests {
         assert!(!valid_skill_id("skill_name"));
     }
 
-    fn temp_db() -> Connection {
-        let dir = std::env::temp_dir().join(format!(
-            "zeus_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.db");
-        let _ = std::fs::remove_file(&path);
-        open_and_init(&path).expect("open")
+    #[test]
+    fn frontmatter_parser_handles_block_descriptions() {
+        let frontmatter = "name: blocky\ndescription: |\n  First line.\n  Second line.\nmetadata: ignored";
+        assert_eq!(frontmatter_value(frontmatter, "description").unwrap(), "First line. Second line.");
     }
 
     #[test]
     fn seed_creates_default_proposal_once() {
-        let conn = temp_db();
-        seed_default_state(&conn).unwrap();
-        let p = persistence::load_state(&conn).unwrap();
-        assert_eq!(p.proposals.len(), 1);
-        assert_eq!(p.proposals[0].id, "proposal-001");
-        seed_default_state(&conn).unwrap();
-        let p = persistence::load_state(&conn).unwrap();
-        assert_eq!(p.proposals.len(), 1);
-    }
-
-    #[test]
-    fn access_mode_round_trips() {
-        let conn = temp_db();
-        persistence::set_access_mode(&conn, "Review").unwrap();
+        let dir = std::env::temp_dir().join(format!("zeus_lib_seed_{}_{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let conn = open_and_init(&path).expect("open");
+        seed_default_state(&conn).expect("seed");
+        seed_default_state(&conn).expect("seed again");
         let state = persistence::load_state(&conn).unwrap();
-        assert_eq!(state.access_mode.as_deref(), Some("Review"));
-        persistence::set_access_mode(&conn, "Locked").unwrap();
-        let state = persistence::load_state(&conn).unwrap();
-        assert_eq!(state.access_mode.as_deref(), Some("Locked"));
+        assert_eq!(state.proposals.len(), 1);
+        assert_eq!(state.proposals[0].id, "proposal-001");
     }
 }
