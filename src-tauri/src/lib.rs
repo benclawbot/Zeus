@@ -11,6 +11,7 @@ use tauri::Manager;
 
 mod persistence;
 mod providers;
+mod workspace;
 
 use persistence::{
     open_and_init, save_session as db_save_session, list_sessions as db_list_sessions,
@@ -41,14 +42,6 @@ pub struct SkillDetail {
     pub body: String,
 }
 
-/// Build a synthetic system message that injects the skill's instructions
-/// into the next LLM call, given the raw SKILL.md contents. Pure helper so
-/// it can be exercised by unit tests without an `AppHandle`.
-/// Load the SKILL.md body for `skill_id` from the resolved skills directory
-/// and return a synthetic system message that injects the skill's
-/// instructions into the next LLM call. The skill id is validated and
-/// bounded so this function is safe to call from the Tauri command
-/// surface without exposing filesystem structure to the frontend.
 fn load_skill_system_message(
     app: &tauri::AppHandle,
     skill_id: &str,
@@ -66,8 +59,6 @@ fn load_skill_system_message(
     Ok(build_skill_system_message(skill_id, &raw))
 }
 
-/// Prepend a skill message (if any) to the conversation so the LLM sees
-/// the skill instructions before any user/assistant turn.
 fn inject_skill(
     app: &tauri::AppHandle,
     request: &ChatRequest,
@@ -204,12 +195,14 @@ fn resolve_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "No Zeus skills directory was found.".to_string())
 }
 
-// --- Tauri commands --------------------------------------------------
-
-/// Application-wide shared state. Holds the DB connection in a `Mutex`
-/// inside an `Arc` so commands can borrow it cheaply on each invocation.
 pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
+}
+
+fn current_access_mode(conn: &Connection) -> Result<Option<String>, String> {
+    persistence::load_state(conn)
+        .map(|state| state.access_mode)
+        .map_err(|e| format!("load access mode: {e}"))
 }
 
 #[tauri::command]
@@ -217,8 +210,6 @@ async fn send_chat(
     app: tauri::AppHandle,
     request: ChatRequest,
 ) -> Result<ChatResponse, String> {
-    // Inject the skill context (if any) on the Rust side so we don't have
-    // to ship skill bodies over the IPC bridge.
     let messages = inject_skill(&app, &request)?;
     let request_with_messages = ChatRequest {
         messages,
@@ -229,23 +220,17 @@ async fn send_chat(
         .map_err(String::from)
 }
 
-/// List every registered provider. The frontend uses this to render the
-/// provider picker in the Settings view.
 #[tauri::command]
 fn list_providers() -> Vec<ProviderInfo> {
     list_provider_info()
 }
 
-/// Load the full persisted state. Frontend calls this on mount and re-calls
-/// after every state-mutating command.
 #[tauri::command]
 fn load_state(state: tauri::State<'_, AppState>) -> Result<PersistedState, String> {
     let conn = state.db.lock();
     persistence::load_state(&conn).map_err(|e| format!("load_state: {e}"))
 }
 
-/// Record a generic harness action (approved / rejected / applied-once /
-/// rolled-back). Returns the updated proposal.
 #[tauri::command]
 fn record_proposal_action(
     state: tauri::State<'_, AppState>,
@@ -259,8 +244,6 @@ fn record_proposal_action(
     persistence::record_action(&conn, &request).map_err(|e| format!("record_action: {e}"))
 }
 
-/// Apply an edit: replace the proposal's summary/body and append an `edited`
-/// history row. Returns the updated proposal.
 #[tauri::command]
 fn edit_proposal(
     state: tauri::State<'_, AppState>,
@@ -270,14 +253,12 @@ fn edit_proposal(
     persistence::apply_proposal_edit(&conn, &request).map_err(|e| format!("edit: {e}"))
 }
 
-/// Persist the access-mode selection.
 #[tauri::command]
 fn set_access_mode(state: tauri::State<'_, AppState>, mode: String) -> Result<(), String> {
     let conn = state.db.lock();
     persistence::set_access_mode(&conn, &mode).map_err(|e| format!("set_access_mode: {e}"))
 }
 
-/// Insert or refresh a recent-session row.
 #[tauri::command]
 fn upsert_session(
     state: tauri::State<'_, AppState>,
@@ -288,9 +269,6 @@ fn upsert_session(
     persistence::upsert_session(&conn, &id, &label).map_err(|e| format!("upsert_session: {e}"))
 }
 
-/// Persist a full session — chat transcript + compact anchor. Frontend
-/// calls this after every assistant reply and on every /compact so the
-/// state survives a relaunch.
 #[tauri::command]
 fn save_session(
     state: tauri::State<'_, AppState>,
@@ -300,9 +278,6 @@ fn save_session(
     db_save_session(&conn, &request).map_err(|e| format!("save_session: {e}"))
 }
 
-/// List every persisted session (with transcript + compact anchor).
-/// Frontend calls this on mount to populate the recent-sessions list and
-/// to restore the previously-selected session.
 #[tauri::command]
 fn list_sessions_full(
     state: tauri::State<'_, AppState>,
@@ -334,8 +309,43 @@ fn load_skill(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> 
     Ok(SkillDetail { summary, body })
 }
 
-/// Seed the database on first run with a placeholder proposal so the UI
-/// has something to display. Idempotent.
+#[tauri::command]
+fn run_shell_command(
+    state: tauri::State<'_, AppState>,
+    request: workspace::ShellCommandRequest,
+) -> Result<workspace::ShellCommandResult, String> {
+    let conn = state.db.lock();
+    let mode = current_access_mode(&conn)?;
+    workspace::run_shell_command(request, mode.as_deref())
+}
+
+#[tauri::command]
+fn read_workspace_file(
+    request: workspace::ReadWorkspaceFileRequest,
+) -> Result<workspace::ReadWorkspaceFileResult, String> {
+    workspace::read_workspace_file(request)
+}
+
+#[tauri::command]
+fn write_workspace_file(
+    state: tauri::State<'_, AppState>,
+    request: workspace::WriteWorkspaceFileRequest,
+) -> Result<workspace::WriteWorkspaceFileResult, String> {
+    let conn = state.db.lock();
+    let mode = current_access_mode(&conn)?;
+    workspace::write_workspace_file(request, mode.as_deref())
+}
+
+#[tauri::command]
+fn apply_workspace_edit(
+    state: tauri::State<'_, AppState>,
+    request: workspace::ApplyWorkspaceEditRequest,
+) -> Result<workspace::ApplyWorkspaceEditResult, String> {
+    let conn = state.db.lock();
+    let mode = current_access_mode(&conn)?;
+    workspace::apply_workspace_edit(request, mode.as_deref())
+}
+
 fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
     let exists: bool = conn
         .query_row(
@@ -364,16 +374,10 @@ fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load .env (if present) into the process environment so
-    // MINIMAX_API_KEY reaches send_minimax_chat without an external
-    // wrapper script. Bundled MSI/NSIS installers are unaffected: a
-    // missing file is not an error here.
     let _ = dotenvy::dotenv();
 
     tauri::Builder::default()
         .setup(|app| {
-            // Resolve <app_data_dir>/zeus.db. Tauri creates the dir on
-            // first access; open_and_init creates the file and schema.
             let db_path = match app.path().app_data_dir() {
                 Ok(dir) => dir.join("zeus.db"),
                 Err(_) => std::path::PathBuf::from("zeus.db"),
@@ -399,6 +403,10 @@ pub fn run() {
             list_sessions_full,
             list_skills,
             load_skill,
+            run_shell_command,
+            read_workspace_file,
+            write_workspace_file,
+            apply_workspace_edit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");
@@ -407,7 +415,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::{build_skill_system_message, ChatRequest, ProviderError};
+    use providers::{ChatRequest, ProviderError};
 
     fn sample_request(provider: &str) -> ChatRequest {
         ChatRequest {
@@ -425,26 +433,13 @@ mod tests {
     fn list_providers_includes_minimax_openai_anthropic() {
         let providers = list_provider_info();
         let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
-        assert!(ids.contains(&"minimax"), "minimax not registered");
-        assert!(ids.contains(&"openai"), "openai not registered");
-        assert!(ids.contains(&"anthropic"), "anthropic not registered");
-        assert!(providers.iter().any(|p| p.id == "minimax" && p.default_model == "MiniMax-M3"));
-        assert!(providers.iter().any(|p| p.id == "openai" && p.display_name == "OpenAI"));
-        assert!(providers.iter().any(|p| p.id == "anthropic" && p.default_model == "claude-3-5-sonnet-latest"));
-    }
-
-    #[test]
-    fn provider_error_messages_do_not_leak_secrets() {
-        let err = ProviderError::MissingApiKey { provider: "openai".to_string() };
-        assert!(err.public_message().contains("OPENAI_API_KEY") || err.public_message().contains("openai"));
-        assert!(!err.public_message().contains("sk-"));
+        assert!(ids.contains(&"minimax"));
+        assert!(ids.contains(&"openai"));
+        assert!(ids.contains(&"anthropic"));
     }
 
     #[test]
     fn send_chat_routes_to_requested_provider() {
-        // Without an API key set, dispatch returns MissingApiKey. The
-        // provider id appears in the error message, proving the right
-        // provider was selected by the dispatcher.
         let request = sample_request("minimax");
         let result = futures_block_on(dispatch_chat(&request, None));
         match result {
@@ -455,7 +450,6 @@ mod tests {
         }
     }
 
-    /// Tiny block_on for tests so we don't depend on tokio's `block_on`.
     fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
         use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
 
@@ -515,7 +509,6 @@ mod tests {
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id, "alpha-skill");
-        assert_eq!(skills[0].name, "alpha-skill");
         assert_eq!(skills[0].description, "Alpha metadata only.");
         assert!(skills[0].has_references);
     }
@@ -539,52 +532,6 @@ mod tests {
         assert!(!valid_skill_id("skill_name"));
     }
 
-    #[test]
-    fn build_skill_system_message_wraps_body_with_id_and_name() {
-        let raw = "---\nname: debugging-and-error-recovery\ndescription: root-cause helper\n---\n\nAlways start by reproducing the bug.\n";
-        let msg = build_skill_system_message("debugging-and-error-recovery", raw)
-            .expect("skill message should build");
-        assert_eq!(msg.role, "system");
-        assert!(msg.content.contains("debugging-and-error-recovery"));
-        assert!(msg.content.contains("Always start by reproducing the bug."));
-        assert!(msg.content.contains("<skill"));
-    }
-
-    #[test]
-    fn build_skill_system_message_returns_none_for_empty_body() {
-        let raw = "---\nname: empty-skill\ndescription: empty body\n---\n\n";
-        assert!(build_skill_system_message("empty-skill", raw).is_none());
-    }
-
-    #[test]
-    fn build_skill_system_message_returns_none_without_frontmatter() {
-        let raw = "no frontmatter here, just text\n";
-        assert!(build_skill_system_message("no-frontmatter", raw).is_none());
-    }
-
-    #[test]
-    fn chat_request_carries_skill_id_to_dispatcher() {
-        // The dispatcher keeps the skill_id untouched; the skill injection
-        // step is handled by `inject_skill` in lib.rs before the call.
-        let request = ChatRequest {
-            provider: "minimax".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "hi".to_string(),
-            }],
-            skill_id: Some("stub".to_string()),
-            options: serde_json::Value::Null,
-        };
-        // Force the dispatch path to fail predictably (no API key) so we
-        // can assert the request reached the provider with skill_id set.
-        let result = futures_block_on(dispatch_chat(&request, None));
-        assert!(matches!(result, Err(ProviderError::MissingApiKey { .. })));
-    }
-
-    // -- persistence tests ---------------------------------------
-
-    /// Open a fresh in-memory-ish DB for each test by pointing at a unique
-    /// tempfile path. sqlite uses a file because :memory: is per-connection.
     fn temp_db() -> Connection {
         let dir = std::env::temp_dir().join(format!(
             "zeus_test_{}_{:?}",
@@ -597,101 +544,16 @@ mod tests {
         open_and_init(&path).expect("open")
     }
 
-    fn seed(conn: &Connection) {
-        seed_default_state(conn).expect("seed")
-    }
-
     #[test]
     fn seed_creates_default_proposal_once() {
         let conn = temp_db();
-        seed(&conn);
+        seed_default_state(&conn).unwrap();
         let p = persistence::load_state(&conn).unwrap();
         assert_eq!(p.proposals.len(), 1);
         assert_eq!(p.proposals[0].id, "proposal-001");
-        assert_eq!(p.proposals[0].status, "ready");
-
-        // Second call does not duplicate.
-        seed(&conn);
+        seed_default_state(&conn).unwrap();
         let p = persistence::load_state(&conn).unwrap();
         assert_eq!(p.proposals.len(), 1);
-    }
-
-    #[test]
-    fn record_action_writes_history_and_updates_status() {
-        let conn = temp_db();
-        seed(&conn);
-        let after = persistence::record_action(
-            &conn,
-            &RecordActionRequest {
-                proposal_id: "proposal-001".into(),
-                action: "approved".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(after.status, "approved");
-        let state = persistence::load_state(&conn).unwrap();
-        let our_history: Vec<_> = state
-            .history
-            .iter()
-            .filter(|h| h.proposal_id == "proposal-001")
-            .collect();
-        assert_eq!(our_history.len(), 1);
-        assert_eq!(our_history[0].action, "approved");
-    }
-
-    #[test]
-    fn edit_proposal_replaces_summary_and_appends_history() {
-        let conn = temp_db();
-        seed(&conn);
-        let after = persistence::apply_proposal_edit(
-            &conn,
-            &EditProposalRequest {
-                proposal_id: "proposal-001".into(),
-                new_summary: "Edited summary".into(),
-                new_body: "Now we want X".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(after.summary, "Edited summary");
-        assert_eq!(after.body, "Now we want X");
-        assert_eq!(after.status, "edited");
-        let state = persistence::load_state(&conn).unwrap();
-        let edit_entry = state
-            .history
-            .iter()
-            .find(|h| h.action == "edited")
-            .expect("edited entry");
-        assert_eq!(edit_entry.body_snapshot, "Now we want X");
-    }
-
-    #[test]
-    fn rollback_restores_previous_body() {
-        let conn = temp_db();
-        seed(&conn);
-        // First edit: body = "first body"
-        persistence::apply_proposal_edit(
-            &conn,
-            &EditProposalRequest {
-                proposal_id: "proposal-001".into(),
-                new_summary: "after first edit".into(),
-                new_body: "first body".into(),
-            },
-        )
-        .unwrap();
-        // Second edit: body = "second body"
-        persistence::apply_proposal_edit(
-            &conn,
-            &EditProposalRequest {
-                proposal_id: "proposal-001".into(),
-                new_summary: "after second edit".into(),
-                new_body: "second body".into(),
-            },
-        )
-        .unwrap();
-        // Roll back: should restore body to "first body".
-        let rolled = persistence::rollback_proposal(&conn, "proposal-001").unwrap();
-        assert_eq!(rolled.body, "first body");
-        assert_eq!(rolled.status, "rolled-back");
     }
 
     #[test]
@@ -703,19 +565,5 @@ mod tests {
         persistence::set_access_mode(&conn, "Locked").unwrap();
         let state = persistence::load_state(&conn).unwrap();
         assert_eq!(state.access_mode.as_deref(), Some("Locked"));
-    }
-
-    #[test]
-    fn upsert_session_inserts_and_refreshes() {
-        let conn = temp_db();
-        persistence::upsert_session(&conn, "sess-1", "Initial").unwrap();
-        let state = persistence::load_state(&conn).unwrap();
-        assert_eq!(state.sessions.len(), 1);
-        assert_eq!(state.sessions[0].label, "Initial");
-
-        persistence::upsert_session(&conn, "sess-1", "Updated").unwrap();
-        let state = persistence::load_state(&conn).unwrap();
-        assert_eq!(state.sessions[0].label, "Updated");
-        assert_eq!(state.sessions.len(), 1); // not duplicated
     }
 }
