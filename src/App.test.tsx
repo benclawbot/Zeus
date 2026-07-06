@@ -242,7 +242,7 @@ describe("App", () => {
     expect(screen.getByText("/compact")).toBeInTheDocument();
     expect(screen.getByText("/stop")).toBeInTheDocument();
     // Hint visible too.
-    expect(screen.getByText(/Enter.*Tab to pick/i)).toBeInTheDocument();
+    expect(screen.getByText(/Enter.*Tab pick/i)).toBeInTheDocument();
   });
 
   it("arrow keys + Enter picks the highlighted slash command", async () => {

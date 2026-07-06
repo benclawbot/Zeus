@@ -1860,7 +1860,7 @@ useEffect(() => {
                       );
                     })
                   )}
-                  <p className="slash-hint">Up Down to move - Enter or Tab to pick - Esc to close</p>
+                  <p className="slash-hint">Up Down navigate, Enter or Tab pick, Esc close. Typing a space picks the command and starts its arguments.</p>
                 </div>
               ) : null}
 
