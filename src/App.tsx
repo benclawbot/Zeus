@@ -1711,7 +1711,13 @@ useEffect(() => {
         <nav className="nav-list">
           {navItems.map(({ label, icon: Icon }) => (
             <button className={label === activeView ? "nav-item active" : "nav-item"} key={label} type="button" onClick={() => setActiveView(label)}>
-              <Icon size={16} />{label}
+              <Icon size={16} />
+              <span className="nav-label">{label}</span>
+              {label === "Harness Evolution" && notificationCount > 0 ? (
+                <span className="nav-badge" aria-label={`${notificationCount} pending proposal${notificationCount === 1 ? "" : "s"}`}>
+                  {notificationCount > 9 ? "9+" : notificationCount}
+                </span>
+              ) : null}
             </button>
           ))}
         </nav>
