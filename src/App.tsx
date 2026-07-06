@@ -338,8 +338,6 @@ export function App() {
       return fallback;
     }
   });
-  const [proposalEditing, setProposalEditing] = useState(false);
-  const [proposalDraft, setProposalDraft] = useState("");
   const [history, setHistory] = useState<HarnessHistoryEntry[]>(() => {
     if (typeof localStorage === "undefined") return [];
     try {
@@ -542,31 +540,56 @@ export function App() {
     return estimateTokensForMessages(projected);
   }, [chat, compactFromId, message, activeProviderId, providers, terseLevel, minimalLevel, providerKeysStatus.openaiModel, providerKeysStatus.anthropicModel, providerKeysStatus.minimaxModel]);
 
-  function recordProposal(action: Exclude<HarnessProposal["status"], "ready">) {
-    const result = transitionHarnessProposal(proposal, action);
+  function recordProposalTransition(action: HarnessProposal["status"], sessionId?: string) {
+    if (!proposal) return;
+    const result = transitionHarnessProposal(proposal, action, new Date().toISOString(), sessionId);
     setProposal(result.proposal);
     setHistory((entries) => [result.historyEntry, ...entries].slice(0, 4));
   }
 
-  function beginProposalEdit() {
-    setProposalDraft(proposal.body || proposal.summary);
-    setProposalEditing(true);
-  }
-
-  function saveProposalEdit() {
-    const nextBody = proposalDraft.trim();
-    if (!nextBody) return;
-    setProposal((current) => ({
-      ...current,
-      body: nextBody,
-      summary: nextBody.length > 140 ? `${nextBody.slice(0, 137)}...` : nextBody,
-      status: "edited",
-    }));
+  function applyProposal() {
+    if (!proposal) return;
+    const proposalSnapshot = proposal;
+    const implementingSessionId = newSessionId();
+    const ref: SessionRef = {
+      id: implementingSessionId,
+      label: proposalSnapshot.title,
+      projectId: activeProject.id,
+      projectName: activeProject.name,
+    };
+    // 1. Mark the proposal as approved and link the implementing session in history.
+    const proposalApproved = { ...proposalSnapshot, status: "approved" as const };
+    setProposal(proposalApproved);
     setHistory((entries) => [
-      { proposalId: proposal.id, action: "edited" as const, at: new Date().toISOString() },
+      { proposalId: proposalApproved.id, action: "approved" as const, at: new Date().toISOString(), sessionId: implementingSessionId },
       ...entries,
     ].slice(0, 4));
-    setProposalEditing(false);
+    // 2. Create the new session with the proposal title as its label.
+    setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== implementingSessionId)].slice(0, 20));
+    setActiveSession(ref);
+    setChat([]);
+    setCompactFromId(null);
+    setMessage(proposalSnapshot.body);
+    setAttachedFiles([]);
+    setActiveSkillId(null);
+    setRunState("idle");
+    setActiveView("Home");
+    setActiveProjectId(ref.projectId);
+    setProposalDraftBody(proposalSnapshot.body);
+    saveSession({
+      id: ref.id,
+      label: ref.label,
+      projectId: ref.projectId,
+      projectName: ref.projectName,
+      messagesJson: "[]",
+      compactFromId: null,
+    }).catch(() => undefined);
+    // 3. Focus the composer — no auto-send. The user edits and presses Send.
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function discardProposal() {
+    recordProposalTransition("rejected");
   }
 
   // Persist the active session if there's any meaningful state to save
@@ -760,7 +783,6 @@ export function App() {
       body: rule,
       status: "ready",
     });
-    setProposalEditing(false);
     const at = new Date().toISOString();
     const newEntry: HarnessHistoryEntry = { proposalId: id, action: "ready", at };
     setHistory((entries) => [newEntry, ...entries].slice(0, 4));
@@ -1739,13 +1761,8 @@ useEffect(() => {
           <h2 id="harness-title">{proposal.title}</h2>
           <p>{proposal.summary}</p>
           <div className="proposal-actions">
-            <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
-            <button type="button" onClick={beginProposalEdit}>Edit</button>
-            <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
-          </div>
-          <div className="proposal-actions secondary">
-            <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
-            <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
+            <button type="button" onClick={applyProposal}>Apply</button>
+            <button type="button" onClick={discardProposal}>Discard</button>
           </div>
           <p className="proposal-status">Status: {proposal.status}</p>
         </section>
@@ -2007,25 +2024,39 @@ useEffect(() => {
             {activeView === "Harness Evolution" && (
               <div className="utility-card">
                 <p>{proposal.summary}</p>
-                {proposalEditing ? (
-                  <div className="proposal-editor">
-                    <textarea aria-label="Harness proposal body" value={proposalDraft} onChange={(event) => setProposalDraft(event.target.value)} />
-                    <div className="proposal-actions">
-                      <button type="button" onClick={saveProposalEdit}>Save proposal</button>
-                      <button type="button" onClick={() => setProposalEditing(false)}>Cancel</button>
-                    </div>
+                <p className="proposal-body">{proposal.body}</p>
+                {(proposal.status === "ready" || proposal.status === "edited") ? (
+                  <div className="proposal-actions">
+                    <button type="button" onClick={applyProposal}>Apply</button>
+                    <button type="button" onClick={discardProposal}>Discard</button>
                   </div>
-                ) : (
-                  <p className="proposal-body">{proposal.body}</p>
-                )}
-                <div className="proposal-actions">
-                  <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
-                  <button type="button" onClick={beginProposalEdit}>Edit</button>
-                  <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
-                  <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
-                  <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
-                </div>
+                ) : proposal.status === "implementing" || proposal.status === "applied" || proposal.status === "failed" ? (
+                  <p className="proposal-status-linked">
+                    {proposal.status === "implementing" ? "Implementing session is active in Home. Edit the composer and send to start the agent run." : proposal.status === "applied" ? "Approved improvement was applied via the implementing session. No further actions on this proposal." : "Approved improvement did not complete. Review the implementing session for partial results."}
+                  </p>
+                ) : null}
                 <p className="proposal-status">Status: {proposal.status}</p>
+                {(() => {
+                  const linked = history.find((entry) => entry.sessionId && entry.proposalId === proposal.id);
+                  if (!linked?.sessionId) return null;
+                  const sessionRef = recentSessions.find((s) => s.id === linked.sessionId);
+                  return (
+                    <p className="proposal-linked-session">
+                      Implementing session:{" "}
+                      {sessionRef ? (
+                        <button
+                          className="link-button"
+                          type="button"
+                          onClick={() => selectSession(sessionRef)}
+                        >
+                          {sessionRef.label}
+                        </button>
+                      ) : (
+                        <span className="skills-muted">session no longer in recent list</span>
+                      )}
+                    </p>
+                  );
+                })()}
                 {history.length === 0 ? (
                   <p className="skills-muted">No harness changes applied in this session.</p>
                 ) : (

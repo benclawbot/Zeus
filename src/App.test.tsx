@@ -27,7 +27,7 @@ describe("App", () => {
   it("tracks harness proposal decisions in change history", async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     expect(screen.getByText("Status: approved")).toBeInTheDocument();
     expect(screen.getByText(/approved \//i)).toBeInTheDocument();
