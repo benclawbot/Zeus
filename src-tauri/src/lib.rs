@@ -239,7 +239,7 @@ fn skill_index_from_dir(root: &Path) -> Result<Vec<SkillIndexEntry>, String> {
     for path in dirs {
         match skill_index_entry_from_dir(&path) {
             Ok(entry) => skills.push(entry),
-            Err(error) => eprintln!("Skipping invalid skill {}: {error}", path.display()),
+            Err(error) => tracing::warn!(skill = %path.display(), "Skipping invalid skill: {error}"),
         }
     }
     skills.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
