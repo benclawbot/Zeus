@@ -2,6 +2,7 @@ export type EffortTier = "low" | "medium" | "high";
 export type StepOutcome = "success" | "failure" | "escalated";
 export type CheckpointSource = "checkpoint" | "error" | "escalation";
 export type GateActionKind = "file-write" | "shell" | "network" | "credential" | "spend";
+export type ShellCommandClass = "safe" | "dependency" | "network" | "destructive" | "privileged";
 
 export interface GoalSpec {
   goal: string;
@@ -37,6 +38,7 @@ export interface GateAction {
   kind: GateActionKind;
   target: string;
   workspaceRelative: boolean;
+  shellClass?: ShellCommandClass;
   amount?: number;
   approved?: boolean;
 }
@@ -63,6 +65,10 @@ export interface HarnessPatchProposal {
 }
 
 const SPEND_APPROVAL_THRESHOLD = 10;
+const PRIVILEGED_COMMANDS = new Set(["sudo", "su", "doas"]);
+const DESTRUCTIVE_COMMANDS = new Set(["rm", "del", "erase", "rmdir", "format", "mkfs", "dd", "shutdown", "reboot", "halt", "poweroff"]);
+const DEPENDENCY_COMMANDS = new Set(["npm", "pnpm", "yarn", "cargo", "pip", "pip3", "poetry", "bun"]);
+const NETWORK_COMMANDS = new Set(["curl", "wget", "ssh", "scp", "rsync", "gh"]);
 
 export function classifyEffort(signals: EffortSignals): EffortTier {
   if (signals.priorFailures >= 2) return "high";
@@ -119,10 +125,33 @@ export function evaluateGate(action: GateAction): GateDecision {
   if (action.kind === "credential") {
     return { allowed: false, approvalRequired: true, reason: "credential or API key use" };
   }
+  if (action.kind === "shell") {
+    const shellClass = action.shellClass ?? classifyShellCommand(action.target);
+    if (shellClass !== "safe") {
+      return { allowed: false, approvalRequired: true, reason: `${shellClass} shell command` };
+    }
+  }
   if (action.kind === "spend" && (action.amount ?? 0) > SPEND_APPROVAL_THRESHOLD) {
     return { allowed: false, approvalRequired: true, reason: "spend above configured threshold" };
   }
   return { allowed: true, approvalRequired: false, reason: "routine in-workspace action" };
+}
+
+export function classifyShellCommand(command: string): ShellCommandClass {
+  const text = command.trim().toLowerCase();
+  const program = text.split(/\s+/)[0] ?? "";
+  const name = program
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()
+    ?.replace(/\.(exe|cmd|bat|ps1)$/i, "") ?? program;
+
+  if (PRIVILEGED_COMMANDS.has(name)) return "privileged";
+  if (DESTRUCTIVE_COMMANDS.has(name)) return "destructive";
+  if (name === "git" && (/\b(reset|clean|push)\b/.test(text) || text.includes(" checkout --"))) return "destructive";
+  if (DEPENDENCY_COMMANDS.has(name) && /\b(install|add|update|remove)\b/.test(text)) return "dependency";
+  if (NETWORK_COMMANDS.has(name)) return "network";
+  return "safe";
 }
 
 export function analyzeHarnessLogs(input: {

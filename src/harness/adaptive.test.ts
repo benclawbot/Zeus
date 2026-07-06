@@ -44,6 +44,14 @@ describe("adaptive harness core", () => {
     expect(evaluateGate({ id: "4", kind: "credential", target: "OPENAI_API_KEY", workspaceRelative: true }).approvalRequired).toBe(true);
   });
 
+  it("requires approval for risky shell commands before routine actions", () => {
+    expect(evaluateGate({ id: "1", kind: "shell", target: "npm test", workspaceRelative: true }).allowed).toBe(true);
+    expect(evaluateGate({ id: "2", kind: "shell", target: "git reset --hard", workspaceRelative: true }).approvalRequired).toBe(true);
+    expect(evaluateGate({ id: "3", kind: "shell", target: "curl https://example.com", workspaceRelative: true }).approvalRequired).toBe(true);
+    expect(evaluateGate({ id: "4", kind: "shell", target: "sudo npm test", workspaceRelative: true }).approvalRequired).toBe(true);
+    expect(evaluateGate({ id: "5", kind: "shell", target: "npm install", workspaceRelative: true }).approvalRequired).toBe(true);
+  });
+
   it("proposes harness tuning from observed waste and failures", () => {
     const result = analyzeHarnessLogs({
       checkpointsWritten: [
