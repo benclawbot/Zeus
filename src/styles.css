@@ -434,6 +434,38 @@ kbd {
   gap: 12px;
   align-items: start;
   width: 100%;
+  /* User bubbles align right; Zeus bubbles (default) align left. */
+}
+
+.chat-zeus {
+  grid-template-columns: 32px 1fr;
+  justify-content: start;
+}
+
+.chat-user {
+  /* Push the avatar + body to the right edge of the conversation. */
+  grid-template-columns: 1fr 32px;
+  direction: rtl;
+}
+
+.chat-user .chat-body {
+  direction: ltr;
+  text-align: right;
+  align-items: flex-end;
+}
+
+.chat-user .chat-heading {
+  justify-content: flex-end;
+  flex-direction: row-reverse;
+}
+
+.chat-user .chat-heading time {
+  margin-right: 0;
+  margin-left: 12px;
+}
+
+.chat-user .chat-body > * {
+  max-width: 85%;
 }
 
 .chat-avatar {
@@ -460,7 +492,7 @@ kbd {
   gap: 4px;
 }
 
-.chat-bubble p {
+.chat-user p {
   margin: 0;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -1749,4 +1781,205 @@ textarea:focus-visible {
   word-break: break-word;
   max-height: 120px;
   overflow: auto;
+}
+
+/* ===== Markdown rendering for chat bubbles ===== */
+.chat-md {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.chat-md-para {
+  margin: 0;
+  word-wrap: break-word;
+  white-space: normal;
+}
+
+.chat-md-header {
+  margin: 6px 0 4px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.25;
+}
+
+.chat-md-h1 { font-size: 1.45rem; }
+.chat-md-h2 { font-size: 1.25rem; }
+.chat-md-h3 { font-size: 1.1rem; }
+.chat-md-h4 { font-size: 1rem; }
+.chat-md-h5 { font-size: 0.94rem; }
+.chat-md-h6 { font-size: 0.86rem; color: var(--muted); }
+
+.chat-md-inline-code {
+  background: rgba(90, 56, 222, 0.08);
+  color: #6c3fdf;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
+
+.chat-md-codeblock {
+  background: #1d1f27;
+  color: #f1f3f7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  margin: 4px 0;
+}
+
+.chat-md-codeblock code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+.chat-md-code-lang {
+  color: #9ca0ad;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.chat-md-quote {
+  margin: 4px 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
+  font-style: italic;
+  background: var(--surface-soft);
+  border-radius: 4px;
+}
+
+.chat-md-list {
+  margin: 4px 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-md-list li {
+  word-wrap: break-word;
+}
+
+.chat-md-list-ordered { list-style: decimal; }
+.chat-md-list-unordered { list-style: disc; }
+
+.chat-md-task {
+  list-style: none;
+  margin-left: -22px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.chat-md-checkbox {
+  margin-top: 4px;
+  accent-color: var(--purple);
+}
+
+.chat-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+  margin: 4px 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.chat-md-table th,
+.chat-md-table td {
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.chat-md-table th {
+  background: var(--surface-soft);
+  font-weight: 600;
+}
+
+.chat-md-hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 6px 0;
+}
+
+.chat-md-link {
+  color: var(--purple);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-md-link:hover {
+  color: #4426c0;
+}
+
+.chat-md-image {
+  max-width: 100%;
+  border-radius: 6px;
+  margin: 4px 0;
+}
+
+/* In user-aligned bubbles, code/quote/etc. should still feel right-aligned. */
+.chat-user .chat-md {
+  align-items: flex-end;
+}
+
+.chat-user .chat-md-quote {
+  border-left: 0;
+  border-right: 3px solid var(--line-strong);
+  padding: 4px 10px;
+}
+
+.chat-user .chat-md-list {
+  padding-left: 0;
+  padding-right: 22px;
+}
+
+/* ===== Working folder button (composer) ===== */
+.composer-working-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 220px;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.composer-working-folder:hover {
+  border-color: var(--purple);
+  color: var(--purple);
+  background: var(--purple-soft);
+}
+
+.composer-working-folder.configured {
+  color: var(--text);
+  border-color: var(--purple);
+  background: var(--purple-soft);
+}
+
+.composer-working-folder-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
 }

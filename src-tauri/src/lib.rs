@@ -708,6 +708,7 @@ pub fn run() {
     let _ = dotenvy::dotenv();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Apply user-saved provider API keys (set via the Settings UI)
             // on top of whatever .env / process env already has. Missing

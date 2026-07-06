@@ -374,40 +374,50 @@ describe("App", () => {
     expect(screen.getByText("Usage: /edit <path> :: <find> => <replace>")).toBeInTheDocument();
   });
 
-  it("shows the empty tool-run panel on the Home view", () => {
+  it("shows the working folder button in the composer", () => {
+      render(<App />);
+    // The picker button is present at the composer level, next to the
+    // Access mode select. No "Access" text label in the composer anymore.
+    const composer = screen.getByLabelText("Message composer");
+    const folderButton = within(composer).getByRole("button", { name: /Pick a working folder|Working folder:/i });
+    expect(folderButton).toBeInTheDocument();
+    expect(within(composer).queryByText("Access")).not.toBeInTheDocument();
+  });
+
+it("shows the empty tool-run panel on the Home view", () => {
       render(<App />);
       expect(screen.getByText("Tool runs")).toBeInTheDocument();
       expect(screen.getByText("no runs yet")).toBeInTheDocument();
     });
 
     it("shows the Settings view with a provider API keys form", async () => {
-      const user = userEvent.setup();
-      render(<App />);
+            const user = userEvent.setup();
+          render(<App />);
 
-      await user.click(screen.getByRole("button", { name: "Settings" }));
+          await user.click(screen.getByRole("button", { name: "Settings" }));
 
-      // Three provider rows should be visible, each labeled with the env var name.
-      expect(screen.getByText("MiniMax (MINIMAX_API_KEY)")).toBeInTheDocument();
-      expect(screen.getByText("OpenAI (OPENAI_API_KEY)")).toBeInTheDocument();
-      expect(screen.getByText("Anthropic (ANTHROPIC_API_KEY)")).toBeInTheDocument();
-      // In jsdom isTauri is false, so each provider shows "not configured".
-      const rows = screen.getAllByText("not configured");
-      expect(rows.length).toBe(3);
-      // Each provider should also expose a Base URL input, a Model input, and
-      // a Test connection button. The Test button is disabled when no key is
-      // configured.
-      expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) base URL")).toHaveLength(1);
-      expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) model")).toHaveLength(1);
-      const testButtons = screen.getAllByRole("button", { name: "Test connection" });
-      expect(testButtons.length).toBe(3);
-      for (const btn of testButtons) {
-        expect(btn).toBeDisabled();
-      }
-    });
+          // Three provider rows should be visible, each labeled with the env var name.
+          expect(screen.getByText("MiniMax (MINIMAX_API_KEY)")).toBeInTheDocument();
+          expect(screen.getByText("OpenAI (OPENAI_API_KEY)")).toBeInTheDocument();
+          expect(screen.getByText("Anthropic (ANTHROPIC_API_KEY)")).toBeInTheDocument();
+          // In jsdom isTauri is false, so each provider shows "not configured".
+          const rows = screen.getAllByText("not configured");
+          expect(rows.length).toBe(3);
+          // Each provider should also expose a Base URL input, a Model input, and
+          // a Test connection button. The Test button is disabled when no key is
+          // configured.
+          expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) base URL")).toHaveLength(1);
+          expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) model")).toHaveLength(1);
+          const testButtons = screen.getAllByRole("button", { name: "Test connection" });
+          expect(testButtons.length).toBe(3);
+          for (const btn of testButtons) {
+            expect(btn).toBeDisabled();
+          }
+        });
 
-  it("renames recent sessions and creates project groups", async () => {
-    const user = userEvent.setup();
-    render(<App />);
+it("renames recent sessions and creates project groups", async () => {
+  const user = userEvent.setup();
+  render(<App />);
 
     await user.click(screen.getByRole("button", { name: /Rename Untitled Session/ }));
     const renameInput = screen.getByLabelText("Session name") as HTMLInputElement;

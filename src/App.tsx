@@ -47,6 +47,8 @@ import {
   type AgentStepRequest,
 } from "./providers/workspace";
 import { ToolRunPanel, type ToolRunEntry } from "./components/ToolRunPanel";
+import { MarkdownView } from "./components/MarkdownView";
+import { WorkingFolderButton } from "./WorkingFolderButton";
 import "./styles.css";
 
 type AccessMode = "Full" | "Local" | "Review" | "Locked";
@@ -1277,7 +1279,9 @@ useEffect(() => {
                     {entry.skillId ? (
                       <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
                     ) : null}
-                    <p>{entry.text}</p>
+                    {/* User messages stay as pre-wrapped text — they're
+                        raw keyboard input, not markdown. */}
+                    <p className="chat-md-para">{entry.text}</p>
                   </div>
                 </article>
               ) : (
@@ -1288,7 +1292,7 @@ useEffect(() => {
                     {entry.thinking ? (
                       <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
                     ) : (
-                      <p>{entry.text}</p>
+                      <MarkdownView markdown={entry.text} />
                     )}
                   </div>
                 </article>
@@ -1331,7 +1335,6 @@ useEffect(() => {
                   <input aria-label="Choose files" className="file-input" multiple onChange={(event) => handleFileSelection(event.target.files)} ref={fileInputRef} type="file" />
                   <button aria-label="Attach file" type="button" onClick={() => fileInputRef.current?.click()}><Paperclip size={16} /></button>
                   <label className="composer-access">
-                    <span className="composer-access-label">Access</span>
                     <select
                       aria-label="Access mode"
                       className="composer-access-select"
@@ -1347,6 +1350,7 @@ useEffect(() => {
                       ))}
                     </select>
                   </label>
+                  <WorkingFolderButton />
                   {attachedFiles.map((file) => (
                     <span className={file.kind === "image" ? "attached-chip image" : "attached-chip"} key={file.id}>
                       {file.kind === "image" && file.previewUrl ? (
