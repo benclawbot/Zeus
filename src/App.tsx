@@ -56,7 +56,29 @@ import {
 } from "./providers/workspace";
 import { ToolRunPanel, type ToolRunEntry } from "./components/ToolRunPanel";
 import { MarkdownView } from "./components/MarkdownView";
+import { StatusBar } from "./components/StatusBar";
 import { WorkingFolderButton } from "./WorkingFolderButton";
+import { compressShellOutput } from "./providers/shellCompressor";
+import {
+  DEFAULT_TERSE_LEVEL,
+  getTerseOutputInstructions,
+  type TerseLevel,
+} from "./providers/terseOutputSkill";
+import {
+  DEFAULT_MINIMAL_LEVEL,
+  getMinimalCodeInstructions,
+  type MinimalLevel,
+} from "./providers/minimalCodeSkill";
+import {
+  contextWindowUsage,
+  lookupContextWindow,
+} from "./providers/contextWindow";
+import {
+  decideAutoCompact,
+  DEFAULT_COMPACT_TRIGGER_RATIO,
+  formatCompactNotice,
+} from "./providers/autoCompact";
+import { estimateTokensForMessages } from "./providers/tokenEstimator";
 import "./styles.css";
 
 type AccessMode = "Full" | "Local" | "Review" | "Locked";
@@ -415,6 +437,30 @@ export function App() {
     if (typeof localStorage === "undefined") return;
     try { localStorage.setItem("zeus.tokenTotals", JSON.stringify(tokenTotals)); } catch { /* ignore */ }
   }, [tokenTotals]);
+  // Terse-output skill level (Spec 04). Persisted in localStorage so the
+  // user's preference survives a relaunch. Default: "full" (the spec's
+  // recommended default).
+  const [terseLevel, setTerseLevel] = useState<TerseLevel>(() => {
+    if (typeof localStorage === "undefined") return DEFAULT_TERSE_LEVEL;
+    const raw = localStorage.getItem("zeus.terseLevel");
+    if (raw === "off" || raw === "lite" || raw === "full" || raw === "ultra") return raw;
+    return DEFAULT_TERSE_LEVEL;
+  });
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem("zeus.terseLevel", terseLevel); } catch { /* ignore */ }
+  }, [terseLevel]);
+  // Minimal-code-generation skill level (Spec 05). Persisted.
+  const [minimalLevel, setMinimalLevel] = useState<MinimalLevel>(() => {
+    if (typeof localStorage === "undefined") return DEFAULT_MINIMAL_LEVEL;
+    const raw = localStorage.getItem("zeus.minimalLevel");
+    if (raw === "off" || raw === "lite" || raw === "full" || raw === "strict") return raw;
+    return DEFAULT_MINIMAL_LEVEL;
+  });
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem("zeus.minimalLevel", minimalLevel); } catch { /* ignore */ }
+  }, [minimalLevel]);
   // Project-aware context: cache the most recent project config snapshot
   // so the model knows the workspace it is operating in without the user
   // pasting package.json into the composer. Refreshed on mount and
@@ -466,6 +512,30 @@ export function App() {
     if (found) return `${found.displayName} (${found.defaultModel})`;
     return activeProviderId;
   }, [providers, activeProviderId]);
+
+  // Live projected token count for the next outgoing prompt. Recomputed
+  // whenever the chat, the compact anchor, the typed message, or the
+  // active provider/model changes. Drives the status bar's percentage.
+  const livePromptTokens = useMemo(() => {
+    const providerOverrides = (() => {
+      switch (activeProviderId) {
+        case "openai":
+          return { model: providerKeysStatus.openaiModel ?? undefined };
+        case "anthropic":
+          return { model: providerKeysStatus.anthropicModel ?? undefined };
+        case "minimax":
+        default:
+          return { model: providerKeysStatus.minimaxModel ?? undefined };
+      }
+    })();
+    const activeModel = providerOverrides.model ?? providers.find((p) => p.id === activeProviderId)?.defaultModel ?? "";
+    const projected: { role: "system" | "user" | "assistant"; content: string }[] = [
+      { role: "system", content: SYSTEM_PROMPT + getTerseOutputInstructions(terseLevel) + getMinimalCodeInstructions(minimalLevel) },
+      ...buildContextMessages(chat, compactFromId),
+      ...(message.trim() ? [{ role: "user" as const, content: message.trim() }] : []),
+    ];
+    return estimateTokensForMessages(projected);
+  }, [chat, compactFromId, message, activeProviderId, providers, terseLevel, minimalLevel, providerKeysStatus.openaiModel, providerKeysStatus.anthropicModel, providerKeysStatus.minimaxModel]);
 
   function recordProposal(action: Exclude<HarnessProposal["status"], "ready">) {
     const result = transitionHarnessProposal(proposal, action);
@@ -692,12 +762,22 @@ export function App() {
 
   function summarizeRun(result: ShellCommandResult): string {
     const head = result.exitCode === 0 ? "ran" : result.timedOut ? "timed out" : `exit ${result.exitCode ?? "?"}`;
-    const tail = result.stdout.trim() || result.stderr.trim();
-    const trimmed = tail.length > 320 ? `${tail.slice(0, 317)}...` : tail;
+    // Spec 01 — apply the built-in shell-output compressor to the
+    // command's stdout so the next turn's context stays small. The
+    // compressor is fail-open: unknown commands pass through untouched.
+    const cmdString = `${result.program} ${result.args.join(" ")}`;
+    const compressed = compressShellOutput(cmdString, result.stdout, result.exitCode ?? 0);
+    const tail = compressed.text.trim() || result.stderr.trim();
+    const trimmed = tail.length > 800 ? `${tail.slice(0, 797)}...` : tail;
     const policy = `policy: ${result.policy.commandClass} / ${result.policy.accessMode}${result.policy.approvalRequired && !result.policy.approved ? " (needs approval)" : ""}`;
+    // Annotate when the compressor actually reduced the output so the
+    // user can see Spec 01 saving tokens in real time.
+    const saved = compressed.profileId && compressed.originalChars > compressed.compressedChars
+      ? ` (compressed ${compressed.profileId}: ${compressed.originalChars}→${compressed.compressedChars} chars)`
+      : "";
     return `${head} \`${result.program} ${result.args.join(" ")}` +
       `${result.timedOut ? " [timed out]" : ""}` +
-      ` (${result.durationMs}ms)` +
+      ` (${result.durationMs}ms)${saved}` +
       `${trimmed ? `\n\n${trimmed}` : ""}\n\n${policy}`;
   }
 
@@ -1090,12 +1170,62 @@ export function App() {
       ? `\n\nActive workspace config: ${projectConfig.path}\n\`\`\`json\n${JSON.stringify(projectConfig.config, null, 2).slice(0, 2000)}\n\`\`\``
       : "";
 
+    // Auto-compaction gate: if the outgoing prompt would exceed the
+    // active model's 40% threshold, compact the chat history *before*
+    // sending. This is a no-op for short prompts; for long ones it
+    // keeps the model from running out of headroom mid-turn.
+    const activeModelId = (() => {
+      switch (activeProviderId) {
+        case "openai": return providerKeysStatus.openaiModel ?? providers.find((p) => p.id === "openai")?.defaultModel ?? "";
+        case "anthropic": return providerKeysStatus.anthropicModel ?? providers.find((p) => p.id === "anthropic")?.defaultModel ?? "";
+        case "minimax":
+        default: return providerKeysStatus.minimaxModel ?? providers.find((p) => p.id === "minimax")?.defaultModel ?? "";
+      }
+    })();
+    const providerModel = activeModelId;
+    const triggerRatio = DEFAULT_COMPACT_TRIGGER_RATIO;
+    const projectedMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+      { role: "system", content: SYSTEM_PROMPT + projectHint },
+      ...contextMessages,
+      { role: "user", content: promptWithAttachments },
+    ];
+    const decision = decideAutoCompact(projectedMessages, providerModel, activeProviderId, triggerRatio);
+    if (decision.shouldCompact) {
+      // Persist a copy of the chat so we can mention what we lost in
+      // the notice, then call compactContext (which already mutates
+      // `chat` and `compactFromId` and re-saves the session).
+      const droppedCount = chat.filter((entry) => entry.thinking !== true && (compactFromId === null || entry.id < compactFromId)).length;
+      compactContext();
+      // Build the auto-compact notice after the state has settled so
+      // the user sees what just happened. We do this through a setTimeout
+      // to keep the order of side-effects predictable (the actual
+      // compact already queued its own persistActiveSession).
+      setTimeout(() => {
+        appendZeusMessage(`${formatCompactNotice(decision)} Dropped ${droppedCount} earlier turn(s).`);
+      }, 0);
+      // Re-build contextMessages from the freshly-compacted chat.
+      const freshSnapshot = [...chatRef.current, userMessage, thinkingMessage] as UiChatBubble[];
+      const freshContext = buildContextMessages(freshSnapshot, compactFromIdRef.current);
+      projectedMessages.length = 0;
+      projectedMessages.push(
+        { role: "system", content: SYSTEM_PROMPT + projectHint },
+        ...freshContext,
+        { role: "user", content: promptWithAttachments },
+      );
+    }
+    // Build the final system prompt by appending the active terse and
+    // minimal-code skill bodies. The terse skill is on by default
+    // (Spec 04); the minimal-code skill is on by default (Spec 05).
+    const terseBlock = getTerseOutputInstructions(terseLevel);
+    const minimalBlock = getMinimalCodeInstructions(minimalLevel);
+    const augmentedSystem = [SYSTEM_PROMPT, terseBlock, minimalBlock, projectHint].filter((s) => s && s.trim().length > 0).join("\n\n");
+
     // Seed messages: system prompt + compact context + the user's prompt.
     // The recursive runChatTurn appends the model's last reply and any tool
     // results, so subsequent iterations see the full picture.
     const seedMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
-      { role: "system", content: SYSTEM_PROMPT + projectHint },
-      ...contextMessages,
+      { role: "system", content: augmentedSystem },
+      ...buildContextMessages([...chat, userMessage, thinkingMessage] as UiChatBubble[], compactFromId),
       { role: "user", content: promptWithAttachments },
     ];
 
@@ -1229,8 +1359,14 @@ export function App() {
       // Snapshot the latest chat into a fresh context for the recursive call.
       const nextHistorySnapshot = nextChat as UiChatBubble[];
       const nextContextMessages = buildContextMessages(nextHistorySnapshot, compactFromId);
+      // Use the same augmented system prompt (terse + minimal-code) on
+      // every recursive turn so a multi-step tool run doesn't drop the
+      // output-discipline instructions.
+      const terseBlockRec = getTerseOutputInstructions(terseLevel);
+      const minimalBlockRec = getMinimalCodeInstructions(minimalLevel);
+      const augmentedSystemRec = [SYSTEM_PROMPT, terseBlockRec, minimalBlockRec].filter((s) => s && s.trim().length > 0).join("\n\n");
       const nextMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: augmentedSystemRec },
         ...nextContextMessages,
       ];
 
@@ -1793,6 +1929,14 @@ useEffect(() => {
             </section>
 
             <ToolRunPanel entries={toolRuns} />
+
+            <StatusBar
+              modelId={(providerKeysStatus as unknown as Record<string, string | null>)[`${activeProviderId}Model`] || providers.find((p) => p.id === activeProviderId)?.defaultModel || ""}
+              providerId={activeProviderId}
+              promptTokens={livePromptTokens}
+              triggerRatio={DEFAULT_COMPACT_TRIGGER_RATIO}
+              onOpenSettings={() => setActiveView("Settings")}
+            />
           </>
         ) : (
           <section className="utility-view" aria-label={`${activeView} view`}>
@@ -1891,6 +2035,47 @@ useEffect(() => {
                 <p>Active mode: <strong>{accessMode}</strong></p>
                 <p className="skills-muted">{accessSummary}</p>
                 <p className="skills-muted">Change the mode from the listbox in the composer.</p>
+
+                <p className="section-label">Token efficiency</p>
+                <p className="skills-muted">
+                  Six-spec token-efficiency toolkit. Settings here apply to every chat call. The status bar at the
+                  bottom of the workspace always shows the live percentage of the active model's context window in use
+                  and the auto-compaction threshold (40% by default).
+                </p>
+                <div className="token-efficiency-row">
+                  <label className="token-efficiency-field">
+                    <span>Terse-output skill (Spec 04)</span>
+                    <select
+                      aria-label="Terse-output level"
+                      onChange={(event) => setTerseLevel(event.target.value as TerseLevel)}
+                      value={terseLevel}
+                    >
+                      <option value="off">off — baseline verbosity</option>
+                      <option value="lite">lite — drop preamble only</option>
+                      <option value="full">full — default terse mode</option>
+                      <option value="ultra">ultra — minimum grammatical form</option>
+                    </select>
+                  </label>
+                  <label className="token-efficiency-field">
+                    <span>Minimal-code skill (Spec 05)</span>
+                    <select
+                      aria-label="Minimal-code level"
+                      onChange={(event) => setMinimalLevel(event.target.value as MinimalLevel)}
+                      value={minimalLevel}
+                    >
+                      <option value="off">off</option>
+                      <option value="lite">lite — ladder steps 1–3</option>
+                      <option value="full">full — full ladder + audit comments</option>
+                      <option value="strict">strict — full + deviation justification</option>
+                    </select>
+                  </label>
+                </div>
+                <p className="skills-muted">
+                  Spec 01 (shell output compressor) and Spec 06 (code graph index) are always on.
+                  Spec 02 (context compression pipeline) and Spec 03 (MCP sandbox + session memory) are wired but
+                  operate in library mode — no UI to toggle. To see real-time compression savings, run
+                  <code> /run git status</code> from the composer.
+                </p>
 
                 <p className="section-label">Provider API keys</p>
                 <p className="skills-muted">Keys are stored in the app data folder and never leave your machine. The frontend never sees the raw value — only whether a key is configured.</p>

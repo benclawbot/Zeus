@@ -446,4 +446,33 @@ it("renames recent sessions and creates project groups", async () => {
       expect(id).toMatch(/^[a-z][a-z0-9-]*$/);
     });
   });
+
+  it("renders the status bar with the active model and context window", () => {
+    render(<App />);
+    // The status bar always surfaces the auto-compact threshold and
+    // its own pill, regardless of whether the providers list has
+    // arrived yet. The provider list is populated from the Rust
+    // backend, which isn't available in jsdom — the model id is
+    // therefore empty in this test environment, but the structural
+    // pieces are all present.
+    expect(screen.getByText(/Auto-compact/i)).toBeInTheDocument();
+    expect(screen.getByText(/≥ 40%/)).toBeInTheDocument();
+    // The "Context" label surfaces the live outgoing-prompt token
+    // count vs the active model's window.
+    expect(screen.getByText(/Context/i)).toBeInTheDocument();
+  });
+
+  it("exposes terse-output and minimal-code skill selectors in Settings", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+
+    // The Token efficiency section has two selects (terse, minimal-code).
+    expect(screen.getByLabelText("Terse-output level")).toBeInTheDocument();
+    expect(screen.getByLabelText("Minimal-code level")).toBeInTheDocument();
+    // Default values are "full" for both per the spec recommendation.
+    expect((screen.getByLabelText("Terse-output level") as HTMLSelectElement).value).toBe("full");
+    expect((screen.getByLabelText("Minimal-code level") as HTMLSelectElement).value).toBe("full");
+  });
 });
