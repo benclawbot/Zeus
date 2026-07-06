@@ -443,15 +443,17 @@ kbd {
 }
 
 .chat-user {
-  /* Push the avatar + body to the right edge of the conversation. */
+  /* User messages: avatar on the right edge, body to its left.
+     Standard chat layout without RTL side-effects. */
   grid-template-columns: 1fr 32px;
-  direction: rtl;
+  justify-content: end;
 }
 
 .chat-user .chat-body {
-  direction: ltr;
+  justify-self: end;
   text-align: right;
   align-items: flex-end;
+  max-width: 85%;
 }
 
 .chat-user .chat-heading {
