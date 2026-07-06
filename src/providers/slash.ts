@@ -80,6 +80,24 @@ const BUILTINS: BuiltinCommand[] = [
     description: "Replace text in a workspace file. Format: /edit path :: find => replace",
     kind: "builtin",
   },
+  {
+    id: "ls",
+    label: "/ls",
+    description: "List a workspace directory. Example: /ls src",
+    kind: "builtin",
+  },
+  {
+    id: "test",
+    label: "/test",
+    description: "Run the project's test suite. Example: /test --testPathPattern=foo",
+    kind: "builtin",
+  },
+  {
+    id: "git",
+    label: "/git",
+    description: "Run a guarded git subcommand. Example: /git status, /git diff, /git commit -m msg",
+    kind: "builtin",
+  },
 ];
 
 /**
@@ -144,15 +162,19 @@ export function useSlashMenu(message: string, isTauri: boolean): UseSlashMenuRes
     return [...filteredBuiltins, ...filteredSkills];
   }, [open, query, skills]);
 
-  // Clamp the active index when the item count changes.
+  // Track the last item count we clamped against so we can detect when the
+  // list shrinks under the current highlight and reset to 0 (defensive:
+  // the synchronous clamp below already handles the common case, but this
+  // keeps behavior consistent if a caller mutates `setActiveIndex`
+  // directly between renders).
   const lastCount = useRef(items.length);
   useEffect(() => {
+    lastCount.current = items.length;
     if (items.length === 0) {
-      setActiveIndex(0);
-    } else if (lastCount.current !== items.length || activeIndex >= items.length) {
+      if (activeIndex !== 0) setActiveIndex(0);
+    } else if (activeIndex >= items.length) {
       setActiveIndex(0);
     }
-    lastCount.current = items.length;
   }, [items.length, activeIndex]);
 
   function pick(index: number): SlashItem | null {
@@ -163,7 +185,15 @@ export function useSlashMenu(message: string, isTauri: boolean): UseSlashMenuRes
     open,
     items,
     activeIndex,
-    setActiveIndex,
+    // Setter that always clamps to the valid range. Without this, a
+    // keyboard handler can request `items.length` or a negative value
+    // and break keyboard navigation (the picker tries to highlight a
+    // row that doesn't exist, or wraps inconsistently with ArrowUp).
+    setActiveIndex: (index: number) => {
+      if (items.length === 0) { setActiveIndex(0); return; }
+      const normalized = ((index % items.length) + items.length) % items.length;
+      setActiveIndex(normalized);
+    },
     resetHighlight: () => setActiveIndex(0),
     visible,
     query: query ?? "",
