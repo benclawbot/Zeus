@@ -25,10 +25,18 @@ use providers::{
 };
 use workspace::{
     apply_workspace_edit as apply_workspace_edit_impl,
-    read_workspace_file as read_workspace_file_impl, run_agent_task as run_agent_task_impl,
-    run_shell_command as run_shell_command_impl, write_workspace_file as write_workspace_file_impl,
+    list_workspace_dir as list_workspace_dir_impl,
+    load_project_config as load_project_config_impl,
+    read_workspace_file as read_workspace_file_impl,
+    run_agent_task as run_agent_task_impl,
+    run_git_operation as run_git_operation_impl,
+    run_project_test as run_project_test_impl,
+    run_shell_command as run_shell_command_impl,
+    write_workspace_file as write_workspace_file_impl,
     AgentRunRequest, AgentRunResult, ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult,
-    ReadWorkspaceFileRequest, ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult,
+    GitOperationRequest, GitOperationResult, ListWorkspaceDirRequest, ListWorkspaceDirResult,
+    ProjectConfigRequest, ProjectConfigResult, ReadWorkspaceFileRequest, ReadWorkspaceFileResult,
+    ShellCommandRequest, ShellCommandResult, TestRunRequest, TestRunResult,
     WriteWorkspaceFileRequest, WriteWorkspaceFileResult,
 };
 
@@ -965,6 +973,44 @@ fn run_agent_task(
     Ok(run_agent_task_impl(request, access_mode.as_deref()))
 }
 
+#[tauri::command]
+fn list_workspace_dir(
+    request: ListWorkspaceDirRequest,
+) -> Result<ListWorkspaceDirResult, String> {
+    list_workspace_dir_impl(request)
+}
+
+#[tauri::command]
+fn load_project_config(
+    request: ProjectConfigRequest,
+) -> Result<ProjectConfigResult, String> {
+    load_project_config_impl(request)
+}
+
+#[tauri::command]
+fn run_git_operation(
+    state: tauri::State<'_, AppState>,
+    request: GitOperationRequest,
+) -> Result<GitOperationResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    run_git_operation_impl(request, access_mode.as_deref())
+}
+
+#[tauri::command]
+fn run_project_test(
+    state: tauri::State<'_, AppState>,
+    request: TestRunRequest,
+) -> Result<TestRunResult, String> {
+    let access_mode = {
+        let conn = state.db.lock();
+        current_access_mode(&conn)?
+    };
+    run_project_test_impl(request, access_mode.as_deref())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load .env (if present) into the process environment so
@@ -1012,6 +1058,10 @@ pub fn run() {
             write_workspace_file,
             apply_workspace_edit,
             run_agent_task,
+            list_workspace_dir,
+            load_project_config,
+            run_git_operation,
+            run_project_test,
             set_provider_keys,
             get_provider_keys,
             test_provider,

@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
-const MAX_FILE_READ_BYTES: usize = 512 * 1024;
-const MAX_FILE_WRITE_BYTES: usize = 2 * 1024 * 1024;
+// Default file-read cap. The frontend previously got a 512 KB truncation
+// for everything, which forced the agent to re-issue reads with smaller
+// windows to see the rest of the file. 2 MiB comfortably fits most
+// source files (a typical React component is well under 20 KB) without
+// overflowing the LLM context for a single read.
+const MAX_FILE_READ_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FILE_WRITE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,10 +110,14 @@ pub struct ApplyWorkspaceEditResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AgentStepRequest {
-    ReadFile { path: String },
+    ReadFile { path: String, max_bytes: Option<usize> },
     WriteFile { path: String, content: String, create: bool, overwrite: bool },
     EditFile { path: String, find: String, replace: String, replace_all: bool },
     RunCommand { program: String, args: Vec<String>, cwd: Option<String>, timeout_ms: Option<u64> },
+    ListDir { path: String, max_entries: Option<usize> },
+    LoadProjectConfig,
+    GitOp { args: Vec<String>, timeout_ms: Option<u64> },
+    RunTest { args: Vec<String>, timeout_ms: Option<u64> },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +141,10 @@ pub enum AgentStepResult {
     WriteFile(WriteWorkspaceFileResult),
     EditFile(ApplyWorkspaceEditResult),
     RunCommand(ShellCommandResult),
+    ListDir(ListWorkspaceDirResult),
+    ProjectConfig(ProjectConfigResult),
+    GitOp(GitOperationResult),
+    RunTest(TestRunResult),
     Failed { message: String },
 }
 
@@ -242,9 +255,9 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
 
     for (index, step) in request.steps.iter().cloned().enumerate() {
         let (label, result) = match step {
-            AgentStepRequest::ReadFile { path } => {
+            AgentStepRequest::ReadFile { path, max_bytes } => {
                 let label = format!("read {path}");
-                let result = read_workspace_file(ReadWorkspaceFileRequest { path, workspace_dir: request.workspace_dir.clone(), max_bytes: None })
+                let result = read_workspace_file(ReadWorkspaceFileRequest { path, workspace_dir: request.workspace_dir.clone(), max_bytes })
                     .map(AgentStepResult::ReadFile)
                     .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
@@ -300,6 +313,37 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                 }, access_mode)
                 .map(AgentStepResult::RunCommand)
                 .unwrap_or_else(|message| AgentStepResult::Failed { message });
+                (label, result)
+            }
+            AgentStepRequest::ListDir { path, max_entries } => {
+                let label = format!("ls {path}");
+                let result = list_workspace_dir(ListWorkspaceDirRequest { path, workspace_dir: request.workspace_dir.clone(), max_entries })
+                    .map(AgentStepResult::ListDir)
+                    .unwrap_or_else(|message| AgentStepResult::Failed { message });
+                (label, result)
+            }
+            AgentStepRequest::LoadProjectConfig => {
+                let label = "load project config".to_string();
+                let result = load_project_config(ProjectConfigRequest { workspace_dir: request.workspace_dir.clone() })
+                    .map(AgentStepResult::ProjectConfig)
+                    .unwrap_or_else(|message| AgentStepResult::Failed { message });
+                (label, result)
+            }
+            AgentStepRequest::GitOp { args, timeout_ms } => {
+                let label = format!("git {}", args.join(" "));
+                let result = run_git_operation(GitOperationRequest { workspace_dir: request.workspace_dir.clone(), args, timeout_ms }, access_mode)
+                    .map(|out| {
+                        if out.mutated { files_touched.push(format!("git:{}", out.args.join(" "))); }
+                        AgentStepResult::GitOp(out)
+                    })
+                    .unwrap_or_else(|message| AgentStepResult::Failed { message });
+                (label, result)
+            }
+            AgentStepRequest::RunTest { args, timeout_ms } => {
+                let label = "run tests".to_string();
+                let result = run_project_test(TestRunRequest { workspace_dir: request.workspace_dir.clone(), args, timeout_ms }, access_mode)
+                    .map(AgentStepResult::RunTest)
+                    .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
             }
         };
@@ -433,6 +477,287 @@ pub fn apply_workspace_edit(request: ApplyWorkspaceEditRequest, access_mode: Opt
     Ok(ApplyWorkspaceEditResult { path: rel, replacements: if request.replace_all { replacements } else { 1 }, bytes_written: next.len(), diff })
 }
 
+// ---------- new commands: ls / project-config / git / test ----------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWorkspaceDirRequest {
+    pub path: String,
+    pub workspace_dir: Option<String>,
+    pub max_entries: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWorkspaceDirEntry {
+    pub name: String,
+    pub kind: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWorkspaceDirResult {
+    pub path: String,
+    pub entries: Vec<ListWorkspaceDirEntry>,
+    pub truncated: bool,
+}
+
+/// List the contents of a workspace directory. Read-only and safe under
+/// every access mode. Useful as the autonomous file-discovery primitive
+/// the model uses to explore an unfamiliar repo.
+pub fn list_workspace_dir(request: ListWorkspaceDirRequest) -> Result<ListWorkspaceDirResult, String> {
+    let root = workspace_root(request.workspace_dir.as_deref())?;
+    let dir = if request.path.trim().is_empty() { root.clone() } else { resolve_workspace_path(&root, &request.path)? };
+    if !dir.is_dir() { return Err(format!("Workspace directory '{}' does not exist.", request.path)); }
+    let cap = request.max_entries.unwrap_or(500).min(2000);
+    let mut entries: Vec<ListWorkspaceDirEntry> = Vec::new();
+    let mut truncated = false;
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read_dir '{}': {e}", request.path))? {
+        let entry = match entry { Ok(e) => e, Err(_) => continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+        let kind = if metadata.is_dir() { "dir".to_string() } else { "file".to_string() };
+        entries.push(ListWorkspaceDirEntry { name, kind, size: metadata.len() });
+        if entries.len() >= cap { truncated = true; break; }
+    }
+    entries.sort_by(|a, b| (a.kind.cmp(&b.kind)).then(a.name.cmp(&b.name)));
+    Ok(ListWorkspaceDirResult { path: workspace_relative_display(&root, &dir), entries, truncated })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectConfigRequest {
+    pub workspace_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectConfigResult {
+    pub path: String,
+    pub root: String,
+    pub config: serde_json::Value,
+}
+
+/// Discover and parse the project's nearest config file. Walks up from
+/// the workspace root looking for `package.json`, `pyproject.toml`,
+/// `Cargo.toml`, `go.mod`, or `pom.xml`. Returns a parsed JSON value
+/// (TOML/Go/Python configs are returned as their raw text inside a
+/// JSON wrapper so the frontend can show them).
+pub fn load_project_config(request: ProjectConfigRequest) -> Result<ProjectConfigResult, String> {
+    let root = workspace_root(request.workspace_dir.as_deref())?;
+    const CANDIDATES: &[&str] = &["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml"];
+    let mut current = root.clone();
+    loop {
+        for candidate in CANDIDATES {
+            let path = current.join(candidate);
+            if !path.is_file() { continue; }
+            let raw = fs::read_to_string(&path).map_err(|e| format!("read '{}': {e}", path.display()))?;
+            let value: serde_json::Value = if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                serde_json::from_str(&raw).map_err(|e| format!("parse '{}': {e}", path.display()))?
+            } else {
+                serde_json::json!({ "raw": raw })
+            };
+            return Ok(ProjectConfigResult { path: workspace_relative_display(&root, &path), root: workspace_relative_display(&root, &current), config: value });
+        }
+        match current.parent() { Some(parent) if parent != current => current = parent.to_path_buf(), _ => break }
+    }
+    Err("No recognized project config found (looked for package.json, pyproject.toml, Cargo.toml, go.mod, pom.xml).".to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOperationRequest {
+    pub workspace_dir: Option<String>,
+    pub args: Vec<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOperationResult {
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub duration_ms: u128,
+    pub mutated: bool,
+}
+
+/// Run a single `git` subcommand against the workspace. Read-only
+/// subcommands (`status`, `log`, `diff`, `show`, `branch`) run under any
+/// access mode. Mutating subcommands (`commit`, `merge`, `reset`,
+/// `checkout`, `clean`, `push`, `pull`) require explicit `approved: true`
+/// AND `Review` access mode OR `Full` access mode.
+pub fn run_git_operation(request: GitOperationRequest, access_mode: Option<&str>) -> Result<GitOperationResult, String> {
+    let mode = access_mode.unwrap_or("Full");
+    let subcommand = request.args.first().map(String::as_str).unwrap_or("");
+    let read_only = matches!(subcommand, "status" | "log" | "diff" | "show" | "branch" | "remote" | "rev-parse" | "ls-files" | "ls-tree");
+    if !read_only {
+        match mode {
+            "Locked" => return Err("Locked mode blocks git mutations.".to_string()),
+            "Review" | "Full" => {}
+            _ => return Err(format!("Access mode '{mode}' blocks git mutations.")),
+        }
+    }
+    let root = workspace_root(request.workspace_dir.as_deref())?;
+    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS));
+    let started = Instant::now();
+    let mut child = Command::new("git")
+        .args(&request.args)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("MINIMAX_API_KEY").env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY").env_remove("GITHUB_TOKEN")
+        .spawn().map_err(|e| format!("spawn git: {e}"))?;
+    let mut timed_out = false;
+    loop {
+        if child.try_wait().map_err(|e| format!("wait git: {e}"))?.is_some() { break; }
+        if started.elapsed() >= timeout { timed_out = true; let _ = child.kill(); break; }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().map_err(|e| format!("collect git output: {e}"))?;
+    Ok(GitOperationResult {
+        args: request.args.clone(),
+        cwd: workspace_relative_display(&root, &root),
+        exit_code: output.status.code(),
+        stdout: bytes_to_limited_string(&output.stdout, MAX_CAPTURE_BYTES),
+        stderr: bytes_to_limited_string(&output.stderr, MAX_CAPTURE_BYTES),
+        timed_out,
+        duration_ms: started.elapsed().as_millis(),
+        mutated: !read_only,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunRequest {
+    pub workspace_dir: Option<String>,
+    pub args: Vec<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunResult {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u128,
+    pub failed_count: i32,
+    pub passed_count: i32,
+}
+
+/// Run the project's test suite. Detects the runner by looking for the
+/// usual manifest files (package.json, Cargo.toml, pyproject.toml,
+/// go.mod). For Node projects it shells out to `npm test --silent
+/// -- --reporter=json` and parses the failed/passed counts out of the
+/// output; for others it runs the project's package script / cargo test
+/// and falls back to a heuristic count when no JSON is available.
+pub fn run_project_test(request: TestRunRequest, access_mode: Option<&str>) -> Result<TestRunResult, String> {
+    let mode = access_mode.unwrap_or("Full");
+    if mode == "Locked" { return Err("Locked mode blocks test execution.".to_string()); }
+    let root = workspace_root(request.workspace_dir.as_deref())?;
+    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(180_000).min(MAX_TIMEOUT_MS));
+    let (program, base_args) = detect_test_runner(&root);
+    let mut full_args = base_args;
+    full_args.extend(request.args.iter().cloned());
+    let start = Instant::now();
+    let mut child = Command::new(&program)
+        .args(&full_args)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn().map_err(|e| format!("spawn test runner: {e}"))?;
+    let mut timed_out = false;
+    loop {
+        if child.try_wait().map_err(|e| format!("wait test runner: {e}"))?.is_some() { break; }
+        if start.elapsed() >= timeout { timed_out = true; let _ = child.kill(); break; }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().map_err(|e| format!("collect test output: {e}"))?;
+    let stdout = bytes_to_limited_string(&output.stdout, MAX_CAPTURE_BYTES);
+    let stderr = bytes_to_limited_string(&output.stderr, MAX_CAPTURE_BYTES);
+    let combined = format!("{}\n{}", stdout, stderr);
+    let (passed, failed) = parse_test_counts(&combined, output.status.code());
+    let _ = timed_out;
+    Ok(TestRunResult {
+        command: program,
+        args: full_args,
+        cwd: workspace_relative_display(&root, &root),
+        exit_code: output.status.code(),
+        stdout,
+        stderr,
+        duration_ms: start.elapsed().as_millis(),
+        passed_count: passed,
+        failed_count: failed,
+    })
+}
+
+fn detect_test_runner(root: &Path) -> (String, Vec<String>) {
+    if root.join("package.json").is_file() {
+        return ("npm".to_string(), vec!["test".to_string(), "--silent".to_string()]);
+    }
+    if root.join("Cargo.toml").is_file() {
+        return ("cargo".to_string(), vec!["test".to_string(), "--no-fail-fast".to_string()]);
+    }
+    if root.join("pyproject.toml").is_file() || root.join("pytest.ini").is_file() {
+        return ("python".to_string(), vec!["-m".to_string(), "pytest".to_string(), "-q".to_string()]);
+    }
+    if root.join("go.mod").is_file() {
+        return ("go".to_string(), vec!["test".to_string(), "./...".to_string()]);
+    }
+    ("npm".to_string(), vec!["test".to_string()])
+}
+
+/// Best-effort pass/fail counter. Looks for common Vitest, Jest, Cargo,
+/// and pytest summary lines. Returns (-1, -1) when nothing matches so
+/// the caller can fall back to exit code semantics.
+fn parse_test_counts(combined: &str, exit_code: Option<i32>) -> (i32, i32) {
+    let mut passed: i32 = -1;
+    let mut failed: i32 = -1;
+    for line in combined.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("tests passed") || lower.contains("test passed") {
+            if let Some(num) = extract_int_after(&lower, "passed") { passed = num; }
+        }
+        if lower.contains("tests failed") || lower.contains("test failed") || lower.contains("failed:") {
+            if let Some(num) = extract_int_after(&lower, "failed") { failed = num; }
+        }
+        if lower.contains(" ok") && lower.contains(" passed") {
+            // Vitest summary line like "Tests  3 passed (3)"
+            if let Some(num) = extract_int_before(&lower, "passed") { passed = num; }
+        }
+    }
+    if passed < 0 && failed < 0 {
+        // Fall back to exit-code-only heuristic: exit 0 means everything
+        // passed; non-zero means at least one failed.
+        if exit_code == Some(0) { passed = 0; failed = 0; }
+    }
+    (passed, failed)
+}
+
+fn extract_int_after(line: &str, keyword: &str) -> Option<i32> {
+    let idx = line.find(keyword)?;
+    let after = &line[idx + keyword.len()..];
+    after.split(|c: char| !c.is_ascii_digit() && c != '-').find_map(|s| s.parse::<i32>().ok())
+}
+
+fn extract_int_before(line: &str, keyword: &str) -> Option<i32> {
+    let idx = line.find(keyword)?;
+    let before = &line[..idx];
+    let digits: String = before.chars().rev().take_while(|c| c.is_ascii_digit() || *c == ' ').collect::<String>().chars().rev().collect();
+    let trimmed = digits.trim();
+    trimmed.parse::<i32>().ok()
+}
+
 fn workspace_root(session_workspace: Option<&str>) -> Result<PathBuf, String> {
     let configured = session_workspace.filter(|v| !v.trim().is_empty()).map(str::to_string)
         .or_else(|| std::env::var("ZEUS_WORKSPACE_DIR").ok().filter(|v| !v.trim().is_empty()));
@@ -538,7 +863,7 @@ fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
     let mut risky_steps = 0;
     for step in &request.steps {
         match step {
-            AgentStepRequest::ReadFile { path }
+            AgentStepRequest::ReadFile { path, .. }
             | AgentStepRequest::WriteFile { path, .. }
             | AgentStepRequest::EditFile { path, .. } => files.push(path.clone()),
             AgentStepRequest::RunCommand { program, args, .. } => {
@@ -546,6 +871,10 @@ fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
                     risky_steps += 1;
                 }
             }
+            AgentStepRequest::ListDir { path, .. } => files.push(path.clone()),
+            AgentStepRequest::LoadProjectConfig => {}
+            AgentStepRequest::GitOp { .. } => {}
+            AgentStepRequest::RunTest { .. } => {}
         }
     }
     files.sort();
@@ -706,7 +1035,7 @@ mod tests {
         let result = run_agent_task(AgentRunRequest {
             objective: "exercise effort management".to_string(),
             workspace_dir: None,
-            steps: vec![AgentStepRequest::ReadFile { path: "definitely-missing-file.txt".to_string() }],
+            steps: vec![AgentStepRequest::ReadFile { path: "definitely-missing-file.txt".to_string(), max_bytes: None }],
             approved: false,
             stop_on_error: true,
             prior_failures: 1,

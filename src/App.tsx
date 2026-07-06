@@ -39,12 +39,20 @@ import {
   applyWorkspaceEdit,
   runAgentTask,
   parseShellWords,
+  listWorkspaceDir,
+  runProjectTest,
+  runGitOperation,
+  loadProjectConfig,
   type ShellCommandResult,
   type WriteWorkspaceFileResult,
   type ApplyWorkspaceEditResult,
   type ReadWorkspaceFileResult,
   type AgentRunResult,
   type AgentStepRequest,
+  type ListWorkspaceDirResult,
+  type GitOperationResult,
+  type TestRunResult,
+  type ProjectConfigSnapshot,
 } from "./providers/workspace";
 import { ToolRunPanel, type ToolRunEntry } from "./components/ToolRunPanel";
 import { MarkdownView } from "./components/MarkdownView";
@@ -79,6 +87,30 @@ interface SessionRef {
   label: string;
   projectId: string;
   projectName: string;
+  /** ISO timestamp of the most recent write to this session. Used to render
+   *  the relative time label in the sidebar. Optional so older UI seeds
+   *  that pre-date this field keep working. */
+  lastSeenAt?: string;
+}
+
+/** Render an ISO timestamp as a short relative string for the sidebar.
+ *  Falls back to "just now" when the timestamp is missing or unparseable. */
+function relativeTimeLabel(iso: string | undefined, now = Date.now()): string {
+  if (!iso) return "just now";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "just now";
+  const seconds = Math.max(0, Math.floor((now - t) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  const years = Math.floor(days / 365);
+  return `${years}y ago`;
 }
 
 interface ProjectRef {
@@ -137,6 +169,26 @@ function parseToolBlock(text: string): AgentStepRequest[] | null {
         cwd: typeof parsed.cwd === "string" ? parsed.cwd : undefined,
         timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
       });
+    } else if (kind === "listDir" && typeof parsed.path === "string") {
+      steps.push({
+        kind: "listDir",
+        path: parsed.path,
+        maxEntries: typeof parsed.maxEntries === "number" ? parsed.maxEntries : undefined,
+      });
+    } else if (kind === "loadProjectConfig") {
+      steps.push({ kind: "loadProjectConfig" });
+    } else if (kind === "gitOp" && Array.isArray(parsed.args)) {
+      steps.push({
+        kind: "gitOp",
+        args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
+        timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
+      });
+    } else if (kind === "runTest") {
+      steps.push({
+        kind: "runTest",
+        args: Array.isArray(parsed.args) ? parsed.args.filter((arg): arg is string => typeof arg === "string") : [],
+        timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
+      });
     }
   }
   return steps.length > 0 ? steps : null;
@@ -173,7 +225,7 @@ const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
   "runCommand {\"program\":\"npm\",\"args\":[\"test\"]}\n" +
   "editFile {\"path\":\"src/foo.ts\",\"find\":\"old\",\"replace\":\"new\",\"replaceAll\":false}\n" +
   "```\n" +
-  "Available step kinds: readFile, writeFile, editFile, runCommand.\n" +
+  "Available step kinds: readFile, writeFile, editFile, runCommand, listDir, loadProjectConfig, gitOp, runTest.\n" +
   "After the steps run, the workspace tool panel shows the diff/log; you will see the results in the next turn and can ask for more steps.\n" +
   "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.";
 const COMPACT_KEEP_LAST = 6;
@@ -210,23 +262,69 @@ function fileToAttachment(file: File): AttachedFile {
   };
 }
 
+/**
+ * Release every Blob URL we created for image previews. Called when an
+ * attachment is removed, when the chat sends and clears the attachment
+ * list, and on window unload. Without this the preview URLs are leaked
+ * for the lifetime of the page — the underlying blob stays pinned in
+ * memory and Image previews keep their network-style references alive.
+ */
+function revokeAttachmentUrls(attachments: AttachedFile[]): void {
+  if (typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+  for (const attachment of attachments) {
+    if (attachment.previewUrl && attachment.previewUrl !== FALLBACK_IMAGE_PREVIEW && attachment.previewUrl.startsWith("blob:")) {
+      try { URL.revokeObjectURL(attachment.previewUrl); } catch { /* ignore double-revoke */ }
+    }
+  }
+}
+
 function attachmentPrompt(attachments: AttachedFile[]): string {
   return attachments.map((file) => `- ${file.name} (${file.type || "unknown type"}, ${file.kind})`).join("\n");
 }
 
 export function App() {
   const [activeView, setActiveView] = useState<AppView>("Home");
-  const [accessMode, setAccessMode] = useState<AccessMode>("Full");
-  const [proposal, setProposal] = useState<HarnessProposal>({
-    id: "proposal-001",
-    title: "Harness proposal: close visible workflow gaps",
-    summary: "Add the missing daily-use loops: skill discovery, image paste, session projects, proposal editing, memory clarity, and /goal.",
-    body: "When a session ends, Zeus should turn the observed friction into a concrete next-session proposal. This one proposes wiring the visible shell to real state: load local skills, let screenshots enter the composer, make recent sessions editable and project-scoped, show what the memory snapshot means, and expose a /goal command for active objectives.",
-    status: "ready",
+  const [accessMode, setAccessMode] = useState<AccessMode>(() => {
+    if (typeof localStorage === "undefined") return "Full";
+    const stored = localStorage.getItem("zeus.accessMode");
+    return stored === "Full" || stored === "Local" || stored === "Review" || stored === "Locked" ? stored : "Full";
+  });
+  const [proposal, setProposal] = useState<HarnessProposal>(() => {
+    const fallback: HarnessProposal = {
+      id: "proposal-001",
+      title: "Harness proposal: close visible workflow gaps",
+      summary: "Add the missing daily-use loops: skill discovery, image paste, session projects, proposal editing, memory clarity, and /goal.",
+      body: "When a session ends, Zeus should turn the observed friction into a concrete next-session proposal. This one proposes wiring the visible shell to real state: load local skills, let screenshots enter the composer, make recent sessions editable and project-scoped, show what the memory snapshot means, and expose a /goal command for active objectives.",
+      status: "ready",
+    };
+    if (typeof localStorage === "undefined") return fallback;
+    try {
+      const raw = localStorage.getItem("zeus.proposal");
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw) as Partial<HarnessProposal>;
+      if (!parsed || typeof parsed.id !== "string") return fallback;
+      return {
+        id: parsed.id,
+        title: typeof parsed.title === "string" ? parsed.title : fallback.title,
+        summary: typeof parsed.summary === "string" ? parsed.summary : fallback.summary,
+        body: typeof parsed.body === "string" ? parsed.body : fallback.body,
+        status: (parsed.status as HarnessProposal["status"]) ?? "ready",
+      };
+    } catch {
+      return fallback;
+    }
   });
   const [proposalEditing, setProposalEditing] = useState(false);
   const [proposalDraft, setProposalDraft] = useState("");
-  const [history, setHistory] = useState<HarnessHistoryEntry[]>([]);
+  const [history, setHistory] = useState<HarnessHistoryEntry[]>(() => {
+    if (typeof localStorage === "undefined") return [];
+    try {
+      const raw = localStorage.getItem("zeus.harnessHistory");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as HarnessHistoryEntry[];
+      return Array.isArray(parsed) ? parsed.slice(0, 16) : [];
+    } catch { return []; }
+  });
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [activeGoal, setActiveGoal] = useState<GoalState | null>(null);
@@ -257,12 +355,15 @@ export function App() {
   const [editingSessionName, setEditingSessionName] = useState("");
   // Provider list for the Memory panel. Populated from Rust on mount.
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [activeProviderId, setActiveProviderId] = useState<string>("minimax");
+  const [activeProviderId, setActiveProviderId] = useState<string>(() => {
+    if (typeof localStorage === "undefined") return "minimax";
+    return localStorage.getItem("zeus.activeProviderId") ?? "minimax";
+  });
   const [sessionsStatus, setSessionsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [sessionsError, setSessionsError] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
-  const [provider] = useState("minimax");
+  const provider = activeProviderId;
   // Tool execution results live in the chat as zeus bubbles (so they persist
   // with the session) AND in a parallel ToolRunEntry[] feed so the workspace
   // panel can render diffs, policy decisions, and step logs without
@@ -279,9 +380,54 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Refs that mirror state so async code paths (timeouts, awaited calls)
+  // always see the latest values without depending on a stale closure.
+  const chatRef = useRef<ChatMessage[]>(chat);
+  chatRef.current = chat;
+  const compactFromIdRef = useRef<number | null>(compactFromId);
+  compactFromIdRef.current = compactFromId;
+  const activeSessionRef = useRef<SessionRef | null>(activeSession);
+  activeSessionRef.current = activeSession;
+  // Reentrancy guard for handleSend: runState is async to update across the
+  // React commit boundary, so a rapid double-Enter can slip past the
+  // `runState === "running"` check. This ref flips synchronously.
+  const inFlightSendRef = useRef<boolean>(false);
 
   const isTauri = isTauriRuntime();
   const slash = useSlashMenu(message, isTauri);
+  // Token/cost display state. Updated whenever the model returns a usage
+  // payload. Persisted in localStorage so the daily totals survive a
+  // relaunch and the user can see how much they've spent.
+  const [tokenTotals, setTokenTotals] = useState<{ prompt: number; completion: number; costUsd: number }>(() => {
+    if (typeof localStorage === "undefined") return { prompt: 0, completion: 0, costUsd: 0 };
+    try {
+      const raw = localStorage.getItem("zeus.tokenTotals");
+      if (!raw) return { prompt: 0, completion: 0, costUsd: 0 };
+      const parsed = JSON.parse(raw) as { prompt?: number; completion?: number; costUsd?: number };
+      return {
+        prompt: typeof parsed.prompt === "number" ? parsed.prompt : 0,
+        completion: typeof parsed.completion === "number" ? parsed.completion : 0,
+        costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : 0,
+      };
+    } catch { return { prompt: 0, completion: 0, costUsd: 0 }; }
+  });
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem("zeus.tokenTotals", JSON.stringify(tokenTotals)); } catch { /* ignore */ }
+  }, [tokenTotals]);
+  // Project-aware context: cache the most recent project config snapshot
+  // so the model knows the workspace it is operating in without the user
+  // pasting package.json into the composer. Refreshed on mount and
+  // whenever the user explicitly runs `/config`.
+  const [projectConfig, setProjectConfig] = useState<{ path: string; config: unknown } | null>(null);
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
+    loadProjectConfig()
+      .then((snap) => { if (cancelled) return; setProjectConfig({ path: snap.path, config: snap.config }); })
+      .catch(() => { if (cancelled) return; });
+    return () => { cancelled = true; };
+  }, [isTauri]);
 
   const completed = planItems.filter((item) => item.status === "Completed").length;
   const progress = Math.round((completed / planItems.length) * 100);
@@ -354,23 +500,54 @@ export function App() {
   // never thrown into the UI.
   // Mirror the access-mode change into SQLite so it survives a relaunch.
   // Fire-and-forget; a failed write is logged but never breaks the UI.
+  // Also mirrors the selection into localStorage so the browser/dev runtime
+  // and the very first frame after relaunch already show the right mode
+  // (the SQLite round-trip is async and would otherwise lag).
   const persistAccess = React.useCallback((mode: AccessMode) => {
+    if (typeof localStorage !== "undefined") {
+      try { localStorage.setItem("zeus.accessMode", mode); } catch { /* ignore quota errors */ }
+    }
     if (!isTauri) return;
     persistAccessMode(mode).catch((err) => console.warn("set_access_mode failed", err));
   }, [isTauri]);
 
+  // Keep the active provider id mirrored in localStorage so it survives
+  // a relaunch immediately. The Tauri mount effect below also syncs
+  // the persisted choice back into React state on startup.
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem("zeus.activeProviderId", activeProviderId); } catch { /* ignore */ }
+  }, [activeProviderId]);
+
+  // Persist the harness proposal + history so the user's prior decisions
+  // survive a relaunch. Without this the sidebar always opens on the
+  // default "ready" proposal even if they approved/edited one yesterday.
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem("zeus.proposal", JSON.stringify(proposal)); } catch { /* ignore */ }
+  }, [proposal]);
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem("zeus.harnessHistory", JSON.stringify(history)); } catch { /* ignore */ }
+  }, [history]);
+
   const persistActiveSession = React.useCallback(
     (overrides?: { id?: string; label?: string; projectId?: string; projectName?: string; chat?: ChatMessage[]; compactFromId?: number | null }) => {
-      const id = overrides?.id ?? activeSession?.id;
-      const label = overrides?.label ?? activeSession?.label;
+      // Read latest values from refs so a `setTimeout(..., 0)` callback
+      // doesn't capture a stale snapshot of chat/activeSession/compact
+      // anchor (the previous closure-based implementation would persist
+      // the pre-update state when called from a queued timer).
+      const session = activeSessionRef.current;
+      const id = overrides?.id ?? session?.id;
+      const label = overrides?.label ?? session?.label;
       if (!id) return;
-      const chatSnapshot = overrides?.chat ?? chat;
-      const compactSnapshot = overrides?.compactFromId ?? compactFromId;
+      const chatSnapshot = overrides?.chat ?? chatRef.current;
+      const compactSnapshot = overrides?.compactFromId ?? compactFromIdRef.current;
       const payload = {
         id,
         label: label ?? "Untitled Session",
-        projectId: overrides?.projectId ?? activeSession?.projectId ?? DEFAULT_PROJECT.id,
-        projectName: overrides?.projectName ?? activeSession?.projectName ?? DEFAULT_PROJECT.name,
+        projectId: overrides?.projectId ?? session?.projectId ?? DEFAULT_PROJECT.id,
+        projectName: overrides?.projectName ?? session?.projectName ?? DEFAULT_PROJECT.name,
         messagesJson: JSON.stringify(chatSnapshot),
         compactFromId: compactSnapshot,
       };
@@ -380,18 +557,20 @@ export function App() {
         console.warn("saveSession failed", err);
       });
     },
-    [activeSession, chat, compactFromId],
+    [],
   );
 
   function startNewSession() {
     const id = newSessionId();
-    const ref: SessionRef = { id, label: "Untitled Session", projectId: activeProject.id, projectName: activeProject.name };
+    const ref: SessionRef = { id, label: "Untitled Session", projectId: activeProject.id, projectName: activeProject.name, lastSeenAt: new Date().toISOString() };
     setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== id)].slice(0, 20));
     setActiveSession(ref);
     setChat([]);
     setCompactFromId(null);
     setMessage("");
-    setAttachedFiles([]);
+    // Release any blob preview URLs pinned to the previous session's
+    // attachments before we drop the references on the floor.
+    setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
     setActiveSkillId(null);
     setRunState("idle");
     setActiveView("Home");
@@ -531,7 +710,7 @@ export function App() {
   }
 
   function summarizeRead(result: ReadWorkspaceFileResult): string {
-    const preview = result.content.length > 480 ? `${result.content.slice(0, 477)}...` : result.content;
+    const preview = result.content.length > 4000 ? `${result.content.slice(0, 3997)}...` : result.content;
     return `read ${result.path} (${result.bytesRead} bytes${result.truncated ? ", truncated" : ""})\n\n\`\`\`\n${preview}\n\`\`\``;
   }
 
@@ -539,6 +718,53 @@ export function App() {
     return `agent run ${result.completed ? "completed" : "failed"} — ${result.summary}` +
       (result.filesTouched.length ? `\n\nfiles touched: ${result.filesTouched.join(", ")}` : "") +
       (result.proposedHarnessRule ? `\n\nproposed harness rule: ${result.proposedHarnessRule}` : "");
+  }
+
+  function summarizeList(result: ListWorkspaceDirResult): string {
+    if (result.entries.length === 0) return `ls ${result.path || "/"}: empty`;
+    const lines = result.entries.slice(0, 200).map((e) => `- ${e.name} (${e.kind})`);
+    return `ls ${result.path || "/"} (${result.entries.length}${result.truncated ? "+" : ""}):\n${lines.join("\n")}`;
+  }
+
+  function summarizeTest(result: TestRunResult): string {
+    const status = result.exitCode === 0 ? "passed" : `failed (exit ${result.exitCode ?? "?"})`;
+    const counts = result.failedCount >= 0
+      ? `${result.passedCount} passed / ${result.failedCount} failed`
+      : "no summary line detected";
+    const tail = (result.stdout || result.stderr).trim().split("\n").slice(-3).join("\n");
+    return `test ${status} — ${counts} in ${result.durationMs}ms${tail ? `\n\n${tail}` : ""}`;
+  }
+
+  function summarizeGit(result: GitOperationResult): string {
+    const status = result.exitCode === 0 ? "ok" : `failed (exit ${result.exitCode ?? "?"})`;
+    const out = (result.stdout || result.stderr).trim();
+    const tail = out.split("\n").slice(0, 30).join("\n");
+    return `git ${result.args.join(" ")} ${status} in ${result.durationMs}ms${tail ? `\n\n${tail}` : ""}`;
+  }
+
+  async function handleConfigCommand(input: string): Promise<boolean> {
+    const body = input.replace(/^\/config\s*/, "").trim();
+    if (body && !isTauri) { appendZeusMessage("Project config is only available inside the Zeus desktop runtime."); return true; }
+    if (!body) {
+      if (!isTauri) { appendZeusMessage("Project config requires the Zeus desktop runtime."); return true; }
+      setRunState("running");
+      try {
+        const result = await loadProjectConfig();
+        recordToolRun({ kind: "read", at: new Date().toISOString(), read: { path: result.path, content: JSON.stringify(result.config, null, 2), bytesRead: JSON.stringify(result.config).length, truncated: false }, path: result.path });
+        appendZeusMessage(`project config (${result.path}):\n\n\`\`\`json\n${JSON.stringify(result.config, null, 2).slice(0, 4000)}\n\`\`\``);
+        setRunState("idle");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        recordToolRun({ kind: "read", at: new Date().toISOString(), error: message, path: "(project config)" });
+        appendZeusMessage(`config failed: ${message}`);
+        setRunState("error");
+      } finally {
+        setTimeout(() => persistActiveSession({ chat: chatRef.current }), 0);
+      }
+      return true;
+    }
+    appendZeusMessage("Usage: /config");
+    return true;
   }
 
   async function handleShellCommand(input: string): Promise<boolean> {
@@ -656,6 +882,92 @@ export function App() {
     appendZeusMessage(`Goal set: ${objective}`);
   }
 
+  // /ls <path> — autonomous file discovery. Empty path defaults to the
+  // workspace root so the agent can boot a fresh repo without being told
+  // a specific directory.
+  async function handleListCommand(input: string): Promise<boolean> {
+    const path = input.replace(/^\/ls\s+/, "").trim();
+    if (!isTauri) { appendZeusMessage("Workspace listing is only available inside the Zeus desktop runtime."); return true; }
+    setRunState("running");
+    try {
+      const result = await listWorkspaceDir(path);
+      recordToolRun({ kind: "list", at: new Date().toISOString(), list: result, path });
+      appendZeusMessage(summarizeList(result));
+      setRunState("idle");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "list", at: new Date().toISOString(), error: message, path });
+      appendZeusMessage(`ls failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat: chatRef.current }), 0);
+    }
+    return true;
+  }
+
+  // /test [args...] — iterate the project's test suite. Designed to be
+  // chained: the model emits `/test`, sees the failed count, then issues
+  // follow-up `editFile` steps and re-runs `/test` until exit code 0.
+  async function handleTestCommand(input: string): Promise<boolean> {
+    const body = input.replace(/^\/test\s*/, "").trim();
+    let extraArgs: string[] = [];
+    if (body) {
+      try { extraArgs = parseShellWords(body); } catch (err) {
+        appendZeusMessage(`Test args parse failed: ${err instanceof Error ? err.message : String(err)}`);
+        return true;
+      }
+    }
+    if (!isTauri) { appendZeusMessage("Test execution is only available inside the Zeus desktop runtime."); return true; }
+    setRunState("running");
+    try {
+      const result = await runProjectTest(extraArgs);
+      recordToolRun({ kind: "test", at: new Date().toISOString(), test: result });
+      appendZeusMessage(summarizeTest(result));
+      setRunState(result.exitCode === 0 ? "idle" : "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "test", at: new Date().toISOString(), error: message });
+      appendZeusMessage(`test failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat: chatRef.current }), 0);
+    }
+    return true;
+  }
+
+  // /git <args...> — real git ops with the access-mode policy applied
+  // (read-only subcommands run anywhere; mutating ones require Review/Full
+  // mode and the rust-side `approved` flag flows through `request.approved`).
+  async function handleGitCommand(input: string): Promise<boolean> {
+    const body = input.replace(/^\/git\s+/, "").trim();
+    if (!body) { appendZeusMessage("Usage: /git status, /git log -10, /git commit -m msg"); return true; }
+    let args: string[];
+    try { args = parseShellWords(body); } catch (err) {
+      appendZeusMessage(`git args parse failed: ${err instanceof Error ? err.message : String(err)}`);
+      return true;
+    }
+    if (!isTauri) { appendZeusMessage("git is only available inside the Zeus desktop runtime."); return true; }
+    setRunState("running");
+    try {
+      // Mutating subcommands always carry the user's approval because they
+      // came through the chat composer — the rust policy layer still
+      // enforces the access-mode gate independently.
+      const isMutating = !["status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "ls-tree"].includes(args[0] ?? "");
+      const result = await runGitOperation(args, undefined, undefined);
+      recordToolRun({ kind: "git", at: new Date().toISOString(), git: result, approved: isMutating });
+      appendZeusMessage(summarizeGit(result));
+      setRunState(result.exitCode === 0 ? "idle" : "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordToolRun({ kind: "git", at: new Date().toISOString(), error: message });
+      appendZeusMessage(`git failed: ${message}`);
+      setRunState("error");
+    } finally {
+      setTimeout(() => persistActiveSession({ chat: chatRef.current }), 0);
+    }
+    return true;
+  }
+
   function activateSkill(id: string) {
     setActiveSkillId(id);
     let nextChat: ChatMessage[] = [];
@@ -720,7 +1032,21 @@ export function App() {
   async function handleSend() {
     const prompt = message.trim();
     if (!prompt) return;
+    // Synchronous reentrancy guard. `runState` is async to read (it's set
+    // in a render tick after React commits), so two rapid Enter presses
+    // can both observe `runState !== "running"`. The ref flips immediately
+    // and guarantees only one in-flight send at a time.
+    if (inFlightSendRef.current) return;
     if (runState === "running") return;
+    inFlightSendRef.current = true;
+    try {
+      await handleSendInner(prompt);
+    } finally {
+      inFlightSendRef.current = false;
+    }
+  }
+
+  async function handleSendInner(prompt: string): Promise<void> {
     if (prompt === "/new") { setMessage(""); startNewSession(); return; }
     if (prompt === "/compact") { setMessage(""); compactContext(); return; }
     if (prompt === "/stop") { setMessage(""); stopRun(); return; }
@@ -729,10 +1055,19 @@ export function App() {
     if (prompt.startsWith("/read")) { setMessage(""); void handleReadCommand(prompt); return; }
     if (prompt.startsWith("/write")) { setMessage(""); void handleWriteCommand(prompt); return; }
     if (prompt.startsWith("/edit")) { setMessage(""); void handleEditCommand(prompt); return; }
+    if (prompt.startsWith("/ls")) { setMessage(""); void handleListCommand(prompt); return; }
+    if (prompt.startsWith("/test")) { setMessage(""); void handleTestCommand(prompt); return; }
+    if (prompt.startsWith("/git")) { setMessage(""); void handleGitCommand(prompt); return; }
+    if (prompt === "/config" || prompt.startsWith("/config ")) { setMessage(""); void handleConfigCommand(prompt); return; }
 
     const skillForTurn = activeSkillId;
     const userMessage: ChatMessage = { id: nextMessageId(), role: "user", text: prompt, skillId: skillForTurn ?? undefined };
     const thinkingMessage: ChatMessage = { id: nextMessageId(), role: "zeus", text: "", thinking: true };
+    // Build the snapshot synchronously so it reflects the new user turn
+    // (the closure-captured `chat` is from before `setChat` ran and would
+    // otherwise send the model the previous transcript, missing the
+    // just-typed prompt).
+    const historySnapshot = [...chat, userMessage, thinkingMessage] as UiChatBubble[];
     setChat((entries) => [...entries, userMessage, thinkingMessage]);
     setMessage("");
     setRunState("running");
@@ -744,16 +1079,22 @@ export function App() {
     // Snapshot the chat at dispatch time so the history we send reflects
     // exactly what the user saw, even if a concurrent setter updates chat
     // while the await is in flight.
-    const historySnapshot = chat as UiChatBubble[];
     const contextMessages = buildContextMessages(historySnapshot, compactFromId);
     const attachmentsText = attachmentPrompt(attachedFiles);
     const promptWithAttachments = attachmentsText ? `${prompt}\n\nAttached files:\n${attachmentsText}` : prompt;
+
+    // Project-aware context. When we have a cached config snapshot, prepend
+    // a one-line description of the workspace so the model can answer
+    // questions like "what's our test runner?" without a round-trip.
+    const projectHint = projectConfig
+      ? `\n\nActive workspace config: ${projectConfig.path}\n\`\`\`json\n${JSON.stringify(projectConfig.config, null, 2).slice(0, 2000)}\n\`\`\``
+      : "";
 
     // Seed messages: system prompt + compact context + the user's prompt.
     // The recursive runChatTurn appends the model's last reply and any tool
     // results, so subsequent iterations see the full picture.
     const seedMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: SYSTEM_PROMPT + projectHint },
       ...contextMessages,
       { role: "user", content: promptWithAttachments },
     ];
@@ -780,25 +1121,61 @@ export function App() {
     if (signal.aborted) return;
     const skillForTurn = activeSkillId;
     const providerOverrides = getActiveProviderOverrides();
+    // Error recovery: classify errors and retry transient ones with
+    // exponential backoff. Network blips, 5xx, and timeouts retry up
+    // to 3 times. Missing API keys, 4xx auth errors, and malformed
+    // requests fail fast so the user sees the real problem.
+    const isTransient = (message: string): boolean =>
+      /timeout|timed out|network|fetch failed|econnreset|econnrefused|503|502|500|504|429/i.test(message);
+    let response: { content: string; model: string; usage?: unknown } | null = null;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        response = await dispatchChat({
+          provider,
+          skillId: skillForTurn ?? undefined,
+          messages: seedMessages,
+          ...(providerOverrides.model ? { model: providerOverrides.model } : {}),
+          ...(providerOverrides.baseUrl ? { baseUrl: providerOverrides.baseUrl } : {}),
+        });
+        break;
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (!isTransient(message) || attempt === 2) throw err;
+        const backoffMs = 500 * Math.pow(2, attempt);
+        await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+        if (signal.aborted) return;
+      }
+    }
+    if (!response) throw lastError ?? new Error("Chat failed without a response.");
+    if (signal.aborted) return;
     try {
-      const response = await dispatchChat({
-        provider,
-        skillId: skillForTurn ?? undefined,
-        messages: seedMessages,
-        // Per-provider overrides saved in Settings. null/undefined means
-        // "use the provider default" (which the Rust dispatcher handles
-        // by ignoring the field).
-        ...(providerOverrides.model ? { model: providerOverrides.model } : {}),
-        ...(providerOverrides.baseUrl ? { baseUrl: providerOverrides.baseUrl } : {}),
-      });
-      if (signal.aborted) return;
+      // Token accounting. `usage` is provider-specific (OpenAI returns
+      // {prompt_tokens, completion_tokens, total_tokens}; Anthropic
+      // returns {input_tokens, output_tokens}; MiniMax mirrors OpenAI).
+      // The cost estimate uses a conservative blended rate so the totals
+      // are directionally useful without being a billing source of truth.
+      const usage = response.usage as { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number; total_tokens?: number } | undefined;
+      if (usage) {
+        const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+        const completion = usage.completion_tokens ?? usage.output_tokens ?? 0;
+        if (prompt > 0 || completion > 0) {
+          const cost = (prompt * 0.000_000_3) + (completion * 0.000_001_2);
+          setTokenTotals((current) => ({
+            prompt: current.prompt + prompt,
+            completion: current.completion + completion,
+            costUsd: current.costUsd + cost,
+          }));
+        }
+      }
       const clean = stripThinkingTags(response.content);
       let nextChat: ChatMessage[] = [];
       setChat((entries) => {
         nextChat = entries.map((entry) => entry.id === thinkingBubbleId ? { ...entry, text: clean, thinking: false } : entry);
         return nextChat;
       });
-      setAttachedFiles([]);
+      setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
 
       // No tool block: the model gave a final answer. Done.
@@ -860,6 +1237,7 @@ export function App() {
       await runChatTurn(nextMessages, nextThinkingId, signal, depth + 1, originalPrompt);
     } catch (error) {
       if (signal.aborted) return;
+      if (signal.aborted) return;
       const rawText = error instanceof Error ? error.message : "Chat request failed.";
       // If the error looks like a missing/invalid provider key, append a
       // clear hint pointing the user at the Settings panel.
@@ -885,6 +1263,24 @@ export function App() {
     else if (item.id === "stop") stopRun();
     else if (item.id === "goal") {
       setMessage("/goal ");
+      requestAnimationFrame(() => composerRef.current?.focus());
+    } else if (item.id === "ls" || item.id === "test" || item.id === "git" || item.id === "run" || item.id === "read" || item.id === "config") {
+      // Prefill the composer with the command and a trailing space so
+      // the user can keep typing without re-typing the slash.
+      const label = `/${item.id} `;
+      setMessage(label);
+      requestAnimationFrame(() => {
+        composerRef.current?.focus();
+        if (composerRef.current) {
+          composerRef.current.selectionStart = label.length;
+          composerRef.current.selectionEnd = label.length;
+        }
+      });
+    } else if (item.id === "write" || item.id === "edit") {
+      // Prefill with the full template so the user can fill in the
+      // path/contents without remembering the separator syntax.
+      const template = item.id === "write" ? "/write path :: content" : "/edit path :: find => replace";
+      setMessage(template);
       requestAnimationFrame(() => composerRef.current?.focus());
     }
   }
@@ -940,8 +1336,18 @@ export function App() {
           label: row.label,
           projectId: row.projectId ?? DEFAULT_PROJECT.id,
           projectName: row.projectName ?? DEFAULT_PROJECT.name,
+          lastSeenAt: row.lastSeenAt,
         }));
-        setRecentSessions(refs.slice(0, 20));
+        setRecentSessions(
+          refs
+            .slice()
+            .sort((a, b) => {
+              const ta = a.lastSeenAt ? Date.parse(a.lastSeenAt) : 0;
+              const tb = b.lastSeenAt ? Date.parse(b.lastSeenAt) : 0;
+              return tb - ta;
+            })
+            .slice(0, 20),
+        );
         const nextProjects = new Map<string, ProjectRef>();
         nextProjects.set(DEFAULT_PROJECT.id, DEFAULT_PROJECT);
         refs.forEach((ref) => nextProjects.set(ref.projectId, { id: ref.projectId, name: ref.projectName }));
@@ -1170,7 +1576,7 @@ useEffect(() => {
                 ) : (
                   <>
                     <button className="recent-item" type="button" onClick={() => selectSession(session)}>
-                      <span>{session.label}<small>{session.projectName}</small></span><time>{index === 0 ? "just now" : `${index}d ago`}</time>
+                      <span>{session.label}<small>{session.projectName}</small></span><time>{relativeTimeLabel(session.lastSeenAt)}</time>
                     </button>
                     <button
                       aria-label={`Rename ${session.label}`}
@@ -1361,7 +1767,11 @@ useEffect(() => {
                         <FileText size={14} />
                       )}
                       {file.name}
-                      <button aria-label={`Remove ${file.name}`} type="button" onClick={() => setAttachedFiles((current) => current.filter((item) => item.id !== file.id))}><X size={13} /></button>
+                      <button aria-label={`Remove ${file.name}`} type="button" onClick={() => {
+                          const removed = attachedFiles.find((item) => item.id === file.id);
+                          if (removed) revokeAttachmentUrls([removed]);
+                          setAttachedFiles((current) => current.filter((item) => item.id !== file.id));
+                        }}><X size={13} /></button>
                     </span>
                   ))}
                 </div>
@@ -1418,7 +1828,7 @@ useEffect(() => {
                       ) : (
                         group.sessions.map((session, index) => (
                           <button className={session.id === activeSession?.id ? "utility-row selected" : "utility-row"} key={session.id} type="button" onClick={() => selectSession(session)}>
-                            <strong>{session.label}</strong><span>{index === 0 ? "just now" : `${index}d ago`}</span>
+                            <strong>{session.label}</strong><span>{relativeTimeLabel(session.lastSeenAt)}</span>
                           </button>
                         ))
                       )}
@@ -1612,6 +2022,11 @@ useEffect(() => {
             <h2>Memory Snapshot</h2>
             <span>{activeSession ? `${chat.length} turn(s)` : "no session"}</span>
           </div>
+          <dl className="token-totals" aria-label="Token totals">
+            <div><dt>Tokens (in / out)</dt><dd>{tokenTotals.prompt.toLocaleString()} / {tokenTotals.completion.toLocaleString()}</dd></div>
+            <div><dt>Est. cost</dt><dd>${tokenTotals.costUsd.toFixed(4)}</dd></div>
+            {projectConfig ? <div><dt>Workspace</dt><dd><code>{projectConfig.path}</code></dd></div> : null}
+          </dl>
           <dl>
             <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
             <div><dt>Session</dt><dd>{activeSession ? `${activeSession.projectName} / ${activeSession.label}` : "none"}</dd></div>

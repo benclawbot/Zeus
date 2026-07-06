@@ -48,6 +48,48 @@ export interface ReadWorkspaceFileResult {
   truncated: boolean;
 }
 
+export interface ListWorkspaceDirResult {
+  path: string;
+  entries: Array<{ name: string; kind: "file" | "dir"; size: number }>;
+  truncated: boolean;
+}
+
+export interface ProjectConfigSnapshot {
+  /** Path of the config file that was loaded (e.g. package.json). */
+  path: string;
+  /** Project root the config was resolved relative to. */
+  root: string;
+  /** Parsed contents as a JSON value, or the raw string for non-JSON configs. */
+  config: unknown;
+}
+
+export interface GitOperationResult {
+  command: string;
+  args: string[];
+  cwd: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs: number;
+  /** True when the command modified the working tree (commit, write, etc.). */
+  mutated: boolean;
+}
+
+export interface TestRunResult {
+  command: string;
+  args: string[];
+  cwd: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  /** Number of test cases the runner reported as failed. -1 when unknown. */
+  failedCount: number;
+  /** Number of test cases the runner reported as passed. -1 when unknown. */
+  passedCount: number;
+}
+
 export interface WriteWorkspaceFileResult {
   path: string;
   bytesWritten: number;
@@ -63,10 +105,14 @@ export interface ApplyWorkspaceEditResult {
 }
 
 export type AgentStepRequest =
-  | { kind: "readFile"; path: string }
+  | { kind: "readFile"; path: string; maxBytes?: number }
   | { kind: "writeFile"; path: string; content: string; create: boolean; overwrite: boolean }
   | { kind: "editFile"; path: string; find: string; replace: string; replaceAll: boolean }
-  | { kind: "runCommand"; program: string; args: string[]; cwd?: string; timeoutMs?: number };
+  | { kind: "runCommand"; program: string; args: string[]; cwd?: string; timeoutMs?: number }
+  | { kind: "listDir"; path: string; maxEntries?: number }
+  | { kind: "loadProjectConfig" }
+  | { kind: "gitOp"; args: string[]; timeoutMs?: number }
+  | { kind: "runTest"; args?: string[]; timeoutMs?: number };
 
 export interface AgentRunRequest {
   objective: string;
@@ -107,6 +153,26 @@ export async function runShellCommand(request: ShellCommandRequest): Promise<She
 export async function readWorkspaceFile(path: string, maxBytes?: number, workspaceDir?: string): Promise<ReadWorkspaceFileResult> {
   ensureRuntime("Workspace file reads");
   return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: withSelectedWorkspace({ path, maxBytes, workspaceDir }) });
+}
+
+export async function listWorkspaceDir(path: string, maxEntries?: number, workspaceDir?: string): Promise<ListWorkspaceDirResult> {
+  ensureRuntime("Workspace directory listing");
+  return invoke<ListWorkspaceDirResult>("list_workspace_dir", { request: withSelectedWorkspace({ path, maxEntries, workspaceDir }) });
+}
+
+export async function loadProjectConfig(workspaceDir?: string): Promise<ProjectConfigSnapshot> {
+  ensureRuntime("Project config discovery");
+  return invoke<ProjectConfigSnapshot>("load_project_config", { request: withSelectedWorkspace({ workspaceDir }) });
+}
+
+export async function runGitOperation(args: string[], workspaceDir?: string, timeoutMs?: number): Promise<GitOperationResult> {
+  ensureRuntime("Git operations");
+  return invoke<GitOperationResult>("run_git_operation", { request: withSelectedWorkspace({ args, workspaceDir, timeoutMs }) });
+}
+
+export async function runProjectTest(args: string[] = [], workspaceDir?: string, timeoutMs?: number): Promise<TestRunResult> {
+  ensureRuntime("Test execution");
+  return invoke<TestRunResult>("run_project_test", { request: withSelectedWorkspace({ args, workspaceDir, timeoutMs }) });
 }
 
 export async function writeWorkspaceFile(args: {

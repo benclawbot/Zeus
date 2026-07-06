@@ -5,6 +5,9 @@ import type {
   WriteWorkspaceFileResult,
   ApplyWorkspaceEditResult,
   AgentRunResult,
+  ListWorkspaceDirResult,
+  GitOperationResult,
+  TestRunResult,
 } from "../providers/workspace";
 
 export type ToolRunEntry =
@@ -16,6 +19,12 @@ export type ToolRunEntry =
   | { kind: "write"; at: string; error: string; path: string }
   | { kind: "edit"; at: string; edit: ApplyWorkspaceEditResult; path: string }
   | { kind: "edit"; at: string; error: string; path: string }
+  | { kind: "list"; at: string; list: ListWorkspaceDirResult; path: string }
+  | { kind: "list"; at: string; error: string; path: string }
+  | { kind: "test"; at: string; test: TestRunResult }
+  | { kind: "test"; at: string; error: string }
+  | { kind: "git"; at: string; git: GitOperationResult; approved: boolean }
+  | { kind: "git"; at: string; error: string }
   | { kind: "agent"; at: string; agent: AgentRunResult }
   | { kind: "agent"; at: string; error: string };
 
@@ -127,7 +136,7 @@ function ReadEntry({ entry }: { entry: ToolRunEntry }) {
       </article>
     );
   }
-  const preview = entry.read.content.length > 600 ? `${entry.read.content.slice(0, 597)}...` : entry.read.content;
+  const preview = entry.read.content.length > 4000 ? `${entry.read.content.slice(0, 3997)}...` : entry.read.content;
   return (
     <article className="tool-run" aria-label="Read result">
       <header>
@@ -232,12 +241,98 @@ function AgentEntry({ entry }: { entry: ToolRunEntry }) {
   );
 }
 
+function ListEntry({ entry }: { entry: ToolRunEntry }) {
+  if (entry.kind !== "list") return null;
+  if ("error" in entry) {
+    return (
+      <article className="tool-run error" aria-label="List error">
+        <header><span className="tool-run-kind">ls</span><code>{entry.path}</code><time>{entry.at}</time></header>
+        <p>{entry.error}</p>
+      </article>
+    );
+  }
+  const list = entry.list;
+  return (
+    <article className="tool-run" aria-label="List result">
+      <header>
+        <span className="tool-run-kind">ls</span>
+        <code>{list.path || "/"}</code>
+        <span className="tool-run-meta">{list.entries.length} entries{list.truncated ? " (truncated)" : ""}</span>
+        <time>{entry.at}</time>
+      </header>
+      <ul className="tool-list">
+        {list.entries.map((e) => (
+          <li key={e.name}><code>{e.name}</code><span className={`tool-list-kind ${e.kind}`}>{e.kind}</span></li>
+        ))}
+      </ul>
+    </article>
+  );
+}
+
+function TestEntry({ entry }: { entry: ToolRunEntry }) {
+  if (entry.kind !== "test") return null;
+  if ("error" in entry) {
+    return (
+      <article className="tool-run error" aria-label="Test error">
+        <header><span className="tool-run-kind">test</span><time>{entry.at}</time></header>
+        <p>{entry.error}</p>
+      </article>
+    );
+  }
+  const t = entry.test;
+  return (
+    <article className="tool-run" aria-label="Test run">
+      <header>
+        <span className="tool-run-kind">test</span>
+        <code>{t.command} {t.args.join(" ")}</code>
+        <span className={t.exitCode === 0 ? "tool-exit ok" : "tool-exit error"}>
+          {t.exitCode === 0 ? "passed" : `exit ${t.exitCode ?? "?"}`}
+        </span>
+        <span className="tool-run-duration">{t.durationMs}ms</span>
+        {t.failedCount >= 0 ? <span className="tool-run-meta">{t.passedCount} passed / {t.failedCount} failed</span> : null}
+        <time>{entry.at}</time>
+      </header>
+      {t.stdout ? <pre className="tool-stdout" aria-label="stdout">{t.stdout.slice(0, 4000)}</pre> : null}
+      {t.stderr ? <pre className="tool-stderr" aria-label="stderr">{t.stderr.slice(0, 4000)}</pre> : null}
+    </article>
+  );
+}
+
+function GitEntry({ entry }: { entry: ToolRunEntry }) {
+  if (entry.kind !== "git") return null;
+  if ("error" in entry) {
+    return (
+      <article className="tool-run error" aria-label="Git error">
+        <header><span className="tool-run-kind">git</span><time>{entry.at}</time></header>
+        <p>{entry.error}</p>
+      </article>
+    );
+  }
+  const g = entry.git;
+  return (
+    <article className="tool-run" aria-label="Git run">
+      <header>
+        <span className="tool-run-kind">git</span>
+        <code>git {g.args.join(" ")}</code>
+        <span className={g.exitCode === 0 ? "tool-exit ok" : "tool-exit error"}>
+          {g.exitCode === 0 ? "ok" : `exit ${g.exitCode ?? "?"}`}
+        </span>
+        <span className="tool-run-duration">{g.durationMs}ms</span>
+        {g.mutated ? <span className="tool-policy mutated">mutating</span> : <span className="tool-policy safe">read-only</span>}
+        <time>{entry.at}</time>
+      </header>
+      {g.stdout ? <pre className="tool-stdout" aria-label="stdout">{g.stdout.slice(0, 4000)}</pre> : null}
+      {g.stderr ? <pre className="tool-stderr" aria-label="stderr">{g.stderr.slice(0, 4000)}</pre> : null}
+    </article>
+  );
+}
+
 export function ToolRunPanel({ entries }: PanelProps) {
   if (entries.length === 0) {
     return (
       <section className="tool-run-panel empty" aria-label="Workspace tool runs">
         <header><h3>Tool runs</h3><span>no runs yet</span></header>
-        <p className="tool-empty-hint">Use <code>/run</code>, <code>/read</code>, <code>/write</code>, <code>/edit</code> from the composer, or ask the agent to perform a workspace action.</p>
+        <p className="tool-empty-hint">Use <code>/run</code>, <code>/read</code>, <code>/write</code>, <code>/edit</code>, <code>/ls</code>, <code>/test</code>, <code>/git</code> from the composer, or ask the agent to perform a workspace action.</p>
       </section>
     );
   }
@@ -253,6 +348,9 @@ export function ToolRunPanel({ entries }: PanelProps) {
             case "read": return <ReadEntry key={key} entry={entry} />;
             case "write": return <WriteEntry key={key} entry={entry} />;
             case "edit": return <EditEntry key={key} entry={entry} />;
+            case "list": return <ListEntry key={key} entry={entry} />;
+            case "test": return <TestEntry key={key} entry={entry} />;
+            case "git": return <GitEntry key={key} entry={entry} />;
             case "agent": return <AgentEntry key={key} entry={entry} />;
           }
         })}

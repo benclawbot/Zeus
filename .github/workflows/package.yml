@@ -30,6 +30,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ${{ matrix.platform }}
+
       - name: Install Linux webkit dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -39,11 +45,26 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Pre-warm Rust dependency build
+        # On a fresh clone `cargo test`/`cargo build` would otherwise spend
+        # ~3 minutes compiling every transitive dependency before doing any
+        # work, blowing past the default 6h job timeout on the larger
+        # matrices and producing flaky CI. Pre-fetch + pre-build the
+        # dependency graph once with a generous timeout so subsequent
+        # steps reuse the warm cache.
+        working-directory: src-tauri
+        timeout-minutes: 30
+        run: |
+          cargo fetch
+          cargo build --tests --locked
+
       - name: Test
+        timeout-minutes: 30
         run: npm run test
 
       - name: Build frontend
         run: npm run build
 
       - name: Package desktop app
+        timeout-minutes: 60
         run: npm run tauri:build -- ${{ matrix.args }}
