@@ -30,6 +30,12 @@ export interface ChatOptions {
   skillId?: string;
   /** Optional model override. Falls back to the provider's default. */
   model?: string;
+  /**
+   * Optional API base URL override. Falls back to the provider's default
+   * (e.g. https://api.minimax.io/v1 for MiniMax). Set this from the
+   * Settings panel to point at a self-hosted proxy or a regional host.
+   */
+  baseUrl?: string;
   /** Optional temperature override. Provider-specific support. */
   temperature?: number;
 }
@@ -53,6 +59,7 @@ export async function dispatchChat(options: ChatOptions): Promise<ChatResponse> 
     messages: options.messages,
     skillId: options.skillId,
     model: options.model ?? provider.defaultModel,
+    baseUrl: options.baseUrl,
     temperature: options.temperature,
   });
 }

@@ -393,6 +393,16 @@ describe("App", () => {
       // In jsdom isTauri is false, so each provider shows "not configured".
       const rows = screen.getAllByText("not configured");
       expect(rows.length).toBe(3);
+      // Each provider should also expose a Base URL input, a Model input, and
+      // a Test connection button. The Test button is disabled when no key is
+      // configured.
+      expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) base URL")).toHaveLength(1);
+      expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) model")).toHaveLength(1);
+      const testButtons = screen.getAllByRole("button", { name: "Test connection" });
+      expect(testButtons.length).toBe(3);
+      for (const btn of testButtons) {
+        expect(btn).toBeDisabled();
+      }
     });
 
   it("renames recent sessions and creates project groups", async () => {

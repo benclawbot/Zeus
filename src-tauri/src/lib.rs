@@ -19,7 +19,7 @@ use persistence::{
     SaveSessionRequest,
 };
 use providers::{
-    build_skill_system_message, dispatch_chat, list_provider_info, ChatMessage, ChatRequest,
+    build_skill_system_message, dispatch_chat, find_provider, list_provider_info, ChatMessage, ChatRequest,
     ChatResponse, ProviderInfo,
 };
 use workspace::{
@@ -267,6 +267,23 @@ struct ProviderKeysFile {
     openai: Option<String>,
     #[serde(default)]
     anthropic: Option<String>,
+    /// Per-provider API base URL overrides. When absent, the provider
+    /// uses its hard-coded default. Persisted in the same file as the
+    /// keys so the Settings UI has one source of truth.
+    #[serde(default)]
+    minimax_base_url: Option<String>,
+    #[serde(default)]
+    openai_base_url: Option<String>,
+    #[serde(default)]
+    anthropic_base_url: Option<String>,
+    /// Per-provider model id overrides. Same precedence rules as the
+    /// base URL.
+    #[serde(default)]
+    minimax_model: Option<String>,
+    #[serde(default)]
+    openai_model: Option<String>,
+    #[serde(default)]
+    anthropic_model: Option<String>,
 }
 
 /// Read provider API keys from disk and apply them to the process env.
@@ -297,18 +314,25 @@ fn set_optional_env(name: &str, value: &str) {
 }
 
 /// Frontend payload: each field is the new value for that provider's key.
-/// An empty string clears the key.
+/// An empty string clears the key. `*BaseUrl` / `*Model` override the
+/// provider's hard-coded defaults; empty string reverts to the default.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetProviderKeysRequest {
     minimax: Option<String>,
     openai: Option<String>,
     anthropic: Option<String>,
+    minimax_base_url: Option<String>,
+    openai_base_url: Option<String>,
+    anthropic_base_url: Option<String>,
+    minimax_model: Option<String>,
+    openai_model: Option<String>,
+    anthropic_model: Option<String>,
 }
 
-/// Save user-supplied provider API keys to disk and apply them to the
-/// current process env so the next `send_chat` sees them. Empty strings
-/// clear the key.
+/// Save user-supplied provider API keys + per-provider base URL / model
+/// overrides to disk and apply the keys to the current process env so the
+/// next `send_chat` sees them. Empty strings clear the field.
 #[tauri::command]
 fn set_provider_keys(
     app: tauri::AppHandle,
@@ -318,6 +342,12 @@ fn set_provider_keys(
         minimax: normalize_key(request.minimax),
         openai: normalize_key(request.openai),
         anthropic: normalize_key(request.anthropic),
+        minimax_base_url: normalize_optional(request.minimax_base_url),
+        openai_base_url: normalize_optional(request.openai_base_url),
+        anthropic_base_url: normalize_optional(request.anthropic_base_url),
+        minimax_model: normalize_optional(request.minimax_model),
+        openai_model: normalize_optional(request.openai_model),
+        anthropic_model: normalize_optional(request.anthropic_model),
     };
     let path = provider_keys_path(&app)?;
     if let Some(parent) = path.parent() {
@@ -334,22 +364,33 @@ fn normalize_key(value: Option<String>) -> Option<String> {
     value.map(|raw| raw.trim().to_string()).filter(|trimmed| !trimmed.is_empty())
 }
 
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value.map(|raw| raw.trim().to_string()).filter(|trimmed| !trimmed.is_empty())
+}
+
 /// Return the persisted provider API keys. The frontend never sees the raw
 /// values in long form — it uses this just to know which providers have a
-/// key configured (presence check).
+/// key configured (presence check) and to read the base URL / model
+/// overrides so the Settings form re-renders correctly.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderKeysStatus {
     minimax: bool,
     openai: bool,
     anthropic: bool,
+    minimax_base_url: Option<String>,
+    openai_base_url: Option<String>,
+    anthropic_base_url: Option<String>,
+    minimax_model: Option<String>,
+    openai_model: Option<String>,
+    anthropic_model: Option<String>,
 }
 
 #[tauri::command]
 fn get_provider_keys(app: tauri::AppHandle) -> Result<ProviderKeysStatus, String> {
     let path = provider_keys_path(&app)?;
     if !path.exists() {
-        return Ok(ProviderKeysStatus { minimax: false, openai: false, anthropic: false });
+        return Ok(default_provider_keys_status());
     }
     let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let parsed: ProviderKeysFile = serde_json::from_str(&raw)
@@ -358,7 +399,107 @@ fn get_provider_keys(app: tauri::AppHandle) -> Result<ProviderKeysStatus, String
         minimax: parsed.minimax.as_deref().map(str::is_empty) == Some(false),
         openai: parsed.openai.as_deref().map(str::is_empty) == Some(false),
         anthropic: parsed.anthropic.as_deref().map(str::is_empty) == Some(false),
+        minimax_base_url: parsed.minimax_base_url,
+        openai_base_url: parsed.openai_base_url,
+        anthropic_base_url: parsed.anthropic_base_url,
+        minimax_model: parsed.minimax_model,
+        openai_model: parsed.openai_model,
+        anthropic_model: parsed.anthropic_model,
     })
+}
+
+fn default_provider_keys_status() -> ProviderKeysStatus {
+    ProviderKeysStatus {
+        minimax: false,
+        openai: false,
+        anthropic: false,
+        minimax_base_url: None,
+        openai_base_url: None,
+        anthropic_base_url: None,
+        minimax_model: None,
+        openai_model: None,
+        anthropic_model: None,
+    }
+}
+
+/// Result of a Test Connection probe. Returned to the frontend so the
+/// Settings panel can show whether the configured key + base URL + model
+/// actually work end-to-end.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestProviderResult {
+    ok: bool,
+    /// Echo of what was tested (base URL + model after override resolution).
+    base_url: String,
+    model: String,
+    /// Short human-readable message describing the outcome.
+    message: String,
+    /// First 280 chars of the model's reply, when ok=true.
+    preview: Option<String>,
+}
+
+/// Test a provider by issuing a trivial chat completion ("Respond with OK.").
+/// Uses the same path as the chat UI so any error the user would see in
+/// real usage is surfaced here too.
+#[tauri::command]
+async fn test_provider(
+    app: tauri::AppHandle,
+    provider_id: String,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<TestProviderResult, String> {
+    let request = ChatRequest {
+        provider: provider_id.clone(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Respond with the single word OK and nothing else.".to_string(),
+        }],
+        skill_id: None,
+        options: serde_json::json!({
+            "model": model.clone().unwrap_or_default(),
+            "baseUrl": base_url.clone().unwrap_or_default(),
+        }),
+    };
+    let messages = inject_skill(&app, &request)?;
+    let request_with_messages = ChatRequest {
+        messages,
+        ..request
+    };
+    let provider = find_provider(&provider_id)
+        .ok_or_else(|| format!("Unknown provider '{provider_id}'."))?;
+    let resolved_model = request_with_messages
+        .options
+        .as_object()
+        .and_then(|obj| obj.get("model"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(provider.default_model());
+    let resolved_base = request_with_messages
+        .options
+        .as_object()
+        .and_then(|obj| obj.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(provider.default_base_url());
+    match dispatch_chat(&request_with_messages, None).await {
+        Ok(response) => {
+            let preview = response.content.chars().take(280).collect::<String>();
+            Ok(TestProviderResult {
+                ok: true,
+                base_url: resolved_base.to_string(),
+                model: response.model,
+                message: "Connection succeeded.".to_string(),
+                preview: Some(preview),
+            })
+        }
+        Err(error) => Ok(TestProviderResult {
+            ok: false,
+            base_url: resolved_base.to_string(),
+            model: resolved_model.to_string(),
+            message: error.public_message(),
+            preview: None,
+        }),
+    }
 }
 
 #[tauri::command]
@@ -606,6 +747,7 @@ pub fn run() {
             run_agent_task,
             set_provider_keys,
             get_provider_keys,
+            test_provider,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");
@@ -936,6 +1078,21 @@ mod tests {
     }
 
     #[test]
+    fn normalize_optional_trims_and_drops_empty() {
+        assert_eq!(normalize_optional(Some("  https://example.test/v1  ".to_string())), Some("https://example.test/v1".to_string()));
+        assert_eq!(normalize_optional(Some("".to_string())), None);
+        assert_eq!(normalize_optional(None), None);
+    }
+
+    #[test]
+    fn default_provider_keys_status_is_empty() {
+        let s = default_provider_keys_status();
+        assert!(!s.minimax && !s.openai && !s.anthropic);
+        assert!(s.minimax_base_url.is_none());
+        assert!(s.minimax_model.is_none());
+    }
+
+    #[test]
     fn provider_keys_round_trip_through_disk() {
         // Round-trip via the in-memory file struct without going through
         // the Tauri app handle (which would require a runtime).
@@ -943,11 +1100,19 @@ mod tests {
             minimax: Some("sk-test".to_string()),
             openai: None,
             anthropic: Some("ant-key".to_string()),
+            minimax_base_url: Some("https://api.example.test/v1".to_string()),
+            openai_base_url: None,
+            anthropic_base_url: None,
+            minimax_model: Some("model-x".to_string()),
+            openai_model: None,
+            anthropic_model: None,
         };
         let serialized = serde_json::to_string(&parsed).expect("serialize");
         let back: ProviderKeysFile = serde_json::from_str(&serialized).expect("parse");
         assert_eq!(back.minimax.as_deref(), Some("sk-test"));
         assert!(back.openai.is_none());
         assert_eq!(back.anthropic.as_deref(), Some("ant-key"));
+        assert_eq!(back.minimax_base_url.as_deref(), Some("https://api.example.test/v1"));
+        assert_eq!(back.minimax_model.as_deref(), Some("model-x"));
     }
 }

@@ -145,16 +145,22 @@ pub trait ChatProvider: Send + Sync {
     /// Default model id used when the request omits one.
     fn default_model(&self) -> &'static str;
 
+    /// Default API base URL used when the request omits one. Trailing
+    /// slash optional; the dispatcher will append `/chat/completions`.
+    fn default_base_url(&self) -> &'static str;
+
     /// Human-readable label shown in the UI's provider picker.
     fn display_name(&self) -> &'static str;
 
     /// Run the chat completion. Implementations receive `messages` already
     /// augmented with the optional `skill_message` at index 0 — they should
-    /// forward it through as-is.
+    /// forward it through as-is. `model` and `base_url` come from the
+    /// request options when set, otherwise the provider's defaults are used.
     fn send<'a>(
         &'a self,
         messages: &'a [ChatMessage],
         model: Option<&'a str>,
+        base_url: Option<&'a str>,
         skill_message: Option<&'a ChatMessage>,
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, ProviderError>> + Send + 'a>>;
 }
@@ -240,7 +246,8 @@ pub async fn dispatch_chat(
     let provider = find_provider(&request.provider)
         .ok_or_else(|| ProviderError::Unknown(request.provider.clone()))?;
     let model = extract_model(request);
-    provider.send(&request.messages, model, skill_message).await
+    let base_url = extract_base_url(request);
+    provider.send(&request.messages, model, base_url, skill_message).await
 }
 
 /// Read the model id out of the provider-specific options bag. Each
@@ -250,6 +257,18 @@ fn extract_model(request: &ChatRequest) -> Option<&str> {
         .options
         .as_object()
         .and_then(|obj| obj.get("model"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Read the API base URL out of the provider-specific options bag.
+/// Convention is `"baseUrl"`. Empty / whitespace strings are treated as
+/// "use the provider default" by returning None.
+fn extract_base_url(request: &ChatRequest) -> Option<&str> {
+    request
+        .options
+        .as_object()
+        .and_then(|obj| obj.get("baseUrl"))
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
 }
@@ -286,6 +305,25 @@ mod tests {
             options: serde_json::json!({ "model": "MiniMax-M3" }),
         };
         assert_eq!(extract_model(&request), Some("MiniMax-M3"));
+    }
+
+    #[test]
+    fn extract_base_url_reads_options_bag() {
+        let request = ChatRequest {
+            provider: "minimax".to_string(),
+            messages: vec![],
+            skill_id: None,
+            options: serde_json::json!({ "baseUrl": "  " }),
+        };
+        assert_eq!(extract_base_url(&request), None);
+
+        let request = ChatRequest {
+            provider: "minimax".to_string(),
+            messages: vec![],
+            skill_id: None,
+            options: serde_json::json!({ "baseUrl": "https://api.example.test/v1" }),
+        };
+        assert_eq!(extract_base_url(&request), Some("https://api.example.test/v1"));
     }
 
     #[test]

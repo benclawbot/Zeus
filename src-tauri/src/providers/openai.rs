@@ -47,6 +47,10 @@ impl ChatProvider for OpenAiProvider {
         DEFAULT_MODEL
     }
 
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_BASE_URL
+    }
+
     fn display_name(&self) -> &'static str {
         "OpenAI"
     }
@@ -55,6 +59,7 @@ impl ChatProvider for OpenAiProvider {
         &'a self,
         messages: &'a [ChatMessage],
         model: Option<&'a str>,
+        base_url: Option<&'a str>,
         _skill_message: Option<&'a ChatMessage>,
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
@@ -62,10 +67,8 @@ impl ChatProvider for OpenAiProvider {
                 provider: self.id().to_string(),
             })?;
 
-            let endpoint = format!(
-                "{}/chat/completions",
-                DEFAULT_BASE_URL.trim_end_matches('/')
-            );
+            let base = base_url.unwrap_or(DEFAULT_BASE_URL).trim_end_matches('/');
+            let endpoint = format!("{}/chat/completions", base);
             let payload = serde_json::json!({
                 "model": model.unwrap_or(DEFAULT_MODEL),
                 "messages": messages,

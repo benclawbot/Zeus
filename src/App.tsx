@@ -30,7 +30,7 @@ import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./pr
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
-import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
+import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import {
   runShellCommand,
@@ -270,8 +270,9 @@ export function App() {
   // frontend only tracks whether each provider is configured (for the
   // Settings panel + to know if chat is likely to fail) plus draft
   // strings the user is currently typing.
-  const [providerKeysStatus, setProviderKeysStatus] = useState<ProviderKeysStatus>({ minimax: false, openai: false, anthropic: false });
-  const [providerKeyDrafts, setProviderKeyDrafts] = useState<{ minimax: string; openai: string; anthropic: string }>({ minimax: "", openai: "", anthropic: "" });
+  const [providerKeysStatus, setProviderKeysStatus] = useState<ProviderKeysStatus>({ minimax: false, openai: false, anthropic: false, minimaxBaseUrl: null, openaiBaseUrl: null, anthropicBaseUrl: null, minimaxModel: null, openaiModel: null, anthropicModel: null });
+  const [providerKeyDrafts, setProviderKeyDrafts] = useState<Record<string, string>>({ minimax: "", openai: "", anthropic: "", minimaxBaseUrl: "", openaiBaseUrl: "", anthropicBaseUrl: "", minimaxModel: "", openaiModel: "", anthropicModel: "" });
+  const [testResults, setTestResults] = useState<Record<string, { status: "running" | "ok" | "error"; message: string; baseUrl?: string; model?: string; preview?: string } | undefined>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -776,11 +777,17 @@ export function App() {
   ): Promise<void> {
     if (signal.aborted) return;
     const skillForTurn = activeSkillId;
+    const providerOverrides = getActiveProviderOverrides();
     try {
       const response = await dispatchChat({
         provider,
         skillId: skillForTurn ?? undefined,
         messages: seedMessages,
+        // Per-provider overrides saved in Settings. null/undefined means
+        // "use the provider default" (which the Rust dispatcher handles
+        // by ignoring the field).
+        ...(providerOverrides.model ? { model: providerOverrides.model } : {}),
+        ...(providerOverrides.baseUrl ? { baseUrl: providerOverrides.baseUrl } : {}),
       });
       if (signal.aborted) return;
       const clean = stripThinkingTags(response.content);
@@ -1010,14 +1017,28 @@ export function App() {
   // Load provider API key status (which providers have a key configured)
   // whenever the Settings view opens. We never see the actual key values
   // — just a boolean per provider.
-  useEffect(() => {
+useEffect(() => {
     if (activeView !== "Settings") return;
     if (!isTauri) {
-      setProviderKeysStatus({ minimax: false, openai: false, anthropic: false });
+      setProviderKeysStatus({ minimax: false, openai: false, anthropic: false, minimaxBaseUrl: null, openaiBaseUrl: null, anthropicBaseUrl: null, minimaxModel: null, openaiModel: null, anthropicModel: null });
       return;
     }
     let cancelled = false;
-    getProviderKeys().then((status) => { if (cancelled) return; setProviderKeysStatus(status); })
+    getProviderKeys().then((status) => {
+      if (cancelled) return;
+      setProviderKeysStatus(status);
+      // Pre-populate the baseUrl / model drafts from the saved values
+      // so the Settings form reflects the current effective config.
+      setProviderKeyDrafts((current) => ({
+        ...current,
+        minimaxBaseUrl: status.minimaxBaseUrl ?? "",
+        openaiBaseUrl: status.openaiBaseUrl ?? "",
+        anthropicBaseUrl: status.anthropicBaseUrl ?? "",
+        minimaxModel: status.minimaxModel ?? "",
+        openaiModel: status.openaiModel ?? "",
+        anthropicModel: status.anthropicModel ?? "",
+      }));
+    })
       .catch((err) => { if (cancelled) return; console.warn("get_provider_keys failed", err); });
     return () => { cancelled = true; };
   }, [activeView, isTauri]);
@@ -1042,6 +1063,63 @@ export function App() {
       setProviderKeyDrafts((current) => ({ ...current, [provider]: "" }));
     } catch (err) {
       console.warn("clear provider key failed", err);
+    }
+  }
+
+  /** Save per-provider base URL / model overrides (separate from the API key). */
+  async function handleSaveProviderOverrides(provider: "minimax" | "openai" | "anthropic", baseUrl: string, model: string) {
+    if (!isTauri) return;
+    const payload: Record<string, string> = {};
+    payload[`${provider}BaseUrl`] = baseUrl;
+    payload[`${provider}Model`] = model;
+    try {
+      await setProviderKeys(payload as { minimax?: string; openai?: string; anthropic?: string; minimaxBaseUrl?: string; openaiBaseUrl?: string; anthropicBaseUrl?: string; minimaxModel?: string; openaiModel?: string; anthropicModel?: string });
+      setProviderKeysStatus((current) => ({
+        ...current,
+        [`${provider}BaseUrl`]: baseUrl.trim() ? baseUrl.trim() : null,
+        [`${provider}Model`]: model.trim() ? model.trim() : null,
+      }) as ProviderKeysStatus);
+    } catch (err) {
+      console.warn("save provider overrides failed", err);
+    }
+  }
+
+  /** Issue a trivial chat call to verify the configured key + base URL + model. */
+  async function handleTestProvider(provider: "minimax" | "openai" | "anthropic") {
+    if (!isTauri) return;
+    const savedBaseUrl = (providerKeysStatus as unknown as Record<string, string | null>)[`${provider}BaseUrl`] ?? null;
+    const savedModel = (providerKeysStatus as unknown as Record<string, string | null>)[`${provider}Model`] ?? null;
+    setTestResults((current) => ({ ...current, [provider]: { status: "running", message: "Testing…" } }));
+    try {
+      const result = await testProvider(provider, savedBaseUrl ?? undefined, savedModel ?? undefined);
+      setTestResults((current) => ({
+        ...current,
+        [provider]: result.ok
+          ? { status: "ok", message: result.message, baseUrl: result.baseUrl, model: result.model, preview: result.preview ?? undefined }
+          : { status: "error", message: result.message, baseUrl: result.baseUrl, model: result.model },
+      }));
+      // Refresh status so the user sees the saved values reflected immediately.
+      const refreshed = await getProviderKeys();
+      setProviderKeysStatus(refreshed);
+    } catch (err) {
+      setTestResults((current) => ({
+        ...current,
+        [provider]: { status: "error", message: err instanceof Error ? err.message : String(err) },
+      }));
+    }
+  }
+
+  /** Read the saved baseUrl / model override for the active provider. */
+  function getActiveProviderOverrides(): { model?: string; baseUrl?: string } {
+    const status = providerKeysStatus;
+    switch (activeProviderId) {
+      case "openai":
+        return { baseUrl: status.openaiBaseUrl ?? undefined, model: status.openaiModel ?? undefined };
+      case "anthropic":
+        return { baseUrl: status.anthropicBaseUrl ?? undefined, model: status.anthropicModel ?? undefined };
+      case "minimax":
+      default:
+        return { baseUrl: status.minimaxBaseUrl ?? undefined, model: status.minimaxModel ?? undefined };
     }
   }
 
@@ -1403,10 +1481,15 @@ export function App() {
                 <p className="section-label">Provider API keys</p>
                 <p className="skills-muted">Keys are stored in the app data folder and never leave your machine. The frontend never sees the raw value — only whether a key is configured.</p>
                 {([
-                  { id: "minimax" as const, label: "MiniMax (MINIMAX_API_KEY)", help: "Default provider. Get a key from https://api.minimax.io." },
-                  { id: "openai" as const, label: "OpenAI (OPENAI_API_KEY)", help: "Set if you want to route through OpenAI's API." },
-                  { id: "anthropic" as const, label: "Anthropic (ANTHROPIC_API_KEY)", help: "Set if you want to route through Anthropic's API." },
-                ]).map((row) => (
+                  { id: "minimax" as const, label: "MiniMax (MINIMAX_API_KEY)", help: "Default provider. Get a key from https://www.minimax.io/platform/user-center/basic-information/interface-key.", defaultBaseUrl: "https://api.minimax.io/v1", defaultModel: "MiniMax-M3" },
+                  { id: "openai" as const, label: "OpenAI (OPENAI_API_KEY)", help: "Set if you want to route through OpenAI's API.", defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
+                  { id: "anthropic" as const, label: "Anthropic (ANTHROPIC_API_KEY)", help: "Set if you want to route through Anthropic's API.", defaultBaseUrl: "https://api.anthropic.com/v1", defaultModel: "claude-3-5-sonnet-latest" },
+                ]).map((row) => {
+                  const savedBaseUrl = (providerKeysStatus as unknown as Record<string, string | null>)[`${row.id}BaseUrl`] ?? null;
+                  const savedModel = (providerKeysStatus as unknown as Record<string, string | null>)[`${row.id}Model`] ?? null;
+                  const draftBaseUrl = providerKeyDrafts[`${row.id}BaseUrl` as keyof typeof providerKeyDrafts] ?? "";
+                  const draftModel = providerKeyDrafts[`${row.id}Model` as keyof typeof providerKeyDrafts] ?? "";
+                  return (
                   <form
                     key={row.id}
                     aria-label={row.label}
@@ -1414,8 +1497,11 @@ export function App() {
                     onSubmit={(event) => {
                       event.preventDefault();
                       const value = providerKeyDrafts[row.id];
-                      if (!value.trim()) return;
-                      void handleSaveProviderKey(row.id, value);
+                      if (value.trim()) {
+                        void handleSaveProviderKey(row.id, value);
+                      }
+                      // Always save baseUrl / model too — empty draft means "use default".
+                      void handleSaveProviderOverrides(row.id, draftBaseUrl, draftModel);
                     }}
                   >
                     <div className="provider-key-meta">
@@ -1433,13 +1519,63 @@ export function App() {
                         type="password"
                         value={providerKeyDrafts[row.id]}
                       />
-                      <button type="submit" disabled={!providerKeyDrafts[row.id].trim()}>Save</button>
+                      <button type="submit" disabled={!providerKeyDrafts[row.id].trim() && !draftBaseUrl.trim() && !draftModel.trim()}>Save</button>
                       {providerKeysStatus[row.id] ? (
                         <button type="button" onClick={() => void handleClearProviderKey(row.id)}>Clear</button>
                       ) : null}
+                      <button
+                        type="button"
+                        disabled={!providerKeysStatus[row.id] || testResults[row.id]?.status === "running"}
+                        onClick={() => void handleTestProvider(row.id)}
+                      >
+                        {testResults[row.id]?.status === "running" ? "Testing…" : "Test connection"}
+                      </button>
                     </div>
+                    <div className="provider-key-input-row">
+                      <label className="provider-key-field-label">
+                        <span>Base URL</span>
+                        <input
+                          aria-label={`${row.label} base URL`}
+                          onChange={(event) => setProviderKeyDrafts((current) => ({ ...current, [`${row.id}BaseUrl`]: event.target.value }))}
+                          placeholder={`Default: ${row.defaultBaseUrl}`}
+                          value={draftBaseUrl}
+                        />
+                      </label>
+                      <label className="provider-key-field-label">
+                        <span>Model</span>
+                        <input
+                          aria-label={`${row.label} model`}
+                          onChange={(event) => setProviderKeyDrafts((current) => ({ ...current, [`${row.id}Model`]: event.target.value }))}
+                          placeholder={`Default: ${row.defaultModel}`}
+                          value={draftModel}
+                        />
+                      </label>
+                    </div>
+                    {testResults[row.id] ? (() => {
+                      const test = testResults[row.id]!;
+                      return (
+                        <div className={test.status === "ok" ? "provider-test-result ok" : test.status === "error" ? "provider-test-result error" : "provider-test-result running"}>
+                          {test.status === "running" ? "Testing…" : (
+                            <>
+                              <strong>{test.status === "ok" ? "OK" : "Failed"}</strong>
+                              <span>{test.message}</span>
+                              {test.baseUrl ? <small>base: {test.baseUrl}</small> : null}
+                              {test.model ? <small>model: {test.model}</small> : null}
+                              {test.preview ? <pre className="provider-test-preview">{test.preview}</pre> : null}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })() : null}
+                    {savedBaseUrl || savedModel ? (
+                      <p className="skills-muted">
+                        Currently using: {savedBaseUrl ?? row.defaultBaseUrl}
+                        {savedModel ? ` · model: ${savedModel}` : ` · model: ${row.defaultModel} (default)`}
+                      </p>
+                    ) : null}
                   </form>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

@@ -37,27 +37,79 @@ export interface ProviderKeysStatus {
   minimax: boolean;
   openai: boolean;
   anthropic: boolean;
+  /** Per-provider base URL override (or null when unset). */
+  minimaxBaseUrl: string | null;
+  openaiBaseUrl: string | null;
+  anthropicBaseUrl: string | null;
+  /** Per-provider model override (or null when unset). */
+  minimaxModel: string | null;
+  openaiModel: string | null;
+  anthropicModel: string | null;
+}
+
+export interface TestProviderResult {
+  ok: boolean;
+  baseUrl: string;
+  model: string;
+  message: string;
+  preview: string | null;
 }
 
 /**
- * Returns which providers have a configured API key. The actual values
- * are NEVER returned to the frontend (security: never round-trip
- * secrets through the IPC bridge). The frontend uses this to render
- * the Settings panel and to know whether the chat should be enabled.
+ * Returns which providers have a configured API key plus the saved
+ * base URL / model overrides. The actual key values are NEVER returned
+ * to the frontend (security: never round-trip secrets through the IPC
+ * bridge).
  */
 export async function getProviderKeys(): Promise<ProviderKeysStatus> {
   if (!isTauriRuntime()) {
-    return { minimax: false, openai: false, anthropic: false };
+    return {
+      minimax: false,
+      openai: false,
+      anthropic: false,
+      minimaxBaseUrl: null,
+      openaiBaseUrl: null,
+      anthropicBaseUrl: null,
+      minimaxModel: null,
+      openaiModel: null,
+      anthropicModel: null,
+    };
   }
   return invoke<ProviderKeysStatus>("get_provider_keys");
 }
 
 /**
- * Save / update provider API keys. Empty strings clear the key. After
- * this call returns, the next `send_chat` invocation will see the new
- * keys in the process environment.
+ * Save / update provider API keys + per-provider base URL / model
+ * overrides. Empty strings clear the field. After this call returns, the
+ * next `send_chat` invocation will see the new keys in the process env.
  */
-export async function setProviderKeys(keys: { minimax?: string; openai?: string; anthropic?: string }): Promise<void> {
+export async function setProviderKeys(keys: {
+  minimax?: string;
+  openai?: string;
+  anthropic?: string;
+  minimaxBaseUrl?: string;
+  openaiBaseUrl?: string;
+  anthropicBaseUrl?: string;
+  minimaxModel?: string;
+  openaiModel?: string;
+  anthropicModel?: string;
+}): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("set_provider_keys", { request: keys });
+}
+
+/**
+ * Issue a trivial chat request to verify the configured key + base URL +
+ * model work end-to-end. Uses the same Rust dispatcher as the chat UI,
+ * so any error the user would see in real usage is surfaced here too.
+ */
+export async function testProvider(providerId: string, baseUrl?: string, model?: string): Promise<TestProviderResult> {
+  if (!isTauriRuntime()) {
+    throw new Error("Test connection is only available inside the Zeus desktop runtime.");
+  }
+  return invoke<TestProviderResult>("test_provider", {
+    providerId,
+    baseUrl: baseUrl ?? null,
+    model: model ?? null,
+  });
 }
