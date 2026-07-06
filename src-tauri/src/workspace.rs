@@ -121,6 +121,8 @@ pub struct AgentRunRequest {
     pub approved: bool,
     #[serde(default)]
     pub stop_on_error: bool,
+    #[serde(default)]
+    pub prior_failures: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -141,6 +143,50 @@ pub struct AgentRunStepLog {
     pub result: AgentStepResult,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum EffortTier { Low, Medium, High }
+
+impl EffortTier {
+    fn label(self) -> &'static str {
+        match self {
+            EffortTier::Low => "low",
+            EffortTier::Medium => "medium",
+            EffortTier::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortSignals {
+    pub files_touched: usize,
+    pub prior_failures: usize,
+    pub novelty_score: f32,
+    pub risky_steps: usize,
+    pub total_steps: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortLog {
+    pub subtask_id: String,
+    pub tier_selected: EffortTier,
+    pub signals: EffortSignals,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCheckpoint {
+    pub subtask_id: String,
+    pub timestamp: String,
+    pub decision: String,
+    pub rationale: String,
+    pub next_dependency: Option<String>,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunResult {
@@ -152,6 +198,8 @@ pub struct AgentRunResult {
     pub summary: String,
     pub proposed_harness_rule: Option<String>,
     pub rollback_plan: Vec<String>,
+    pub effort_log: EffortLog,
+    pub memory_checkpoints: Vec<MemoryCheckpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -176,16 +224,23 @@ impl CommandClass {
             CommandClass::Privileged => "privileged",
         }
     }
+
+    fn is_risky(self) -> bool {
+        !matches!(self, CommandClass::Safe)
+    }
 }
 
 pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> AgentRunResult {
+    let signals = effort_signals(&request);
+    let mut effort_tier = classify_effort(&signals);
     let mut logs = Vec::new();
     let mut files_touched = Vec::new();
     let mut diffs = Vec::new();
     let mut rollback_plan = Vec::new();
+    let mut checkpoints = Vec::new();
     let mut completed = true;
 
-    for (index, step) in request.steps.into_iter().enumerate() {
+    for (index, step) in request.steps.iter().cloned().enumerate() {
         let (label, result) = match step {
             AgentStepRequest::ReadFile { path } => {
                 let label = format!("read {path}");
@@ -205,7 +260,12 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                     expected_text: None,
                     approved: request.approved,
                 }, access_mode)
-                .map(|out| { files_touched.push(out.path.clone()); diffs.push(out.diff.clone()); rollback_plan.push(format!("Restore {} from git or previous editor contents.", out.path)); AgentStepResult::WriteFile(out) })
+                .map(|out| {
+                    files_touched.push(out.path.clone());
+                    diffs.push(out.diff.clone());
+                    rollback_plan.push(format!("Restore {} from git or previous editor contents.", out.path));
+                    AgentStepResult::WriteFile(out)
+                })
                 .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
             }
@@ -219,7 +279,12 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                     replace_all,
                     approved: request.approved,
                 }, access_mode)
-                .map(|out| { files_touched.push(out.path.clone()); diffs.push(out.diff.clone()); rollback_plan.push(format!("Revert {} using the generated diff or git checkout.", out.path)); AgentStepResult::EditFile(out) })
+                .map(|out| {
+                    files_touched.push(out.path.clone());
+                    diffs.push(out.diff.clone());
+                    rollback_plan.push(format!("Revert {} using the generated diff or git checkout.", out.path));
+                    AgentStepResult::EditFile(out)
+                })
                 .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
             }
@@ -238,17 +303,33 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                 (label, result)
             }
         };
-        if matches!(result, AgentStepResult::Failed { .. }) {
+
+        let failed = matches!(result, AgentStepResult::Failed { .. });
+        if failed {
             completed = false;
+            effort_tier = escalate_effort(effort_tier);
         }
+
+        let checkpoint = checkpoint_from_step(&request.objective, index, &label, &result);
+        if let Some(checkpoint) = checkpoint {
+            checkpoints.push(checkpoint);
+        }
+
         logs.push(AgentRunStepLog { index, label, result });
-        if !completed && request.stop_on_error { break; }
+        if failed && request.stop_on_error { break; }
     }
 
     files_touched.sort();
     files_touched.dedup();
-    let proposed_harness_rule = harness_rule_from_logs(&request.objective, &logs);
-    let summary = summarize_agent_run(&request.objective, completed, &files_touched, &logs);
+    let outcome = if completed { "success" } else { "failure" }.to_string();
+    let effort_log = EffortLog {
+        subtask_id: stable_subtask_id(&request.objective),
+        tier_selected: effort_tier,
+        signals,
+        outcome,
+    };
+    let proposed_harness_rule = harness_rule_from_logs(&request.objective, &logs, effort_tier);
+    let summary = summarize_agent_run(&request.objective, completed, &files_touched, &logs, &effort_log);
     AgentRunResult {
         objective: request.objective,
         completed,
@@ -258,6 +339,8 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
         summary,
         proposed_harness_rule,
         rollback_plan,
+        effort_log,
+        memory_checkpoints: checkpoints,
     }
 }
 
@@ -450,14 +533,129 @@ fn simple_diff(path: &str, before: &str, after: &str) -> String {
     out
 }
 
-fn harness_rule_from_logs(objective: &str, logs: &[AgentRunStepLog]) -> Option<String> {
-    let failures = logs.iter().filter(|log| matches!(log.result, AgentStepResult::Failed { .. })).count();
-    if failures == 0 { return None; }
-    Some(format!("When working on '{}', stop after the first failed execution step, summarize the failing command/file operation, and ask for approval before expanding the blast radius.", objective))
+fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
+    let mut files = Vec::new();
+    let mut risky_steps = 0;
+    for step in &request.steps {
+        match step {
+            AgentStepRequest::ReadFile { path }
+            | AgentStepRequest::WriteFile { path, .. }
+            | AgentStepRequest::EditFile { path, .. } => files.push(path.clone()),
+            AgentStepRequest::RunCommand { program, args, .. } => {
+                if classify_command(program, args).is_risky() {
+                    risky_steps += 1;
+                }
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    let novelty_score = novelty_score(&request.objective, &files, risky_steps, request.steps.len());
+    EffortSignals {
+        files_touched: files.len(),
+        prior_failures: request.prior_failures,
+        novelty_score,
+        risky_steps,
+        total_steps: request.steps.len(),
+    }
 }
 
-fn summarize_agent_run(objective: &str, completed: bool, files: &[String], logs: &[AgentRunStepLog]) -> String {
-    format!("Objective: {objective}. Status: {}. Steps: {}. Files touched: {}.", if completed { "completed" } else { "failed" }, logs.len(), if files.is_empty() { "none".to_string() } else { files.join(", ") })
+fn classify_effort(signals: &EffortSignals) -> EffortTier {
+    if signals.prior_failures >= 2 || signals.files_touched >= 8 || signals.risky_steps >= 2 || signals.novelty_score >= 0.75 {
+        return EffortTier::High;
+    }
+    if signals.prior_failures == 1 || signals.files_touched >= 3 || signals.risky_steps == 1 || signals.novelty_score >= 0.35 {
+        return EffortTier::Medium;
+    }
+    EffortTier::Low
+}
+
+fn escalate_effort(current: EffortTier) -> EffortTier {
+    match current {
+        EffortTier::Low => EffortTier::Medium,
+        EffortTier::Medium | EffortTier::High => EffortTier::High,
+    }
+}
+
+fn novelty_score(objective: &str, files: &[String], risky_steps: usize, total_steps: usize) -> f32 {
+    let mut score: f32 = 0.0;
+    let objective = objective.to_ascii_lowercase();
+    if objective.contains("new") || objective.contains("implement") || objective.contains("refactor") || objective.contains("wire") {
+        score += 0.25;
+    }
+    if files.iter().any(|path| path.ends_with(".rs")) {
+        score += 0.25;
+    }
+    if files.len() >= 3 {
+        score += 0.25;
+    }
+    if risky_steps > 0 {
+        score += 0.2;
+    }
+    if total_steps >= 5 {
+        score += 0.1;
+    }
+    score.min(1.0)
+}
+
+fn checkpoint_from_step(objective: &str, index: usize, label: &str, result: &AgentStepResult) -> Option<MemoryCheckpoint> {
+    let (source, rationale) = match result {
+        AgentStepResult::Failed { message } => ("error", format!("Step failed: {message}")),
+        AgentStepResult::WriteFile(out) => ("checkpoint", format!("Wrote {} ({} bytes).", out.path, out.bytes_written)),
+        AgentStepResult::EditFile(out) => ("checkpoint", format!("Edited {} with {} replacement(s).", out.path, out.replacements)),
+        AgentStepResult::RunCommand(out) if out.exit_code != Some(0) || out.timed_out => ("error", format!("Command exited {:?}; timed_out={}." , out.exit_code, out.timed_out)),
+        _ => return None,
+    };
+    Some(MemoryCheckpoint {
+        subtask_id: format!("{}-{index}", stable_subtask_id(objective)),
+        timestamp: current_timestamp(),
+        decision: label.to_string(),
+        rationale,
+        next_dependency: dependency_from_label(label),
+        source: source.to_string(),
+    })
+}
+
+fn dependency_from_label(label: &str) -> Option<String> {
+    label.split_whitespace().last().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
+fn stable_subtask_id(value: &str) -> String {
+    let mut out = value
+        .chars()
+        .flat_map(|ch| ch.to_lowercase())
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() { "agent-run".to_string() } else { trimmed.chars().take(48).collect() }
+}
+
+fn current_timestamp() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    format!("unix:{}", now.as_secs())
+}
+
+fn harness_rule_from_logs(objective: &str, logs: &[AgentRunStepLog], effort_tier: EffortTier) -> Option<String> {
+    let failures = logs.iter().filter(|log| matches!(log.result, AgentStepResult::Failed { .. })).count();
+    if failures == 0 { return None; }
+    Some(format!("When working on '{}', Zeus escalated effort to {} after a failed execution step. Re-plan with the failure output in context before attempting broader changes.", objective, effort_tier.label()))
+}
+
+fn summarize_agent_run(objective: &str, completed: bool, files: &[String], logs: &[AgentRunStepLog], effort: &EffortLog) -> String {
+    format!(
+        "Objective: {objective}. Status: {}. Steps: {}. Files touched: {}. Adaptive effort: {} (files={}, priorFailures={}, riskySteps={}, novelty={:.2}).",
+        if completed { "completed" } else { "failed" },
+        logs.len(),
+        if files.is_empty() { "none".to_string() } else { files.join(", ") },
+        effort.tier_selected.label(),
+        effort.signals.files_touched,
+        effort.signals.prior_failures,
+        effort.signals.risky_steps,
+        effort.signals.novelty_score,
+    )
 }
 
 fn workspace_relative_display(root: &Path, path: &Path) -> String { path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/") }
@@ -491,5 +689,31 @@ mod tests {
         assert_eq!(classify_command("npm", &["install".into()]), CommandClass::Dependency);
         assert_eq!(classify_command("git", &["reset".into(), "--hard".into()]), CommandClass::Destructive);
         assert_eq!(classify_command("curl", &["https://example.com".into()]), CommandClass::Network);
+    }
+
+    #[test]
+    fn selects_effort_from_rust_execution_signals() {
+        let low = EffortSignals { files_touched: 1, prior_failures: 0, novelty_score: 0.1, risky_steps: 0, total_steps: 1 };
+        let medium = EffortSignals { files_touched: 1, prior_failures: 0, novelty_score: 0.1, risky_steps: 1, total_steps: 1 };
+        let high = EffortSignals { files_touched: 1, prior_failures: 2, novelty_score: 0.1, risky_steps: 0, total_steps: 1 };
+        assert_eq!(classify_effort(&low), EffortTier::Low);
+        assert_eq!(classify_effort(&medium), EffortTier::Medium);
+        assert_eq!(classify_effort(&high), EffortTier::High);
+    }
+
+    #[test]
+    fn agent_run_returns_effort_and_checkpoints() {
+        let result = run_agent_task(AgentRunRequest {
+            objective: "exercise effort management".to_string(),
+            workspace_dir: None,
+            steps: vec![AgentStepRequest::ReadFile { path: "definitely-missing-file.txt".to_string() }],
+            approved: false,
+            stop_on_error: true,
+            prior_failures: 1,
+        }, Some("Full"));
+        assert!(!result.completed);
+        assert_eq!(result.effort_log.tier_selected, EffortTier::High);
+        assert_eq!(result.memory_checkpoints.len(), 1);
+        assert!(result.summary.contains("Adaptive effort"));
     }
 }
