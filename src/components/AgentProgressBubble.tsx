@@ -10,20 +10,65 @@ export interface AgentProgressStep {
   result?: string;
 }
 
+export interface MappedStepResult {
+  status: Exclude<AgentStepStatus, "pending" | "running">;
+  message?: string;
+}
+
 /**
- * Map the unknown `AgentRunStepLog.result` payload (a serialized Rust enum)
- * to a coarse status used by the progress bubble.
+ * Map the unknown `AgentRunStepLog.result` payload (a serialized Rust enum
+ * with `#[serde(tag = "kind", rename_all = "camelCase")]`) to a coarse
+ * status used by the progress bubble.
  *
- * The Rust schema uses `serde(tag = "...")`. Both PascalCase (Tauri's
- * serde_json default) and lowercase key shapes are handled so the call
- * site stays robust against minor schema changes.
+ * Real wire shapes:
+ *   - failure:  { kind: "failed", message: string }
+ *   - success:  { kind: "readFile",  ... } | { kind: "writeFile", ... } |
+ *               { kind: "editFile",  ... } | { kind: "runCommand", ... }
+ *
+ * Legacy tag shapes (`{ Failed: "..." }`, `{ failed: "..." }`) are still
+ * tolerated as a defensive fallback. Unknown shapes log a dev-only
+ * `console.warn` and are treated as success — this matches the design spec.
  */
-export function mapStepResult(result: unknown): AgentStepStatus {
-  if (typeof result !== "object" || result === null) return "ok";
+export function mapStepResult(result: unknown): MappedStepResult {
+  if (typeof result !== "object" || result === null) {
+    // Unknown shape — surface it for developers but don't fail the UI.
+    // eslint-disable-next-line no-console
+    console.warn("[AgentProgressBubble] Unhandled step result shape:", result);
+    return { status: "ok" };
+  }
   const obj = result as Record<string, unknown>;
-  if (typeof obj.Failed === "string") return "failed";
-  if (typeof obj.failed === "string") return "failed";
-  return "ok";
+  if (obj.kind === "failed" && typeof obj.message === "string") {
+    return { status: "failed", message: obj.message };
+  }
+  if (typeof obj.Failed === "string") {
+    return { status: "failed", message: obj.Failed };
+  }
+  if (typeof obj.failed === "string") {
+    return { status: "failed", message: obj.failed };
+  }
+  if (typeof obj.kind === "string" && obj.kind !== "failed") {
+    return { status: "ok" };
+  }
+  // Unknown shape — surface it for developers but don't fail the UI.
+  // eslint-disable-next-line no-console
+  console.warn("[AgentProgressBubble] Unhandled step result shape:", result);
+  return { status: "ok" };
+}
+
+/**
+ * Derive an `AgentProgressStep` from a raw log entry. Call sites (Task 8)
+ * use this to feed streamed events into the bubble while preserving the
+ * failure message as the row's `result` text.
+ */
+export function deriveStepFromLog(
+  index: number,
+  label: string,
+  result: unknown,
+): AgentProgressStep {
+  const mapped = mapStepResult(result);
+  const step: AgentProgressStep = { index, label, status: mapped.status };
+  if (mapped.message !== undefined) step.result = mapped.message;
+  return step;
 }
 
 interface AgentProgressBubbleProps {
@@ -34,7 +79,7 @@ interface AgentProgressBubbleProps {
   total: number;
   /** True when at least one step failed but the run continued. */
   partial: boolean;
-  /** Optional override for the start-open state. Default: true while any step is pending. */
+  /** Optional override for the start-open state. */
   defaultOpen?: boolean;
 }
 
@@ -45,11 +90,26 @@ export function AgentProgressBubble({
   partial,
   defaultOpen,
 }: AgentProgressBubbleProps) {
-  const [open, setOpen] = useState(
-    defaultOpen ?? (steps.some((s) => s.status === "pending" || s.status === "running") || completed > 0),
-  );
-  const statusLabel = partial ? "partial" : completed === total ? "succeeded" : "running";
-  const statusClass = partial ? "partial" : completed === total ? "ok" : "running";
+  // Auto-open while there are running/pending steps OR any progress has
+  // been made. Re-evaluates each render so streamed updates don't leave
+  // the bubble stuck closed if it mounted before events arrived.
+  const autoOpen =
+    defaultOpen ??
+    (steps.some((s) => s.status === "pending" || s.status === "running") ||
+      completed > 0);
+  const [userToggled, setUserToggled] = useState(false);
+  const [userOpen, setUserOpen] = useState(false);
+  const open = userToggled ? userOpen : autoOpen;
+  const statusLabel = partial
+    ? "partial"
+    : completed === total
+      ? "completed"
+      : "running";
+  const statusClass = partial
+    ? "partial"
+    : completed === total
+      ? "ok"
+      : "running";
 
   return (
     <article className="chat-bubble chat-zeus agent-progress" data-testid="agent-progress">
@@ -61,7 +121,10 @@ export function AgentProgressBubble({
           <button
             aria-expanded={open}
             className="agent-progress-toggle"
-            onClick={() => setOpen((current) => !current)}
+            onClick={() => {
+              setUserToggled(true);
+              setUserOpen((current) => !current);
+            }}
             type="button"
           >
             {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}

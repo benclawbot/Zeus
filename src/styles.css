@@ -2163,6 +2163,10 @@ textarea:focus-visible {
   color: inherit;
 }
 
+.agent-progress-toggle:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+
 .agent-progress-status {
   font-size: 11px;
   text-transform: uppercase;
@@ -2172,22 +2176,22 @@ textarea:focus-visible {
 }
 
 .agent-progress-status-ok {
-  background: #e6f4ea;
-  color: #137333;
+  background: var(--green-soft);
+  color: var(--green);
 }
 
 .agent-progress-status-partial {
-  background: #fef7e0;
-  color: #b06000;
+  background: var(--purple-soft);
+  color: var(--purple);
 }
 
 .agent-progress-status-running {
-  background: #e8eaf6;
-  color: #3a47b1;
+  background: var(--purple-soft);
+  color: var(--purple);
 }
 
 .agent-progress-count {
-  color: var(--muted, #888);
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -2214,11 +2218,11 @@ textarea:focus-visible {
 }
 
 .agent-progress-row-failed {
-  color: #b00020;
+  color: var(--danger);
 }
 
 .agent-progress-row-running {
-  color: #3a47b1;
+  color: var(--purple);
 }
 
 .agent-progress-icon {
