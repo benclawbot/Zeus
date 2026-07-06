@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "./minimax";
 
-const ZEUS_WORKSPACE_DIR_KEY = "zeus.sessionWorkspaceDir";
-
 export function getSelectedWorkspaceDir(): string | undefined {
-  if (typeof window === "undefined") return undefined;
-  const value = window.localStorage.getItem(ZEUS_WORKSPACE_DIR_KEY)?.trim();
-  return value || undefined;
+  // Workspace selection is now a runtime concern. In packaged builds the
+  // backend resolves Zeus' installed/resource home and skills directory; in
+  // Full mode it may also authorize absolute filesystem paths. The composer
+  // no longer owns a per-session workspace folder.
+  return undefined;
 }
 
 function withSelectedWorkspace<T extends { workspaceDir?: string }>(request: T): T {
