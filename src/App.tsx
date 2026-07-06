@@ -94,6 +94,12 @@ interface ChatMessage {
   text: string;
   thinking?: boolean;
   skillId?: string;
+  /** When present, this bubble renders as an AgentProgressBubble instead of text. */
+  agentProgress?: {
+    steps: AgentProgressStep[];
+    completed: number;
+    partial: boolean;
+  };
 }
 
 const planItems = [
@@ -251,7 +257,16 @@ const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
   "```\n" +
   "Available step kinds: readFile, writeFile, editFile, runCommand, listDir, loadProjectConfig, gitOp, runTest.\n" +
   "After the steps run, the workspace tool panel shows the diff/log; you will see the results in the next turn and can ask for more steps.\n" +
-  "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.";
+  "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.\n" +
+  "\n" +
+  "# On failures and partial outcomes\n" +
+  "- If a tool step fails, attempt a corrected `tool` block that takes a different approach, or include a fallback in the next tool block, before emitting your final reply. Do not give up after one failure.\n" +
+  "- Only emit a final reply when you cannot proceed further on your own.\n" +
+  "- When you do emit a final reply (whether the run succeeded, partially succeeded, or fully failed), structure it as three sections:\n" +
+  "  - **What was done** — concrete actions and the result for each.\n" +
+  "  - **What's still pending** — open items, with the reason each is pending.\n" +
+  "  - **Why it's pending** — the failure or constraint that left it open.\n" +
+  "- If pending items need a user decision, end the final reply with a **Decision needed** section that names the choice, options, and which option you recommend.";
 const COMPACT_KEEP_LAST = 6;
 const MAX_TOOL_TURNS = 6;
 const PROJECT_NAME = "Zeus";
@@ -1364,7 +1379,27 @@ export function App() {
         });
         agentResult = result;
         recordToolRun({ kind: "agent", at: new Date().toISOString(), agent: result });
+        // Build the per-step progress bubble from the agent's log.
+        const stepsForBubble: AgentProgressStep[] = result.logs.map((entry) => {
+          const mapped = mapStepResult(entry.result);
+          const step: AgentProgressStep = { index: entry.index, label: entry.label, status: mapped.status };
+          if (mapped.message !== undefined) step.result = mapped.message;
+          return step;
+        });
+        const completedCount = stepsForBubble.filter((s) => s.status === "ok" || s.status === "failed").length;
+        const failedCount = stepsForBubble.filter((s) => s.status === "failed").length;
+        const progressMessage: ChatMessage = {
+          id: nextMessageId(),
+          role: "zeus",
+          text: "",
+          agentProgress: {
+            steps: stepsForBubble,
+            completed: completedCount,
+            partial: failedCount > 0 && !result.completed,
+          },
+        };
         appendZeusMessage(summarizeAgentRun(result));
+        setChat((entries) => [...entries, progressMessage]);
         if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
       } catch (err) {
         agentError = err instanceof Error ? err.message : String(err);
@@ -1397,6 +1432,21 @@ export function App() {
         { role: "system", content: augmentedSystemRec },
         ...nextContextMessages,
       ];
+
+      // Transition the harness proposal from "implementing" to a terminal
+      // state based on the agent run outcome. Only fire when the proposal
+      // is currently "implementing" — the user may have applied multiple
+      // proposals back-to-back and we don't want to retroactively mark
+      // an already-applied one as failed.
+      if (proposal.status === "implementing" && agentResult) {
+        const target: HarnessProposal["status"] = agentResult.completed ? "applied" : "failed";
+        const proposalAfter = { ...proposal, status: target };
+        setProposal(proposalAfter);
+        setHistory((entries) => [
+          { proposalId: proposal.id, action: target, at: new Date().toISOString(), sessionId: activeSession?.id },
+          ...entries,
+        ].slice(0, 4));
+      }
 
       await runChatTurn(nextMessages, nextThinkingId, signal, depth + 1, originalPrompt);
     } catch (error) {
@@ -1842,32 +1892,45 @@ useEffect(() => {
               {activeSkillId ? <span className="session-pill skill">skill: {activeSkillId}</span> : null}
             </div>
             <div className="conversation" aria-label="Conversation" ref={conversationRef}>
-              {chat.map((entry) => entry.role === "user" ? (
-                <article key={entry.id} className="chat-bubble chat-user">
-                  <div className="chat-avatar" aria-hidden="true"><User size={16} /></div>
-                  <div className="chat-body">
-                    <div className="chat-heading"><strong>Me</strong><time>just now</time></div>
-                    {entry.skillId ? (
-                      <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
-                    ) : null}
-                    {/* User messages stay as pre-wrapped text — they're
-                        raw keyboard input, not markdown. */}
-                    <p className="chat-md-para">{entry.text}</p>
-                  </div>
-                </article>
-              ) : (
-                <article key={entry.id} className="chat-bubble chat-zeus">
-                  <div className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></div>
-                  <div className="chat-body">
-                    <div className="chat-heading"><strong>Zeus</strong><time>just now</time></div>
-                    {entry.thinking ? (
-                      <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
-                    ) : (
-                      <MarkdownView markdown={entry.text} />
-                    )}
-                  </div>
-                </article>
-              ))}
+              {chat.map((entry) => {
+                if (entry.agentProgress) {
+                  return (
+                    <AgentProgressBubble
+                      key={entry.id}
+                      steps={entry.agentProgress.steps}
+                      completed={entry.agentProgress.completed}
+                      total={entry.agentProgress.steps.length}
+                      partial={entry.agentProgress.partial}
+                    />
+                  );
+                }
+                return entry.role === "user" ? (
+                  <article key={entry.id} className="chat-bubble chat-user">
+                    <div className="chat-avatar" aria-hidden="true"><User size={16} /></div>
+                    <div className="chat-body">
+                      <div className="chat-heading"><strong>Me</strong><time>just now</time></div>
+                      {entry.skillId ? (
+                        <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
+                      ) : null}
+                      {/* User messages stay as pre-wrapped text — they're
+                          raw keyboard input, not markdown. */}
+                      <p className="chat-md-para">{entry.text}</p>
+                    </div>
+                  </article>
+                ) : (
+                  <article key={entry.id} className="chat-bubble chat-zeus">
+                    <div className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></div>
+                    <div className="chat-body">
+                      <div className="chat-heading"><strong>Zeus</strong><time>just now</time></div>
+                      {entry.thinking ? (
+                        <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
+                      ) : (
+                        <MarkdownView markdown={entry.text} />
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
 
             <section className="composer" aria-label="Message composer">
