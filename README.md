@@ -53,13 +53,15 @@ These capabilities are present in the current codebase and wired through the app
 
 ### Skills System
 
-- Skills are discovered from a configurable/local skills directory.
+- Skills are discovered recursively from a configurable/local skills directory, so categorized skill packs are supported.
 - `ZEUS_SKILLS_DIR` is supported, with packaged resource and development-directory fallbacks.
 - Skill folders are validated by `SKILL.md` files with YAML frontmatter.
 - Skill summaries include id, name, description, and whether references, scripts, assets, or OpenAI agent metadata are present.
 - Invalid skill folders are skipped instead of blocking the whole registry load.
 - Skill details can be loaded from the UI.
 - Active skill instructions are injected on the Rust side into the next provider call rather than shipping full skill bodies through frontend state.
+- Manual slash-selected skills take precedence. When no manual skill is active, Zeus automatically scores the latest user request against each skill's `name` and `description`, then injects up to three high-confidence matching skills.
+- Skills with `disable-model-invocation: true` are available in the picker but skipped by automatic matching.
 - Skill chips are excluded from ordinary chat-history context because the active skill body is injected separately.
 
 ### Attachments and Image Paste
@@ -305,6 +307,8 @@ ZEUS_SKILLS_DIR=/path/to/skills
 ```
 
 If unset, Zeus checks packaged resources and development paths.
+
+The bundled skills are organized by category. Keep each skill description narrow: it is used for automatic context matching, so broad generic trigger words can make unrelated skills compete.
 
 ## Suggested GitHub Description
 

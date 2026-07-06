@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -19,16 +20,16 @@ use persistence::{
     SaveSessionRequest,
 };
 use providers::{
-    build_skill_system_message, dispatch_chat, find_provider, list_provider_info, ChatMessage, ChatRequest,
-    ChatResponse, ProviderInfo,
+    build_skill_system_message, dispatch_chat, find_provider, list_provider_info, ChatMessage,
+    ChatRequest, ChatResponse, ProviderInfo,
 };
 use workspace::{
-    apply_workspace_edit as apply_workspace_edit_impl, read_workspace_file as read_workspace_file_impl,
-    run_agent_task as run_agent_task_impl, run_shell_command as run_shell_command_impl,
-    write_workspace_file as write_workspace_file_impl, AgentRunRequest, AgentRunResult,
-    ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult, ReadWorkspaceFileRequest,
-    ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult, WriteWorkspaceFileRequest,
-    WriteWorkspaceFileResult,
+    apply_workspace_edit as apply_workspace_edit_impl,
+    read_workspace_file as read_workspace_file_impl, run_agent_task as run_agent_task_impl,
+    run_shell_command as run_shell_command_impl, write_workspace_file as write_workspace_file_impl,
+    AgentRunRequest, AgentRunResult, ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult,
+    ReadWorkspaceFileRequest, ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult,
+    WriteWorkspaceFileRequest, WriteWorkspaceFileResult,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -72,18 +73,35 @@ fn load_skill_system_message(
     Ok(build_skill_system_message(skill_id, &raw))
 }
 
-/// Prepend a skill message (if any) to the conversation so the LLM sees
-/// the skill instructions before any user/assistant turn.
+fn load_skill_system_message_from_dir(
+    skill_dir: &Path,
+    skill_id: &str,
+) -> Result<Option<ChatMessage>, String> {
+    let skill_path = skill_dir.join("SKILL.md");
+    let raw = fs::read_to_string(&skill_path)
+        .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
+    Ok(build_skill_system_message(skill_id, &raw))
+}
+
+/// Prepend explicit or automatically matched skill messages to the
+/// conversation so the LLM sees skill instructions before any user/assistant
+/// turn. Manual slash-selected skills win; otherwise Zeus chooses a small,
+/// high-signal set from the user's request context.
 fn inject_skill(app: &tauri::AppHandle, request: &ChatRequest) -> Result<Vec<ChatMessage>, String> {
-    let Some(skill_id) = request.skill_id.as_deref().filter(|s| !s.is_empty()) else {
+    let skill_messages =
+        if let Some(skill_id) = request.skill_id.as_deref().filter(|s| !s.is_empty()) {
+            load_skill_system_message(app, skill_id)?
+                .into_iter()
+                .collect()
+        } else {
+            let root = resolve_skills_dir(app)?;
+            select_auto_skill_messages(&root, request)?
+        };
+    if skill_messages.is_empty() {
         return Ok(request.messages.clone());
-    };
-    let skill_message = match load_skill_system_message(app, skill_id)? {
-        Some(msg) => msg,
-        None => return Ok(request.messages.clone()),
-    };
-    let mut out = Vec::with_capacity(request.messages.len() + 1);
-    out.push(skill_message);
+    }
+    let mut out = Vec::with_capacity(request.messages.len() + skill_messages.len());
+    out.extend(skill_messages);
     out.extend(request.messages.iter().cloned());
     Ok(out)
 }
@@ -131,6 +149,12 @@ fn split_frontmatter(content: &str) -> Option<&str> {
     Some(rest[..end].trim())
 }
 
+fn frontmatter_bool(frontmatter: &str, key: &str) -> bool {
+    frontmatter_value(frontmatter, key)
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn skill_summary_from_dir(dir: &Path) -> Result<SkillSummary, String> {
     let folder_id = dir
         .file_name()
@@ -161,21 +185,64 @@ fn skill_summary_from_dir(dir: &Path) -> Result<SkillSummary, String> {
     })
 }
 
-fn list_skills_from_dir(root: &Path) -> Result<Vec<SkillSummary>, String> {
-    let mut skills = Vec::new();
+#[derive(Debug, Clone)]
+struct SkillIndexEntry {
+    summary: SkillSummary,
+    dir: PathBuf,
+    frontmatter: String,
+}
+
+fn skill_index_entry_from_dir(dir: &Path) -> Result<SkillIndexEntry, String> {
+    let skill_path = dir.join("SKILL.md");
+    let content = fs::read_to_string(&skill_path)
+        .map_err(|e| format!("read {}: {e}", skill_path.display()))?;
+    let frontmatter = split_frontmatter(&content)
+        .ok_or_else(|| format!("{} is missing YAML frontmatter.", skill_path.display()))?
+        .to_string();
+    let summary = skill_summary_from_dir(dir)?;
+    Ok(SkillIndexEntry {
+        summary,
+        dir: dir.to_path_buf(),
+        frontmatter,
+    })
+}
+
+fn collect_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = fs::read_dir(root).map_err(|e| format!("read skills dir: {e}"))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read skill entry: {e}"))?;
         let path = entry.path();
-        if path.is_dir() && path.join("SKILL.md").is_file() {
-            match skill_summary_from_dir(&path) {
-                Ok(summary) => skills.push(summary),
-                Err(error) => eprintln!("Skipping invalid skill {}: {error}", path.display()),
-            }
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join("SKILL.md").is_file() {
+            out.push(path);
+        } else {
+            collect_skill_dirs(&path, out)?;
         }
     }
-    skills.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(())
+}
+
+fn skill_index_from_dir(root: &Path) -> Result<Vec<SkillIndexEntry>, String> {
+    let mut dirs = Vec::new();
+    collect_skill_dirs(root, &mut dirs)?;
+    let mut skills = Vec::new();
+    for path in dirs {
+        match skill_index_entry_from_dir(&path) {
+            Ok(entry) => skills.push(entry),
+            Err(error) => eprintln!("Skipping invalid skill {}: {error}", path.display()),
+        }
+    }
+    skills.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
     Ok(skills)
+}
+
+fn list_skills_from_dir(root: &Path) -> Result<Vec<SkillSummary>, String> {
+    Ok(skill_index_from_dir(root)?
+        .into_iter()
+        .map(|entry| entry.summary)
+        .collect())
 }
 
 fn find_skill_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
@@ -184,20 +251,205 @@ fn find_skill_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
         return Ok(direct);
     }
 
-    let entries = fs::read_dir(root).map_err(|e| format!("read skills dir: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("read skill entry: {e}"))?;
-        let path = entry.path();
-        if path.is_dir() && path.join("SKILL.md").is_file() {
-            if let Ok(summary) = skill_summary_from_dir(&path) {
-                if summary.id == id {
-                    return Ok(path);
-                }
-            }
+    for entry in skill_index_from_dir(root)? {
+        if entry.summary.id == id {
+            return Ok(entry.dir);
         }
     }
 
     Err(format!("Skill '{id}' was not found."))
+}
+
+const MAX_AUTO_SKILLS: usize = 3;
+const AUTO_SKILL_SCORE_THRESHOLD: i32 = 3;
+
+fn select_auto_skill_messages(
+    root: &Path,
+    request: &ChatRequest,
+) -> Result<Vec<ChatMessage>, String> {
+    let context = request_context(request);
+    if context.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let request_tokens = tokenize(&context);
+    if request_tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut scored = skill_index_from_dir(root)?
+        .into_iter()
+        .filter(|entry| !frontmatter_bool(&entry.frontmatter, "disable-model-invocation"))
+        .filter_map(|entry| {
+            let score = auto_skill_score(&entry, &context, &request_tokens);
+            (score >= AUTO_SKILL_SCORE_THRESHOLD).then_some((score, entry))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(score_a, skill_a), (score_b, skill_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| skill_a.summary.id.cmp(&skill_b.summary.id))
+    });
+
+    let mut out = Vec::new();
+    for (_, entry) in scored.into_iter().take(MAX_AUTO_SKILLS) {
+        if let Some(message) = load_skill_system_message_from_dir(&entry.dir, &entry.summary.id)? {
+            out.push(message);
+        }
+    }
+    Ok(out)
+}
+
+fn request_context(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == "user")
+        .take(3)
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn auto_skill_score(
+    entry: &SkillIndexEntry,
+    context: &str,
+    request_tokens: &HashSet<String>,
+) -> i32 {
+    let normalized_context = normalize_text(context);
+    let id_phrase = entry.summary.id.replace('-', " ");
+    let name_phrase = entry.summary.name.replace('-', " ");
+    let mut score = 0;
+    if normalized_context.contains(&id_phrase) {
+        score += 8;
+    }
+    if normalized_context.contains(&name_phrase) && name_phrase != id_phrase {
+        score += 8;
+    }
+
+    let name_tokens = tokenize(&entry.summary.name);
+    let skill_tokens = tokenize(&format!(
+        "{} {}",
+        entry.summary.name, entry.summary.description
+    ));
+    for token in request_tokens {
+        if name_tokens.contains(token) {
+            score += 3;
+        } else if skill_tokens.contains(token) {
+            score += 2;
+        }
+    }
+
+    for phrase in quoted_phrases(&entry.summary.description) {
+        if normalized_context.contains(&normalize_text(&phrase)) {
+            score += 5;
+        }
+    }
+
+    score
+}
+
+fn normalize_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last_was_space = true;
+    for ch in value.chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn tokenize(value: &str) -> HashSet<String> {
+    normalize_text(value)
+        .split_whitespace()
+        .filter(|token| token.len() > 2)
+        .filter(|token| !auto_skill_stop_words().contains(*token))
+        .map(str::to_string)
+        .collect()
+}
+
+fn quoted_phrases(value: &str) -> Vec<String> {
+    let mut phrases = Vec::new();
+    let mut start = None;
+    for (idx, ch) in value.char_indices() {
+        if ch == '"' || ch == '\'' {
+            if let Some(open) = start.take() {
+                if idx > open + 1 {
+                    phrases.push(value[open + 1..idx].to_string());
+                }
+            } else {
+                start = Some(idx);
+            }
+        }
+    }
+    phrases
+}
+
+fn auto_skill_stop_words() -> HashSet<&'static str> {
+    [
+        "the",
+        "and",
+        "for",
+        "with",
+        "when",
+        "user",
+        "users",
+        "use",
+        "uses",
+        "using",
+        "asks",
+        "asked",
+        "request",
+        "requests",
+        "agent",
+        "agents",
+        "skill",
+        "skills",
+        "task",
+        "work",
+        "workflow",
+        "create",
+        "build",
+        "make",
+        "write",
+        "edit",
+        "update",
+        "implement",
+        "implementation",
+        "fix",
+        "improve",
+        "review",
+        "check",
+        "change",
+        "changes",
+        "project",
+        "code",
+        "file",
+        "files",
+        "generic",
+        "based",
+        "needs",
+        "before",
+        "after",
+        "from",
+        "into",
+        "this",
+        "that",
+        "they",
+        "must",
+        "should",
+        "could",
+        "would",
+        "does",
+        "done",
+    ]
+    .into_iter()
+    .collect()
 }
 
 fn valid_skill_id(id: &str) -> bool {
@@ -294,11 +546,17 @@ fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let parsed: ProviderKeysFile = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse {}: {e}", path.display()))?;
-    if let Some(value) = parsed.minimax.as_deref() { set_optional_env("MINIMAX_API_KEY", value); }
-    if let Some(value) = parsed.openai.as_deref() { set_optional_env("OPENAI_API_KEY", value); }
-    if let Some(value) = parsed.anthropic.as_deref() { set_optional_env("ANTHROPIC_API_KEY", value); }
+    let parsed: ProviderKeysFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    if let Some(value) = parsed.minimax.as_deref() {
+        set_optional_env("MINIMAX_API_KEY", value);
+    }
+    if let Some(value) = parsed.openai.as_deref() {
+        set_optional_env("OPENAI_API_KEY", value);
+    }
+    if let Some(value) = parsed.anthropic.as_deref() {
+        set_optional_env("ANTHROPIC_API_KEY", value);
+    }
     Ok(())
 }
 
@@ -307,9 +565,13 @@ fn set_optional_env(name: &str, value: &str) {
         // SAFETY: std::env::remove_var is unsafe in recent Rust because env
         // writes are not thread-safe with concurrent readers. We serialize
         // via the std::env API and accept the documented caveat.
-        unsafe { std::env::remove_var(name); }
+        unsafe {
+            std::env::remove_var(name);
+        }
     } else {
-        unsafe { std::env::set_var(name, value); }
+        unsafe {
+            std::env::set_var(name, value);
+        }
     }
 }
 
@@ -353,19 +615,23 @@ fn set_provider_keys(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let serialized = serde_json::to_string_pretty(&next)
-        .map_err(|e| format!("serialize keys: {e}"))?;
+    let serialized =
+        serde_json::to_string_pretty(&next).map_err(|e| format!("serialize keys: {e}"))?;
     fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))?;
     load_provider_keys_into_env(&app)?;
     Ok(next)
 }
 
 fn normalize_key(value: Option<String>) -> Option<String> {
-    value.map(|raw| raw.trim().to_string()).filter(|trimmed| !trimmed.is_empty())
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
-    value.map(|raw| raw.trim().to_string()).filter(|trimmed| !trimmed.is_empty())
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
 }
 
 /// Return the persisted provider API keys. The frontend never sees the raw
@@ -393,8 +659,8 @@ fn get_provider_keys(app: tauri::AppHandle) -> Result<ProviderKeysStatus, String
         return Ok(default_provider_keys_status());
     }
     let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let parsed: ProviderKeysFile = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let parsed: ProviderKeysFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
     Ok(ProviderKeysStatus {
         minimax: parsed.minimax.as_deref().map(str::is_empty) == Some(false),
         openai: parsed.openai.as_deref().map(str::is_empty) == Some(false),
@@ -465,8 +731,8 @@ async fn test_provider(
         messages,
         ..request
     };
-    let provider = find_provider(&provider_id)
-        .ok_or_else(|| format!("Unknown provider '{provider_id}'."))?;
+    let provider =
+        find_provider(&provider_id).ok_or_else(|| format!("Unknown provider '{provider_id}'."))?;
     let resolved_model = request_with_messages
         .options
         .as_object()
@@ -872,6 +1138,26 @@ mod tests {
     }
 
     #[test]
+    fn list_skills_recurses_into_category_folders() {
+        let root = temp_skills_root();
+        write_skill(
+            &root.join("Writing"),
+            "research-briefing",
+            "name: research-briefing\ndescription: Research with sources.",
+            "Use primary sources.",
+        );
+
+        let skills = list_skills_from_dir(&root).unwrap();
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "research-briefing");
+        assert_eq!(
+            find_skill_dir(&root, "research-briefing").unwrap(),
+            root.join("Writing").join("research-briefing")
+        );
+    }
+
+    #[test]
     fn frontmatter_parser_handles_block_descriptions() {
         let frontmatter =
             "name: blocky\ndescription: |\n  First line.\n  Second line.\nmetadata: ignored";
@@ -888,6 +1174,62 @@ mod tests {
         assert!(!valid_skill_id("../frontend-dev"));
         assert!(!valid_skill_id("Frontend"));
         assert!(!valid_skill_id("skill_name"));
+    }
+
+    #[test]
+    fn auto_skill_selection_matches_request_context() {
+        let root = temp_skills_root();
+        write_skill(
+            &root.join("Writing"),
+            "research-briefing",
+            "name: research-briefing\ndescription: Produce source-backed research briefs for external research and competitor analysis.",
+            "Research instructions.",
+        );
+        write_skill(
+            &root.join("Improvements"),
+            "security-and-hardening",
+            "name: security-and-hardening\ndescription: Hardens code against vulnerabilities, authentication bugs, and untrusted input.",
+            "Security instructions.",
+        );
+        let request = ChatRequest {
+            provider: "minimax".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Please do competitor research and cite sources.".to_string(),
+            }],
+            skill_id: None,
+            options: serde_json::Value::Null,
+        };
+
+        let messages = select_auto_skill_messages(&root, &request).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].content.contains("research-briefing"));
+        assert!(!messages[0].content.contains("security-and-hardening"));
+    }
+
+    #[test]
+    fn auto_skill_selection_honors_disable_model_invocation() {
+        let root = temp_skills_root();
+        write_skill(
+            &root,
+            "self-improve",
+            "name: self-improve\ndescription: Use when asked to \"self-improve\".\ndisable-model-invocation: true",
+            "Self-improvement instructions.",
+        );
+        let request = ChatRequest {
+            provider: "minimax".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "self-improve this session".to_string(),
+            }],
+            skill_id: None,
+            options: serde_json::Value::Null,
+        };
+
+        assert!(select_auto_skill_messages(&root, &request)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1072,7 +1414,10 @@ mod tests {
 
     #[test]
     fn normalize_key_trims_and_drops_empty() {
-        assert_eq!(normalize_key(Some("  abc  ".to_string())), Some("abc".to_string()));
+        assert_eq!(
+            normalize_key(Some("  abc  ".to_string())),
+            Some("abc".to_string())
+        );
         assert_eq!(normalize_key(Some("".to_string())), None);
         assert_eq!(normalize_key(Some("   ".to_string())), None);
         assert_eq!(normalize_key(None), None);
@@ -1080,7 +1425,10 @@ mod tests {
 
     #[test]
     fn normalize_optional_trims_and_drops_empty() {
-        assert_eq!(normalize_optional(Some("  https://example.test/v1  ".to_string())), Some("https://example.test/v1".to_string()));
+        assert_eq!(
+            normalize_optional(Some("  https://example.test/v1  ".to_string())),
+            Some("https://example.test/v1".to_string())
+        );
         assert_eq!(normalize_optional(Some("".to_string())), None);
         assert_eq!(normalize_optional(None), None);
     }
@@ -1113,7 +1461,10 @@ mod tests {
         assert_eq!(back.minimax.as_deref(), Some("sk-test"));
         assert!(back.openai.is_none());
         assert_eq!(back.anthropic.as_deref(), Some("ant-key"));
-        assert_eq!(back.minimax_base_url.as_deref(), Some("https://api.example.test/v1"));
+        assert_eq!(
+            back.minimax_base_url.as_deref(),
+            Some("https://api.example.test/v1")
+        );
         assert_eq!(back.minimax_model.as_deref(), Some("model-x"));
     }
 }
