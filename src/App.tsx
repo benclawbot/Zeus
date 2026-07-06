@@ -32,6 +32,8 @@ import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
+import { countPendingProposals } from "./state/harness.notifications";
+import { AgentProgressBubble, mapStepResult, type AgentProgressStep } from "./components/AgentProgressBubble";
 import {
   runShellCommand,
   readWorkspaceFile,
@@ -347,6 +349,9 @@ export function App() {
       return Array.isArray(parsed) ? parsed.slice(0, 16) : [];
     } catch { return []; }
   });
+  const [agentProgress, setAgentProgress] = useState<{ steps: AgentProgressStep[]; completed: number; partial: boolean } | null>(null);
+  const [proposalDraftBody, setProposalDraftBody] = useState<string | null>(null);
+  const notificationCount = countPendingProposals(proposal, activeView === "Harness Evolution");
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [activeGoal, setActiveGoal] = useState<GoalState | null>(null);
@@ -630,9 +635,10 @@ export function App() {
     [],
   );
 
-  function startNewSession() {
+  function startNewSession(options?: { label?: string }) {
     const id = newSessionId();
-    const ref: SessionRef = { id, label: "Untitled Session", projectId: activeProject.id, projectName: activeProject.name, lastSeenAt: new Date().toISOString() };
+    const label = options?.label?.trim() || "Untitled Session";
+    const ref: SessionRef = { id, label, projectId: activeProject.id, projectName: activeProject.name, lastSeenAt: new Date().toISOString() };
     setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== id)].slice(0, 20));
     setActiveSession(ref);
     setChat([]);
@@ -1677,7 +1683,7 @@ useEffect(() => {
           <div className="brand-mark"><Sparkles size={18} /></div>
           <h1>Zeus</h1><span className="version">v0.1.0</span>
         </div>
-        <button className="new-session" type="button" onClick={startNewSession}>
+        <button className="new-session" type="button" onClick={() => startNewSession()}>
           <MessageSquare size={16} />New Session<kbd>⌘ N</kbd>
         </button>
         <nav className="nav-list">
