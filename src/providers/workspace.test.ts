@@ -10,4 +10,13 @@ describe("workspace provider normalization", () => {
   it("keeps discovered relative paths unchanged", () => {
     expect(normalizeAgentStep({ kind: "readFile", path: "src/App.tsx" })).toEqual({ kind: "readFile", path: "src/App.tsx" });
   });
+
+  it("normalizes command cwd dot to workspace root", () => {
+    expect(normalizeAgentStep({ kind: "runCommand", program: "npm", args: ["test"], cwd: "." })).toEqual({
+      kind: "runCommand",
+      program: "npm",
+      args: ["test"],
+      cwd: undefined,
+    });
+  });
 });
