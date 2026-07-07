@@ -13,7 +13,8 @@
     "windows": [
       {
         "title": "Zeus",
-        "fullscreen": true,
+        "fullscreen": false,
+        "maximized": true,
         "width": 1440,
         "height": 920,
         "minWidth": 1024,
