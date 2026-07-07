@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "browser:smoke": "node scripts/browser-smoke.mjs",
+    "browser:smoke:visible": "ZEUS_BROWSER_VISIBLE=1 node scripts/browser-smoke.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
