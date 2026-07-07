@@ -32,6 +32,8 @@ import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
+import { countPendingProposals } from "./state/harness.notifications";
+import { AgentProgressBubble, mapStepResult, type AgentProgressStep } from "./components/AgentProgressBubble";
 import {
   runShellCommand,
   readWorkspaceFile,
@@ -92,6 +94,12 @@ interface ChatMessage {
   text: string;
   thinking?: boolean;
   skillId?: string;
+  /** When present, this bubble renders as an AgentProgressBubble instead of text. */
+  agentProgress?: {
+    steps: AgentProgressStep[];
+    completed: number;
+    partial: boolean;
+  };
 }
 
 const planItems = [
@@ -249,7 +257,16 @@ const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
   "```\n" +
   "Available step kinds: readFile, writeFile, editFile, runCommand, listDir, loadProjectConfig, gitOp, runTest.\n" +
   "After the steps run, the workspace tool panel shows the diff/log; you will see the results in the next turn and can ask for more steps.\n" +
-  "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.";
+  "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.\n" +
+  "\n" +
+  "# On failures and partial outcomes\n" +
+  "- If a tool step fails, attempt a corrected `tool` block that takes a different approach, or include a fallback in the next tool block, before emitting your final reply. Do not give up after one failure.\n" +
+  "- Only emit a final reply when you cannot proceed further on your own.\n" +
+  "- When you do emit a final reply (whether the run succeeded, partially succeeded, or fully failed), structure it as three sections:\n" +
+  "  - **What was done** — concrete actions and the result for each.\n" +
+  "  - **What's still pending** — open items, with the reason each is pending.\n" +
+  "  - **Why it's pending** — the failure or constraint that left it open.\n" +
+  "- If pending items need a user decision, end the final reply with a **Decision needed** section that names the choice, options, and which option you recommend.";
 const COMPACT_KEEP_LAST = 6;
 const MAX_TOOL_TURNS = 6;
 const PROJECT_NAME = "Zeus";
@@ -336,8 +353,6 @@ export function App() {
       return fallback;
     }
   });
-  const [proposalEditing, setProposalEditing] = useState(false);
-  const [proposalDraft, setProposalDraft] = useState("");
   const [history, setHistory] = useState<HarnessHistoryEntry[]>(() => {
     if (typeof localStorage === "undefined") return [];
     try {
@@ -347,6 +362,9 @@ export function App() {
       return Array.isArray(parsed) ? parsed.slice(0, 16) : [];
     } catch { return []; }
   });
+  const [agentProgress, setAgentProgress] = useState<{ steps: AgentProgressStep[]; completed: number; partial: boolean } | null>(null);
+  const [proposalDraftBody, setProposalDraftBody] = useState<string | null>(null);
+  const notificationCount = countPendingProposals(proposal, activeView === "Harness Evolution");
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [activeGoal, setActiveGoal] = useState<GoalState | null>(null);
@@ -537,31 +555,60 @@ export function App() {
     return estimateTokensForMessages(projected);
   }, [chat, compactFromId, message, activeProviderId, providers, terseLevel, minimalLevel, providerKeysStatus.openaiModel, providerKeysStatus.anthropicModel, providerKeysStatus.minimaxModel]);
 
-  function recordProposal(action: Exclude<HarnessProposal["status"], "ready">) {
-    const result = transitionHarnessProposal(proposal, action);
+  function recordProposalTransition(action: HarnessProposal["status"], sessionId?: string) {
+    if (!proposal) return;
+    const result = transitionHarnessProposal(proposal, action, new Date().toISOString(), sessionId);
     setProposal(result.proposal);
     setHistory((entries) => [result.historyEntry, ...entries].slice(0, 4));
   }
 
-  function beginProposalEdit() {
-    setProposalDraft(proposal.body || proposal.summary);
-    setProposalEditing(true);
-  }
-
-  function saveProposalEdit() {
-    const nextBody = proposalDraft.trim();
-    if (!nextBody) return;
-    setProposal((current) => ({
-      ...current,
-      body: nextBody,
-      summary: nextBody.length > 140 ? `${nextBody.slice(0, 137)}...` : nextBody,
-      status: "edited",
-    }));
+  function applyProposal() {
+    if (!proposal) return;
+    const proposalSnapshot = proposal;
+    const implementingSessionId = newSessionId();
+    const ref: SessionRef = {
+      id: implementingSessionId,
+      label: proposalSnapshot.title,
+      projectId: activeProject.id,
+      projectName: activeProject.name,
+    };
+    // 1. Mark the proposal as approved and link the implementing session in history.
+    const proposalApproved = { ...proposalSnapshot, status: "approved" as const };
+    setProposal(proposalApproved);
     setHistory((entries) => [
-      { proposalId: proposal.id, action: "edited" as const, at: new Date().toISOString() },
+      { proposalId: proposalApproved.id, action: "approved" as const, at: new Date().toISOString(), sessionId: implementingSessionId },
       ...entries,
     ].slice(0, 4));
-    setProposalEditing(false);
+    // 2. Create the new session with the proposal title as its label.
+    setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== implementingSessionId)].slice(0, 20));
+    setActiveSession(ref);
+    setChat([]);
+    setCompactFromId(null);
+    setMessage(proposalSnapshot.body);
+    setAttachedFiles([]);
+    setActiveSkillId(null);
+    setRunState("idle");
+    setActiveView("Home");
+    setActiveProjectId(ref.projectId);
+    setProposalDraftBody(proposalSnapshot.body);
+    saveSession({
+      id: ref.id,
+      label: ref.label,
+      projectId: ref.projectId,
+      projectName: ref.projectName,
+      messagesJson: "[]",
+      compactFromId: null,
+    }).catch(() => undefined);
+    // 3. Focus the composer — no auto-send. The user edits and presses Send.
+    requestAnimationFrame(() => composerRef.current?.focus());
+    // 4. Advance the proposal to "implementing" so the terminal transition
+    //    block fires when this session's agent run completes, and so the
+    //    notification badge clears.
+    setProposal((current) => (current ? { ...current, status: "implementing" } : current));
+  }
+
+  function discardProposal() {
+    recordProposalTransition("rejected");
   }
 
   // Persist the active session if there's any meaningful state to save
@@ -630,9 +677,10 @@ export function App() {
     [],
   );
 
-  function startNewSession() {
+  function startNewSession(options?: { label?: string }) {
     const id = newSessionId();
-    const ref: SessionRef = { id, label: "Untitled Session", projectId: activeProject.id, projectName: activeProject.name, lastSeenAt: new Date().toISOString() };
+    const label = options?.label?.trim() || "Untitled Session";
+    const ref: SessionRef = { id, label, projectId: activeProject.id, projectName: activeProject.name, lastSeenAt: new Date().toISOString() };
     setRecentSessions((current) => [ref, ...current.filter((entry) => entry.id !== id)].slice(0, 20));
     setActiveSession(ref);
     setChat([]);
@@ -754,7 +802,6 @@ export function App() {
       body: rule,
       status: "ready",
     });
-    setProposalEditing(false);
     const at = new Date().toISOString();
     const newEntry: HarnessHistoryEntry = { proposalId: id, action: "ready", at };
     setHistory((entries) => [newEntry, ...entries].slice(0, 4));
@@ -1336,7 +1383,27 @@ export function App() {
         });
         agentResult = result;
         recordToolRun({ kind: "agent", at: new Date().toISOString(), agent: result });
+        // Build the per-step progress bubble from the agent's log.
+        const stepsForBubble: AgentProgressStep[] = result.logs.map((entry) => {
+          const mapped = mapStepResult(entry.result);
+          const step: AgentProgressStep = { index: entry.index, label: entry.label, status: mapped.status };
+          if (mapped.message !== undefined) step.result = mapped.message;
+          return step;
+        });
+        const completedCount = stepsForBubble.filter((s) => s.status === "ok" || s.status === "failed").length;
+        const failedCount = stepsForBubble.filter((s) => s.status === "failed").length;
+        const progressMessage: ChatMessage = {
+          id: nextMessageId(),
+          role: "zeus",
+          text: "",
+          agentProgress: {
+            steps: stepsForBubble,
+            completed: completedCount,
+            partial: failedCount > 0 && !result.completed,
+          },
+        };
         appendZeusMessage(summarizeAgentRun(result));
+        setChat((entries) => [...entries, progressMessage]);
         if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
       } catch (err) {
         agentError = err instanceof Error ? err.message : String(err);
@@ -1369,6 +1436,21 @@ export function App() {
         { role: "system", content: augmentedSystemRec },
         ...nextContextMessages,
       ];
+
+      // Transition the harness proposal from "implementing" to a terminal
+      // state based on the agent run outcome. Only fire when the proposal
+      // is currently "implementing" — the user may have applied multiple
+      // proposals back-to-back and we don't want to retroactively mark
+      // an already-applied one as failed.
+      if (proposal.status === "implementing" && agentResult) {
+        const target: HarnessProposal["status"] = agentResult.completed ? "applied" : "failed";
+        const proposalAfter = { ...proposal, status: target };
+        setProposal(proposalAfter);
+        setHistory((entries) => [
+          { proposalId: proposal.id, action: target, at: new Date().toISOString(), sessionId: activeSession?.id },
+          ...entries,
+        ].slice(0, 4));
+      }
 
       await runChatTurn(nextMessages, nextThinkingId, signal, depth + 1, originalPrompt);
     } catch (error) {
@@ -1677,13 +1759,19 @@ useEffect(() => {
           <div className="brand-mark"><Sparkles size={18} /></div>
           <h1>Zeus</h1><span className="version">v0.1.0</span>
         </div>
-        <button className="new-session" type="button" onClick={startNewSession}>
+        <button className="new-session" type="button" onClick={() => startNewSession()}>
           <MessageSquare size={16} />New Session<kbd>⌘ N</kbd>
         </button>
         <nav className="nav-list">
           {navItems.map(({ label, icon: Icon }) => (
             <button className={label === activeView ? "nav-item active" : "nav-item"} key={label} type="button" onClick={() => setActiveView(label)}>
-              <Icon size={16} />{label}
+              <Icon size={16} />
+              <span className="nav-label">{label}</span>
+              {label === "Harness Evolution" && notificationCount > 0 ? (
+                <span className="nav-badge" aria-label={`${notificationCount} pending proposal${notificationCount === 1 ? "" : "s"}`}>
+                  {notificationCount > 9 ? "9+" : notificationCount}
+                </span>
+              ) : null}
             </button>
           ))}
         </nav>
@@ -1733,13 +1821,8 @@ useEffect(() => {
           <h2 id="harness-title">{proposal.title}</h2>
           <p>{proposal.summary}</p>
           <div className="proposal-actions">
-            <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
-            <button type="button" onClick={beginProposalEdit}>Edit</button>
-            <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
-          </div>
-          <div className="proposal-actions secondary">
-            <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
-            <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
+            <button type="button" onClick={applyProposal}>Apply</button>
+            <button type="button" onClick={discardProposal}>Discard</button>
           </div>
           <p className="proposal-status">Status: {proposal.status}</p>
         </section>
@@ -1813,32 +1896,45 @@ useEffect(() => {
               {activeSkillId ? <span className="session-pill skill">skill: {activeSkillId}</span> : null}
             </div>
             <div className="conversation" aria-label="Conversation" ref={conversationRef}>
-              {chat.map((entry) => entry.role === "user" ? (
-                <article key={entry.id} className="chat-bubble chat-user">
-                  <div className="chat-avatar" aria-hidden="true"><User size={16} /></div>
-                  <div className="chat-body">
-                    <div className="chat-heading"><strong>Me</strong><time>just now</time></div>
-                    {entry.skillId ? (
-                      <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
-                    ) : null}
-                    {/* User messages stay as pre-wrapped text — they're
-                        raw keyboard input, not markdown. */}
-                    <p className="chat-md-para">{entry.text}</p>
-                  </div>
-                </article>
-              ) : (
-                <article key={entry.id} className="chat-bubble chat-zeus">
-                  <div className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></div>
-                  <div className="chat-body">
-                    <div className="chat-heading"><strong>Zeus</strong><time>just now</time></div>
-                    {entry.thinking ? (
-                      <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
-                    ) : (
-                      <MarkdownView markdown={entry.text} />
-                    )}
-                  </div>
-                </article>
-              ))}
+              {chat.map((entry) => {
+                if (entry.agentProgress) {
+                  return (
+                    <AgentProgressBubble
+                      key={entry.id}
+                      steps={entry.agentProgress.steps}
+                      completed={entry.agentProgress.completed}
+                      total={entry.agentProgress.steps.length}
+                      partial={entry.agentProgress.partial}
+                    />
+                  );
+                }
+                return entry.role === "user" ? (
+                  <article key={entry.id} className="chat-bubble chat-user">
+                    <div className="chat-avatar" aria-hidden="true"><User size={16} /></div>
+                    <div className="chat-body">
+                      <div className="chat-heading"><strong>Me</strong><time>just now</time></div>
+                      {entry.skillId ? (
+                        <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
+                      ) : null}
+                      {/* User messages stay as pre-wrapped text — they're
+                          raw keyboard input, not markdown. */}
+                      <p className="chat-md-para">{entry.text}</p>
+                    </div>
+                  </article>
+                ) : (
+                  <article key={entry.id} className="chat-bubble chat-zeus">
+                    <div className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></div>
+                    <div className="chat-body">
+                      <div className="chat-heading"><strong>Zeus</strong><time>just now</time></div>
+                      {entry.thinking ? (
+                        <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
+                      ) : (
+                        <MarkdownView markdown={entry.text} />
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
 
             <section className="composer" aria-label="Message composer">
@@ -1860,7 +1956,7 @@ useEffect(() => {
                       );
                     })
                   )}
-                  <p className="slash-hint">Up Down to move - Enter or Tab to pick - Esc to close</p>
+                  <p className="slash-hint">Up Down navigate, Enter or Tab pick, Esc close. Typing a space picks the command and starts its arguments.</p>
                 </div>
               ) : null}
 
@@ -2001,25 +2097,39 @@ useEffect(() => {
             {activeView === "Harness Evolution" && (
               <div className="utility-card">
                 <p>{proposal.summary}</p>
-                {proposalEditing ? (
-                  <div className="proposal-editor">
-                    <textarea aria-label="Harness proposal body" value={proposalDraft} onChange={(event) => setProposalDraft(event.target.value)} />
-                    <div className="proposal-actions">
-                      <button type="button" onClick={saveProposalEdit}>Save proposal</button>
-                      <button type="button" onClick={() => setProposalEditing(false)}>Cancel</button>
-                    </div>
+                <p className="proposal-body">{proposal.body}</p>
+                {(proposal.status === "ready" || proposal.status === "edited") ? (
+                  <div className="proposal-actions">
+                    <button type="button" onClick={applyProposal}>Apply</button>
+                    <button type="button" onClick={discardProposal}>Discard</button>
                   </div>
-                ) : (
-                  <p className="proposal-body">{proposal.body}</p>
-                )}
-                <div className="proposal-actions">
-                  <button type="button" onClick={() => recordProposal("approved")}>Approve</button>
-                  <button type="button" onClick={beginProposalEdit}>Edit</button>
-                  <button type="button" onClick={() => recordProposal("rejected")}>Reject</button>
-                  <button type="button" onClick={() => recordProposal("applied-once")}>Apply Once</button>
-                  <button type="button" onClick={() => recordProposal("rolled-back")}>Roll Back</button>
-                </div>
+                ) : proposal.status === "implementing" || proposal.status === "applied" || proposal.status === "failed" ? (
+                  <p className="proposal-status-linked">
+                    {proposal.status === "implementing" ? "Implementing session is active in Home. Edit the composer and send to start the agent run." : proposal.status === "applied" ? "Approved improvement was applied via the implementing session. No further actions on this proposal." : "Approved improvement did not complete. Review the implementing session for partial results."}
+                  </p>
+                ) : null}
                 <p className="proposal-status">Status: {proposal.status}</p>
+                {(() => {
+                  const linked = history.find((entry) => entry.sessionId && entry.proposalId === proposal.id);
+                  if (!linked?.sessionId) return null;
+                  const sessionRef = recentSessions.find((s) => s.id === linked.sessionId);
+                  return (
+                    <p className="proposal-linked-session">
+                      Implementing session:{" "}
+                      {sessionRef ? (
+                        <button
+                          className="link-button"
+                          type="button"
+                          onClick={() => selectSession(sessionRef)}
+                        >
+                          {sessionRef.label}
+                        </button>
+                      ) : (
+                        <span className="skills-muted">session no longer in recent list</span>
+                      )}
+                    </p>
+                  );
+                })()}
                 {history.length === 0 ? (
                   <p className="skills-muted">No harness changes applied in this session.</p>
                 ) : (

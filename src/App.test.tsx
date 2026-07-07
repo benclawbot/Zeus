@@ -27,9 +27,12 @@ describe("App", () => {
   it("tracks harness proposal decisions in change history", async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
 
-    expect(screen.getByText("Status: approved")).toBeInTheDocument();
+    // After Apply the proposal advances to "implementing" in the same batch
+    // (history entry still records "approved" as the user action). The card
+    // status text reflects the current lifecycle status.
+    expect(screen.getByText("Status: implementing")).toBeInTheDocument();
     expect(screen.getByText(/approved \//i)).toBeInTheDocument();
   });
 
@@ -242,7 +245,7 @@ describe("App", () => {
     expect(screen.getByText("/compact")).toBeInTheDocument();
     expect(screen.getByText("/stop")).toBeInTheDocument();
     // Hint visible too.
-    expect(screen.getByText(/Enter.*Tab to pick/i)).toBeInTheDocument();
+    expect(screen.getByText(/Enter.*Tab pick/i)).toBeInTheDocument();
   });
 
   it("arrow keys + Enter picks the highlighted slash command", async () => {
@@ -374,17 +377,19 @@ describe("App", () => {
     expect(screen.getByText("Usage: /edit <path> :: <find> => <replace>")).toBeInTheDocument();
   });
 
-  it("shows the working folder button in the composer", () => {
-      render(<App />);
-    // The picker button is present at the composer level, next to the
-    // Access mode select. No "Access" text label in the composer anymore.
+  it("does not render a composer-level working-folder picker (moved out of composer by upstream 852b3e7)", () => {
+    render(<App />);
+
     const composer = screen.getByLabelText("Message composer");
-    const folderButton = within(composer).getByRole("button", { name: /Pick a working folder|Working folder:/i });
-    expect(folderButton).toBeInTheDocument();
+    // Upstream commit 852b3e7 removed the per-session bottom-bar workspace
+    // selector. Workspace selection is now resolved by the Tauri runtime,
+    // not by a composer control, so the picker button must be absent.
+    expect(within(composer).queryByRole("button", { name: /Pick a working folder|Working folder:/i })).not.toBeInTheDocument();
+    // The composer must not advertise the obsolete "Access" text label.
     expect(within(composer).queryByText("Access")).not.toBeInTheDocument();
   });
 
-it("shows the empty tool-run panel on the Home view", () => {
+  it("shows the empty tool-run panel on the Home view", () => {
       render(<App />);
       expect(screen.getByText("Tool runs")).toBeInTheDocument();
       expect(screen.getByText("no runs yet")).toBeInTheDocument();

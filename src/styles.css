@@ -443,15 +443,17 @@ kbd {
 }
 
 .chat-user {
-  /* Push the avatar + body to the right edge of the conversation. */
+  /* User messages: avatar on the right edge, body to its left.
+     Standard chat layout without RTL side-effects. */
   grid-template-columns: 1fr 32px;
-  direction: rtl;
+  justify-content: end;
 }
 
 .chat-user .chat-body {
-  direction: ltr;
+  justify-self: end;
   text-align: right;
   align-items: flex-end;
+  max-width: 85%;
 }
 
 .chat-user .chat-heading {
@@ -2146,4 +2148,121 @@ textarea:focus-visible {
   outline: none;
   border-color: var(--purple);
   box-shadow: 0 0 0 2px var(--purple-soft);
+}
+
+/* Agent run progress bubble (sub-project 4) */
+
+.agent-progress-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+.agent-progress-toggle:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+
+.agent-progress-status {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.agent-progress-status-ok {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.agent-progress-status-partial {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+.agent-progress-status-running {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+.agent-progress-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agent-progress-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-progress-row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.agent-progress-row-ok {
+  color: var(--text, #222);
+}
+
+.agent-progress-row-failed {
+  color: var(--danger);
+}
+
+.agent-progress-row-running {
+  color: var(--purple);
+}
+
+.agent-progress-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 11px;
+}
+
+.agent-progress-num {
+  font-size: 11px;
+  color: inherit;
+}
+
+.agent-progress-result {
+  font-size: 11px;
+  color: var(--muted, #888);
+  text-align: right;
+}
+
+/* Harness Evolution notification badge */
+
+.nav-label {
+  flex: 1;
+  text-align: left;
+}
+
+.nav-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #d93025;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
 }
