@@ -76,9 +76,9 @@ This is meant to reduce blind full-file reads and give the planner a cheaper exp
 
 The bridge expects `AgentRuntimeService` to be managed by the Tauri app and returns a clear error if that state has not been registered.
 
-## Remaining integration point
+## Bootstrap registration
 
-To make the bridge live, `src-tauri/src/lib.rs` still needs a small registration patch:
+The bridge is code-complete, but the current monolithic `src-tauri/src/lib.rs` still needs a small registration patch to make the commands callable from React:
 
 ```rust
 mod agent_runtime;
@@ -113,4 +113,4 @@ agent_runtime_commands::agent_runtime_retrieve_memories_request,
 agent_runtime_commands::agent_runtime_search_code,
 ```
 
-I did not blindly rewrite `lib.rs` through whole-file replacement because it is the app bootstrap file and the connector does not provide a patch operation. The bridge and client are ready for that precise registration patch.
+The connector available here only supports whole-file replacement for existing files. I added the bridge and client rather than blindly replacing `lib.rs`, because an imprecise replacement of the app bootstrap would risk breaking existing provider/session/tool wiring.
