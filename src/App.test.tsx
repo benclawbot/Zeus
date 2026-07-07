@@ -2,7 +2,22 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// sendMinimaxChat requires the Tauri runtime (it calls `invoke` on the
+// Rust backend) and throws inside jsdom. The composer keydown handler
+// fires `dispatchChat` fire-and-forget, so a thrown error escapes as an
+// unhandled rejection and fails the vitest run even when the assertion
+// itself passes. Stub the provider seam so the send path is observable
+// without touching the real backend.
+vi.mock("./providers/minimax", async () => {
+  const actual = await vi.importActual<typeof import("./providers/minimax")>("./providers/minimax");
+  return {
+    ...actual,
+    sendMinimaxChat: vi.fn(async () => ({ content: "ok", model: "MiniMax-M3" })),
+  };
+});
+
 import { App } from "./App";
 
 describe("App", () => {
@@ -122,11 +137,10 @@ describe("App", () => {
     // The composer hint text should advertise the new keyboard contract.
     expect(screen.getByText("Enter to send / Shift+Enter newline")).toBeInTheDocument();
 
-    // Plain Enter would call handleSend. We can't actually send through the
-    // Tauri runtime from jsdom, but the onKeyDown handler is wired and we
-    // verify the textarea is focusable + reactive by typing then submitting
-    // via Enter. Since sendMinimaxChat isn't mocked, the send would error,
-    // which is fine: we just want to prove Enter doesn't insert a "\n".
+    // Plain Enter triggers handleSend → dispatchChat → sendMinimaxChat.
+    // sendMinimaxChat is mocked above (it would otherwise throw in jsdom
+    // because the Tauri runtime isn't available). All we assert here is
+    // that Enter doesn't insert a newline into the textarea.
     composer.focus();
     await user.type(composer, "hello{enter}");
     // After plain Enter, the textarea should be cleared by handleSend.
