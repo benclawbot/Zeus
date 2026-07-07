@@ -601,6 +601,10 @@ export function App() {
     }).catch(() => undefined);
     // 3. Focus the composer — no auto-send. The user edits and presses Send.
     requestAnimationFrame(() => composerRef.current?.focus());
+    // 4. Advance the proposal to "implementing" so the terminal transition
+    //    block fires when this session's agent run completes, and so the
+    //    notification badge clears.
+    setProposal((current) => (current ? { ...current, status: "implementing" } : current));
   }
 
   function discardProposal() {

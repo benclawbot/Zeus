@@ -29,7 +29,10 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
 
-    expect(screen.getByText("Status: approved")).toBeInTheDocument();
+    // After Apply the proposal advances to "implementing" in the same batch
+    // (history entry still records "approved" as the user action). The card
+    // status text reflects the current lifecycle status.
+    expect(screen.getByText("Status: implementing")).toBeInTheDocument();
     expect(screen.getByText(/approved \//i)).toBeInTheDocument();
   });
 
