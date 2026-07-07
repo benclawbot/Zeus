@@ -59,6 +59,27 @@ export interface ListWorkspaceDirResult {
   truncated: boolean;
 }
 
+export interface WorkspaceSearchHit {
+  path: string;
+  line: number;
+  snippet: string;
+  symbol: string | null;
+  alreadyRead: boolean;
+}
+
+export interface WorkspaceSearchRequest {
+  query: string;
+  workspaceDir?: string;
+  maxResults?: number;
+  seenFiles?: string[];
+}
+
+export interface WorkspaceSearchResult {
+  query: string;
+  root: string;
+  hits: WorkspaceSearchHit[];
+}
+
 export interface ProjectConfigSnapshot {
   /** Path of the config file that was loaded (e.g. package.json). */
   path: string;
@@ -185,6 +206,23 @@ export async function readWorkspaceFile(path: string, maxBytes?: number, workspa
 export async function listWorkspaceDir(path: string, maxEntries?: number, workspaceDir?: string): Promise<ListWorkspaceDirResult> {
   ensureRuntime("Workspace directory listing");
   return invoke<ListWorkspaceDirResult>("list_workspace_dir", { request: withSelectedWorkspace({ path: normalizeWorkspacePath(path), maxEntries, workspaceDir }) });
+}
+
+export async function searchWorkspaceCode(request: WorkspaceSearchRequest): Promise<WorkspaceSearchResult> {
+  ensureRuntime("Workspace search");
+  const selected = withSelectedWorkspace({ workspaceDir: request.workspaceDir });
+  const root = selected.workspaceDir && selected.workspaceDir.trim() ? selected.workspaceDir : ".";
+  const query = request.query.trim();
+  if (!query) throw new Error("Search query is required.");
+  const hits = await invoke<WorkspaceSearchHit[]>("agent_runtime_search_code", {
+    request: {
+      root,
+      query,
+      maxResults: Math.max(1, Math.min(request.maxResults ?? 50, 200)),
+      seenFiles: request.seenFiles ?? [],
+    },
+  });
+  return { query, root, hits };
 }
 
 export async function loadProjectConfig(workspaceDir?: string): Promise<ProjectConfigSnapshot> {
