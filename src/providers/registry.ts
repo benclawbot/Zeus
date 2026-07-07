@@ -1,5 +1,11 @@
 import { sendMinimaxChat } from "./minimax";
-import { runAgentTask, searchWorkspaceCode, type AgentStepRequest } from "./workspace";
+import {
+  runAgentTask,
+  searchWorkspaceCode,
+  type AgentRunResult,
+  type AgentRunStepLog,
+  type AgentStepRequest,
+} from "./workspace";
 
 /**
  * Public type for any chat provider.
@@ -53,18 +59,30 @@ type ParsedToolStep = AgentStepRequest | SearchStep;
 const TOOL_BLOCK_PATTERN = /```tool\s*\n([\s\S]*?)\n```/g;
 const MAX_TOOL_TURNS = 6;
 const MAX_TOOL_OBSERVATION_CHARS = 60_000;
+// When the model emits the same tool block twice in a row, break out
+// immediately instead of burning the rest of the budget. This catches the
+// most common stuck-iteration failure mode (the model retries a failing
+// edit because the previous failure observation didn't reach it).
+const MAX_REPEATED_TOOL_BLOCKS = 2;
 
 const WORKSPACE_TOOL_PROMPT = [
   "# Zeus workspace tools",
-  "The desktop runtime can execute fenced `tool` blocks and return the real observation before your final reply.",
+  "The desktop runtime executes fenced `tool` blocks and returns a structured observation before your final reply.",
   "Available tools: `listDir`, `readFile`, `search`, `editFile`, `writeFile`, `runCommand`, `gitOp`, `runTest`, `loadProjectConfig`.",
   "Use `listDir` to inspect structure, `search` for grep/symbol lookup, `readFile` for contents, `editFile` for targeted patches, `writeFile` for creates or deliberate overwrites, and `runCommand`/`gitOp`/`runTest` for verification.",
   "Each tool line is `<toolName> <json>`, for example: `search {\"query\":\"runAgentTask\",\"maxResults\":20}`.",
+  "Important: when an observation reports `failed [code]: message` with a Suggestion block, fix the call before re-emitting. Do not retry the same tool block if the previous attempt produced a `failed` line.",
+  "After two failed attempts for the same tool, switch tools (e.g. `readFile` then `editFile`) or stop and explain what you tried.",
 ].join("\n");
 
 /**
- * Single entry point for every chat call. Adds the provider id to the
- * options bag, then delegates to the active provider's `chat` function.
+ * Single entry point for every chat call. Adds the workspace-tool prompt
+ * to the system message, dispatches the request to the active provider,
+ * then runs the bounded observe-and-replan loop: each iteration parses
+ * `tool` blocks, executes them through the runtime, feeds a structured
+ * observation back to the model, and stops when the model produces a
+ * final answer (no tool blocks), the budget is exhausted, or the model
+ * keeps emitting the same tool block.
  */
 export async function dispatchChat(options: ChatOptions): Promise<ChatResponse> {
   const provider = findProvider(options.provider);
@@ -85,8 +103,30 @@ export async function dispatchChat(options: ChatOptions): Promise<ChatResponse> 
   let response = await send(messages);
   const objective = lastUserMessage(options.messages) || "workspace task";
 
+  let lastToolBlock: string | null = null;
+  let repeatedCount = 0;
+
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn += 1) {
-    const steps = parseToolSteps(response.content);
+    const toolBlocks = extractToolBlocks(response.content);
+    if (toolBlocks.length === 0) return response;
+
+    // Detect the "stuck emitting the same tool block" failure mode early
+    // so we don't burn the rest of the budget.
+    const serialized = JSON.stringify(toolBlocks);
+    if (serialized === lastToolBlock) {
+      repeatedCount += 1;
+      if (repeatedCount >= MAX_REPEATED_TOOL_BLOCKS) {
+        return {
+          ...response,
+          content: stripToolBlocks(response.content).trim(),
+        };
+      }
+    } else {
+      repeatedCount = 1;
+      lastToolBlock = serialized;
+    }
+
+    const steps = parseToolBlocks(toolBlocks);
     if (steps.length === 0) return response;
 
     const observation = await runToolSteps(steps, objective);
@@ -117,10 +157,22 @@ function withWorkspaceToolPrompt(messages: ChatMessage[]): ChatMessage[] {
     : message);
 }
 
-function parseToolSteps(content: string): ParsedToolStep[] {
+interface RawToolBlock {
+  rawLines: string[];
+}
+
+function extractToolBlocks(content: string): RawToolBlock[] {
+  const blocks: RawToolBlock[] = [];
+  for (const match of content.matchAll(TOOL_BLOCK_PATTERN)) {
+    blocks.push({ rawLines: match[1].split(/\r?\n/) });
+  }
+  return blocks;
+}
+
+function parseToolBlocks(blocks: RawToolBlock[]): ParsedToolStep[] {
   const steps: ParsedToolStep[] = [];
-  for (const block of content.matchAll(TOOL_BLOCK_PATTERN)) {
-    for (const rawLine of block[1].split(/\r?\n/)) {
+  for (const block of blocks) {
+    for (const rawLine of block.rawLines) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#")) continue;
       const split = line.indexOf(" ");
@@ -138,6 +190,13 @@ function parseToolSteps(content: string): ParsedToolStep[] {
     }
   }
   return steps;
+}
+
+// `parseToolSteps` is the public alias for `parseToolBlocks(extractToolBlocks(content))`.
+// Tests rely on this name; the loop in `dispatchChat` uses the fully
+// resolved path internally for type clarity.
+function parseToolSteps(content: string): ParsedToolStep[] {
+  return parseToolBlocks(extractToolBlocks(content));
 }
 
 function parseToolStep(kind: string, parsed: Record<string, unknown>): ParsedToolStep | null {
@@ -177,19 +236,95 @@ function parseToolStep(kind: string, parsed: Record<string, unknown>): ParsedToo
   return null;
 }
 
+/**
+ * Run a batch of parsed tool steps and produce a single observation
+ * the model can act on. Steps are grouped into a single `runAgentTask`
+ * call so we receive structured `logs` back from the Rust runtime
+ * (including typed failure payloads with code + suggestion) instead of
+ * an opaque JSON dump that the model has to parse itself.
+ *
+ * The observation is plain markdown with one line per step. Failed steps
+ * include the structured failure code, the message, and the suggestion
+ * so the model can self-correct on the next iteration. Successful steps
+ * include a short success summary. This format was the missing piece
+ * behind the "Stopped after 6 tool turns" failure mode: previously the
+ * observation was a JSON blob the model couldn't easily interpret.
+ */
+// Exported for unit tests; see `registry.test.ts`.
+export { withWorkspaceToolPrompt, extractToolBlocks, parseToolSteps, formatAgentRunResult, formatStepLog };
+
 async function runToolSteps(steps: ParsedToolStep[], objective: string): Promise<string> {
-  const results: Array<{ step: ParsedToolStep; ok: boolean; result?: unknown; error?: string }> = [];
+  const agentSteps: AgentStepRequest[] = [];
+  const searchSteps: Array<Extract<SearchStep, { kind: "search" }>> = [];
   for (const step of steps) {
-    try {
-      const result = step.kind === "search"
-        ? await searchWorkspaceCode({ query: step.query, maxResults: step.maxResults, seenFiles: step.seenFiles })
-        : await runAgentTask({ objective, steps: [step], stopOnError: false });
-      results.push({ step, ok: true, result });
-    } catch (error) {
-      results.push({ step, ok: false, error: error instanceof Error ? error.message : String(error) });
+    if (step.kind === "search") {
+      searchSteps.push({ kind: "search", query: step.query, maxResults: step.maxResults, seenFiles: step.seenFiles });
+    } else {
+      agentSteps.push(step);
     }
   }
-  return `Tool result for your fenced \`tool\` block. These are real Zeus workspace observations; use them directly before deciding whether another tool block is needed.\n\n\`\`\`json\n${clip(JSON.stringify(results, null, 2), MAX_TOOL_OBSERVATION_CHARS)}\n\`\`\``;
+
+  const lines: string[] = ["Tool result for the fenced `tool` block. Each step below is a real Zeus workspace observation."];
+
+  if (agentSteps.length > 0) {
+    try {
+      const result: AgentRunResult = await runAgentTask({ objective, steps: agentSteps, stopOnError: false });
+      lines.push(...formatAgentRunResult(result));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lines.push(`agent run failed: ${message}`);
+    }
+  }
+
+  for (const search of searchSteps) {
+    try {
+      const hits = await searchWorkspaceCode({ query: search.query, maxResults: search.maxResults, seenFiles: search.seenFiles });
+      lines.push(`search "${search.query}" returned ${Array.isArray(hits) ? hits.length : 0} hits.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lines.push(`search "${search.query}" failed: ${message}`);
+    }
+  }
+
+  return clip(lines.join("\n"), MAX_TOOL_OBSERVATION_CHARS);
+}
+
+function formatAgentRunResult(result: AgentRunResult): string[] {
+  const lines: string[] = [];
+  const header = result.completed
+    ? `agent run completed (${result.logs.length} step${result.logs.length === 1 ? "" : "s"}, ${result.filesTouched.length} file${result.filesTouched.length === 1 ? "" : "s"} touched).`
+    : `agent run failed (${result.logs.length} step${result.logs.length === 1 ? "" : "s"}, ${result.filesTouched.length} file${result.filesTouched.length === 1 ? "" : "s"} touched).`;
+  lines.push(header);
+  if (result.summary) lines.push(`summary: ${result.summary}`);
+  for (const log of result.logs) {
+    lines.push(formatStepLog(log));
+  }
+  if (result.diff) lines.push(`combined diff:\n${result.diff}`);
+  return lines;
+}
+
+function formatStepLog(log: AgentRunStepLog): string {
+  const result = log.result as Record<string, unknown> & {
+    kind?: string;
+    code?: string;
+    message?: string;
+    suggestion?: string;
+    occurrences?: number;
+    source?: string;
+  };
+  if (result.kind === "failed" || typeof result.code === "string") {
+    const detailParts: string[] = [];
+    if (typeof result.occurrences === "number") detailParts.push(`${result.occurrences} occurrences`);
+    if (typeof result.source === "string") detailParts.push(result.source);
+    const detail = detailParts.length > 0 ? ` (${detailParts.join(", ")})` : "";
+    const code = typeof result.code === "string" ? result.code : "failed";
+    const message = typeof result.message === "string" ? result.message : "(no message)";
+    const suggestion = typeof result.suggestion === "string" ? result.suggestion : null;
+    let line = `Step ${log.index + 1} (${log.label}) failed [${code}${detail}]: ${message}`;
+    if (suggestion) line += `\n  Suggestion: ${suggestion}`;
+    return line;
+  }
+  return `Step ${log.index + 1} (${log.label}) ok.`;
 }
 
 function numberField(value: unknown): number | undefined {
