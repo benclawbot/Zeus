@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 760" role="img" aria-label="Zeus — The Good Coding Agent">
+  <title>Zeus — The Good Coding Agent</title>
+  <desc>Dark, lightning-themed hero banner for the Zeus coding agent. Features the title block on the left, a stylized Zeus silhouette on the right, and a sidebar of headline features.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0a1428"/>
+      <stop offset="50%" stop-color="#0e1f3a"/>
+      <stop offset="100%" stop-color="#060c1a"/>
+    </linearGradient>
+
+    <radialGradient id="boltGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#5cb6ff" stop-opacity="0.65"/>
+      <stop offset="60%" stop-color="#2b6dc8" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#0e1f3a" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="headGlow" cx="50%" cy="40%" r="55%">
+      <stop offset="0%" stop-color="#7ec8ff" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#0e1f3a" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="boltFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#a8e2ff"/>
+      <stop offset="100%" stop-color="#3a86ff"/>
+    </linearGradient>
+
+    <linearGradient id="lightningShaft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#a8e2ff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#5cb6ff" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="armor" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2c3e60"/>
+      <stop offset="100%" stop-color="#0d1525"/>
+    </linearGradient>
+
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#152a48" stop-opacity="0.92"/>
+      <stop offset="100%" stop-color="#0c1a30" stop-opacity="0.92"/>
+    </linearGradient>
+
+    <pattern id="dots" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#1f3a63" opacity="0.35"/>
+    </pattern>
+
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="760" fill="url(#bg)"/>
+  <rect width="1600" height="760" fill="url(#dots)"/>
+
+  <g opacity="0.55">
+    <ellipse cx="900" cy="120" rx="600" ry="100" fill="#0c1730"/>
+    <ellipse cx="780" cy="180" rx="520" ry="80" fill="#0a1428"/>
+    <ellipse cx="1100" cy="220" rx="420" ry="70" fill="#0a1428"/>
+  </g>
+
+  <circle cx="980" cy="320" r="380" fill="url(#headGlow)"/>
+
+  <g stroke="#7ec8ff" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.55">
+    <polyline points="600,40 590,90 610,90 595,150"/>
+    <polyline points="1340,60 1330,120 1352,120 1338,180"/>
+  </g>
+
+  <g transform="translate(60,120)">
+    <g transform="translate(0,40)">
+      <path d="M40 0 L0 80 L24 80 L12 130 L52 50 L28 50 Z" fill="url(#boltFill)" stroke="#a8e2ff" stroke-width="1.2"/>
+      <circle cx="22" cy="100" r="34" fill="url(#boltGlow)"/>
+    </g>
+
+    <text x="110" y="120" font-family="ui-sans-serif, system-ui, 'Segoe UI', Inter, Helvetica, Arial" font-weight="900" font-size="120" fill="#f4f8ff" letter-spacing="6">ZEUS</text>
+    <text x="112" y="170" font-family="ui-sans-serif, system-ui, 'Segoe UI', Inter, Helvetica, Arial" font-weight="600" font-size="28" fill="#5cb6ff" letter-spacing="6">THE GOOD CODING AGENT</text>
+
+    <g transform="translate(0,220)" font-family="ui-sans-serif, system-ui, 'Segoe UI', Inter, Helvetica, Arial" font-size="24" fill="#cfd9ea">
+      <text x="0" y="0">The ultimate self-improving coding agent</text>
+      <text x="0" y="34">harness — built for speed, quality, and</text>
+      <text x="0" y="68">continuous evolution.</text>
+    </g>
+
+    <g transform="translate(0,400)" font-family="ui-sans-serif, system-ui, 'Segoe UI', Inter, Helvetica, Arial" font-size="16" font-weight="600" fill="#dce8ff">
+      <g transform="translate(0,0)">
+        <circle cx="10" cy="10" r="10" fill="#5cb6ff" opacity="0.25"/>
+        <path d="M6 11 L9 14 L15 7" stroke="#7ec8ff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="32" y="15">FAST</text>
+      </g>
+      <g transform="translate(150,0)">
+        <circle cx="10" cy="10" r="10" fill="#5cb6ff" opacity="0.25"/>
+        <path d="M6 11 L9 14 L15 7" stroke="#7ec8ff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="32" y="15">HIGH QUALITY</text>
+      </g>
+      <g transform="translate(360,0)">
+        <circle cx="10" cy="10" r="10" fill="#5cb6ff" opacity="0.25"/>
+        <path d="M6 11 L9 14 L15 7" stroke="#7ec8ff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="32" y="15">ADAPTIVE</text>
+      </g>
+      <g transform="translate(540,0)">
+        <circle cx="10" cy="10" r="10" fill="#5cb6ff" opacity="0.25"/>
+        <path d="M6 11 L9 14 L15 7" stroke="#7ec8ff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="32" y="15">PROACTIVE</text>
+      </g>
+    </g>
+  </g>
+
+  <g transform="translate(820,90)">
+    <path d="M120 80 C 90 200, 80 320, 100 460 L 200 460 C 220 320, 220 200, 200 80 Z" fill="#0d1c33" stroke="#1a3258" stroke-width="1"/>
+    <path d="M130 130 C 120 220, 120 320, 140 410 L 190 410 C 210 320, 210 220, 200 130 Z" fill="url(#armor)" stroke="#3a557d" stroke-width="1.2"/>
+    <path d="M155 170 L 175 170 L 180 230 L 150 230 Z" fill="#3a557d" opacity="0.5"/>
+    <ellipse cx="105" cy="150" rx="28" ry="22" fill="#1a3258" stroke="#3a557d"/>
+    <ellipse cx="225" cy="150" rx="28" ry="22" fill="#1a3258" stroke="#3a557d"/>
+    <path d="M85 170 C 70 240, 70 320, 95 380" stroke="#3a557d" stroke-width="22" fill="none" stroke-linecap="round"/>
+    <path d="M245 170 C 260 240, 260 320, 235 380" stroke="#3a557d" stroke-width="22" fill="none" stroke-linecap="round"/>
+    <circle cx="95" cy="380" r="14" fill="#d8c9a4"/>
+    <circle cx="235" cy="380" r="14" fill="#d8c9a4"/>
+
+    <g filter="url(#softGlow)">
+      <path d="M210 320 L 290 360 L 270 380 L 330 440 L 305 450 L 365 510 L 300 470 L 320 450 L 260 410 L 280 395 Z" fill="url(#boltFill)" stroke="#cfe9ff" stroke-width="1.5"/>
+      <path d="M225 360 L 305 470" stroke="#cfe9ff" stroke-width="2" fill="none" opacity="0.7"/>
+    </g>
+
+    <g transform="translate(165,40)">
+      <ellipse cx="0" cy="0" rx="46" ry="54" fill="#d8c9a4" stroke="#a89578" stroke-width="1"/>
+      <path d="M-30 5 C -34 35, -20 65, 0 80 C 20 65, 34 35, 30 5 C 22 25, -22 25, -30 5 Z" fill="#cfd9ea"/>
+      <path d="M-22 25 C -22 50, -10 70, 0 78 C 10 70, 22 50, 22 25 C 14 38, -14 38, -22 25 Z" fill="#ffffff"/>
+      <path d="M-46 -10 C -54 -36, -34 -62, 0 -60 C 34 -62, 54 -36, 46 -10 C 30 -30, -30 -30, -46 -10 Z" fill="#cfd9ea"/>
+      <path d="M-50 0 C -60 18, -60 38, -50 50 C -44 30, -32 18, -30 0 Z" fill="#cfd9ea"/>
+      <path d="M50 0 C 60 18, 60 38, 50 50 C 44 30, 32 18, 30 0 Z" fill="#cfd9ea"/>
+      <ellipse cx="-14" cy="2" rx="5" ry="3" fill="#5cb6ff" filter="url(#softGlow)"/>
+      <ellipse cx="14" cy="2" rx="5" ry="3" fill="#5cb6ff" filter="url(#softGlow)"/>
+      <path d="M-2 8 L 2 24 L -2 28" stroke="#a89578" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    </g>
+
+    <g transform="translate(-50,140)" fill="#1a3258" opacity="0.7">
+      <rect x="0" y="0" width="40" height="6"/>
+      <rect x="2" y="6" width="6" height="20"/>
+      <rect x="16" y="6" width="6" height="22"/>
+      <rect x="30" y="6" width="6" height="18"/>
+      <rect x="0" y="26" width="40" height="6"/>
+    </g>
+  </g>
+
+  <g opacity="0.85">
+    <path d="M980 0 L 970 90 L 992 90 L 970 200" stroke="url(#lightningShaft)" stroke-width="6" fill="none" stroke-linecap="round"/>
+  </g>
+
+  <ellipse cx="980" cy="640" rx="220" ry="22" fill="#5cb6ff" opacity="0.18"/>
+  <ellipse cx="980" cy="640" rx="120" ry="14" fill="#a8e2ff" opacity="0.32"/>
+  <circle cx="980" cy="640" r="6" fill="#cfe9ff"/>
+
+  <g transform="translate(1240,120)" font-family="ui-sans-serif, system-ui, 'Segoe UI', Inter, Helvetica, Arial">
+    <g transform="translate(0,0)">
+      <rect width="320" height="100" rx="12" fill="url(#card)" stroke="#1f3a63" stroke-width="1"/>
+      <circle cx="34" cy="50" r="16" fill="#0e1f3a" stroke="#5cb6ff" stroke-width="1.2"/>
+      <path d="M26 46 C 30 52, 38 52, 42 46 M 26 54 C 30 60, 38 60, 42 54" stroke="#5cb6ff" stroke-width="2" fill="none" stroke-linecap="round"/>
+      <text x="64" y="42" font-size="15" font-weight="700" fill="#f4f8ff" letter-spacing="2">INTELLIGENT CONVERSATION</text>
+      <text x="64" y="66" font-size="14" fill="#9bb3d6">Context-aware chat with file</text>
+      <text x="64" y="84" font-size="14" fill="#9bb3d6">awareness and streaming.</text>
+    </g>
+
+    <g transform="translate(0,120)">
+      <rect width="320" height="100" rx="12" fill="url(#card)" stroke="#1f3a63" stroke-width="1"/>
+      <circle cx="34" cy="50" r="16" fill="#0e1f3a" stroke="#5cb6ff" stroke-width="1.2"/>
+      <path d="M27 56 L 27 44 L 41 44 L 41 56 Z M 30 44 L 30 38 L 38 38 L 38 44" stroke="#5cb6ff" stroke-width="2" fill="none"/>
+      <text x="64" y="42" font-size="15" font-weight="700" fill="#f4f8ff" letter-spacing="2">SELF-IMPROVING HARNESS</text>
+      <text x="64" y="66" font-size="14" fill="#9bb3d6">Proposes harness improvements</text>
+      <text x="64" y="84" font-size="14" fill="#9bb3d6">after each session.</text>
+    </g>
+
+    <g transform="translate(0,240)">
+      <rect width="320" height="100" rx="12" fill="url(#card)" stroke="#1f3a63" stroke-width="1"/>
+      <circle cx="34" cy="50" r="16" fill="#0e1f3a" stroke="#5cb6ff" stroke-width="1.2"/>
+      <path d="M27 50 L 33 56 L 42 44" stroke="#5cb6ff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="64" y="42" font-size="15" font-weight="700" fill="#f4f8ff" letter-spacing="2">ERROR GUARDRAILS</text>
+      <text x="64" y="66" font-size="14" fill="#9bb3d6">Automatically detects, categorizes</text>
+      <text x="64" y="84" font-size="14" fill="#9bb3d6">and prevents recurring errors.</text>
+    </g>
+
+    <g transform="translate(0,360)">
+      <rect width="320" height="100" rx="12" fill="url(#card)" stroke="#1f3a63" stroke-width="1"/>
+      <circle cx="34" cy="50" r="16" fill="#0e1f3a" stroke="#5cb6ff" stroke-width="1.2"/>
+      <path d="M34 40 L 34 50 L 41 53" stroke="#5cb6ff" stroke-width="2" fill="none" stroke-linecap="round"/>
+      <text x="64" y="42" font-size="15" font-weight="700" fill="#f4f8ff" letter-spacing="2">SESSION MEMORY</text>
+      <text x="64" y="66" font-size="14" fill="#9bb3d6">Persistent memory across sessions</text>
+      <text x="64" y="84" font-size="14" fill="#9bb3d6">with project awareness.</text>
+    </g>
+
+    <g transform="translate(0,480)">
+      <rect width="320" height="100" rx="12" fill="url(#card)" stroke="#1f3a63" stroke-width="1"/>
+      <circle cx="34" cy="50" r="16" fill="#0e1f3a" stroke="#5cb6ff" stroke-width="1.2"/>
+      <path d="M27 44 L 41 44 L 41 56 L 27 56 Z M 31 50 L 37 50 M 31 53 L 37 53" stroke="#5cb6ff" stroke-width="2" fill="none" stroke-linecap="round"/>
+      <text x="64" y="42" font-size="15" font-weight="700" fill="#f4f8ff" letter-spacing="2">TOOL EXECUTION</text>
+      <text x="64" y="66" font-size="14" fill="#9bb3d6">Runs commands, edits files and</text>
+      <text x="64" y="84" font-size="14" fill="#9bb3d6">applies changes safely.</text>
+    </g>
+  </g>
+
+  <rect x="0" y="758" width="1600" height="2" fill="#5cb6ff" opacity="0.5"/>
+</svg>

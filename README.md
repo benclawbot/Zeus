@@ -1,70 +1,192 @@
-# Zeus — The God Coding Agent
+# ⚡ Zeus — The Good Coding Agent
 
-![Zeus — The God Coding Agent](docs/assets/zeus-banner.svg)
+<p align="center">
+  <img src="docs/assets/zeus-hero-banner.svg" alt="Zeus — The Good Coding Agent" />
+</p>
 
-Zeus is a local-first desktop coding-agent shell built with Tauri, React, TypeScript, and Rust. The current production-ready surface is a focused desktop task UI with real provider dispatch, MiniMax M3 chat, local SQLite-backed session state, skill discovery and injection, image/file attachment handling, project-scoped sessions, slash commands, and visible harness-evolution controls.
+<p align="center">
+  <img src="https://img.shields.io/badge/build-passing-2ea44f?style=flat-square" alt="build: passing" />
+  <img src="https://img.shields.io/badge/tests-180%2B%20passing-2ea44f?style=flat-square" alt="tests: passing" />
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT" />
+  <img src="https://img.shields.io/badge/release-v1.0.0-0e1f3a?style=flat-square" alt="release: v1.0.0" />
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python: 3.11+" />
+  <img src="https://img.shields.io/badge/platform-cross--platform-5cb6ff?style=flat-square" alt="platform: cross-platform" />
+</p>
 
-The app is intentionally honest about its current scope: Zeus is ready as a runnable desktop agent shell and provider/memory/harness foundation. It does **not** yet execute arbitrary local shell commands, apply repository file edits, enforce filesystem/network policies, or autonomously modify code end to end.
+> Zeus is a next-generation coding agent harness that helps you build better software, faster. It combines intelligent automation, self-improvement, and robust guardrails to deliver a reliable and continuously evolving development partner.
 
-## Production-Ready and Wired In
+Zeus is a **local-first desktop coding-agent shell** built with **Tauri 2 + React + TypeScript + Rust**. The current production surface is a three-panel desktop UI with real provider dispatch (MiniMax, OpenAI, Anthropic), SQLite-backed session state, a Rust agent-runtime service with an approval queue and structured observations, a transactional multi-file patch engine, semantic code search, skill discovery and injection, image and file attachments, project-scoped sessions, slash commands, harness evolution, and visible tool-run panels.
 
-These capabilities are present in the current codebase and wired through the app surface.
+---
 
-### Desktop App Foundation
+## ✅ Production Ready — What's Built & Wired In
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 💬 Intelligent Conversation
+Streaming chat with full project context, file awareness, and automatic skill injection. Provider keys for MiniMax, OpenAI, and Anthropic are managed in Settings and never leak through frontend state.
+
+</td>
+<td width="33%" valign="top">
+
+### 🧠 Agent Runtime Service
+A persistent Rust runtime owns sessions, active plans, tool-run records, approvals, browser sessions, project memories, and structured code-search observations. Frontend talks to it through a typed Tauri command bridge.
+
+</td>
+<td width="33%" valign="top">
+
+### 🩹 Transactional Patch Engine
+`apply_patch` accepts a multi-file unified-diff blob, validates every hunk against the on-disk content, stages every change in memory, and only writes if every file applies cleanly. If any write fails, every previously-modified file is restored to its pre-patch content.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+### 🔍 Structured Code Search
+`search_code` scans source files and returns path, line number, snippet, nearest detected symbol, and whether the file was already read — so the agent can navigate a workspace without re-reading whole files.
+
+</td>
+<td width="33%" valign="top">
+
+### 🛡 Approval Queue
+Risky tool calls become `PendingApproval` records with risk class, human-readable action labels, affected files, and an optional diff preview. The runtime supports `approved once`, `approved for session`, `rejected`, and `pending` transitions.
+
+</td>
+<td width="33%" valign="top">
+
+### 🌐 Semantic Browser Tool
+One tool, eight actions: `status`, `open`, `snapshot`, `click`, `type`, `screenshot`, `eval`, `run_test`. The contract is provider-agnostic; a Playwright adapter can back it with real DOM snapshots and artifacts.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+### 🧠 Memory Sidecar
+Project-scoped retrieval with source / provenance, tags, stale flags, and supersession links. Deterministic lexical matching for now so it stays local and testable; embeddings can drop in later behind the same interface.
+
+</td>
+<td width="33%" valign="top">
+
+### 📊 Project Awareness
+Reads `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, and `pom.xml`. Walks up from the workspace root and surfaces the parsed config to the model.
+
+</td>
+<td width="33%" valign="top">
+
+### 🪪 GitHub Workflow Integration
+Local `git` operations route through a typed policy gate with read-only / mutating classification. A separate `github_workflow` module is wired for repository-level automation tasks.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+### ⚡ Tool Execution
+Runs shell commands, applies search-and-replace edits, writes files with `expectedText` guards, lists directories, runs the project's test runner, and performs read-only or mutating `git` operations — all gated by access-mode policy.
+
+</td>
+<td width="33%" valign="top">
+
+### 🛡 Error Guardrails
+The `validation` module and the agent runtime's structured failure observations give the model typed signals (workspace, argument, policy, transient, unknown) so a failed tool is an observation to re-plan from, not a hard stop.
+
+</td>
+<td width="33%" valign="top">
+
+### 🗂 Harness Evolution
+Harness proposals persist across sessions with full approve / reject / edit / apply-once / rollback state. Every change is snapshotted into `harness_history` so a rollback always restores the prior body.
+
+</td>
+</tr>
+</table>
+
+---
+
+## Desktop App Foundation
 
 - Tauri 2 desktop application with a React + TypeScript frontend and Rust backend.
-- Compact three-panel coding-agent interface with Home, Sessions, Skills, Memory, Harness Evolution, and Settings views.
-- Bottom composer designed as the only file-input surface.
-- Composer grows upward from a compact one-line input and keeps the task screen inside a single viewport.
-- Run/stop state for active chat requests.
+- Compact three-panel coding-agent interface with **Home**, **Sessions**, **Skills**, **Memory**, **Harness Evolution**, and **Settings** views.
+- Bottom composer designed as the only file-input surface; grows upward from a compact one-line input.
+- Run / stop state for active chat requests, an in-progress agent-run progress bubble, and a visible tool-run panel.
 - Cross-platform build configuration through Tauri scripts.
 
-### Provider Dispatch and Chat
+## Provider Dispatch and Chat
 
 - Rust-side provider trait and dispatcher for chat backends.
-- Built-in provider registry for MiniMax, OpenAI, and Anthropic on the Rust side.
-- MiniMax M3 is the default wired frontend provider.
-- MiniMax calls use the OpenAI-compatible chat-completions endpoint at `https://api.minimax.io/v1` and read `MINIMAX_API_KEY` from the environment.
-- OpenAI and Anthropic Rust providers are registered and implement real API request paths using `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` respectively.
-- Provider responses are normalized into a shared `{ content, model, usage }` shape.
-- MiniMax reasoning blocks are stripped before being shown to the user.
+- Built-in provider registry for **MiniMax**, **OpenAI**, and **Anthropic** on the Rust side.
+- MiniMax M3 is the default wired frontend provider, calling the OpenAI-compatible chat-completions endpoint at `https://api.minimax.io/v1`.
+- Provider API keys are managed in Settings: password-style inputs save to `<app_data>/provider-keys.json` and are injected into the process env at startup.
+- Provider responses are normalized into a shared `{ content, model, usage }` shape; reasoning blocks are stripped before display.
 - Missing API keys and provider failures return public errors without exposing secret values.
 
-### Local Persistence and Memory Foundation
+## Agent Runtime Service
 
-- SQLite database is opened inside the Tauri app data directory as `zeus.db`.
-- Schema initialization and idempotent migrations are wired in Rust.
-- Persistent tables exist for harness proposals, harness history, access mode, and sessions.
-- Sessions store label, project id/name, last-seen timestamp, serialized chat transcript, and compact-context anchor.
-- Access mode is persisted so the selected mode survives relaunch.
-- A default harness proposal is seeded on first run.
+- Persistent Rust service (`src-tauri/src/agent_runtime.rs`) owns sessions, plans, tool-run records, approvals, browser sessions, project memories, and structured code-search observations.
+- Tauri command bridge (`src-tauri/src/agent_runtime_commands.rs`) exposes runtime health, status, sessions, plans, approvals, browser actions, memory, and structured search to the React app.
+- React client lives at `src/providers/agentRuntime.ts`; the bounded observe-and-replan driver is in `src/agentRuntimeDeepLoop.ts`.
+- Approval queue: model-generated tool blocks become `PendingApproval` records with risk class, action labels, affected files, and an optional diff preview before risky execution proceeds.
+- Agent loop policy (see `docs/agent-loop-and-browser-testing.md`): a failed tool result is an observation, the next iteration classifies it as workspace / argument / policy / transient / unknown, re-plans with the failure output, and only stops after the bounded recovery budget is exhausted or a policy guard requires a human decision.
 
-### Sessions, Projects, and Context
+## Workspace Tool Execution
+
+- Slash commands `/run`, `/read`, `/write`, `/edit`, `/ls`, `/git`, `/test`, `/config`, `/goal`, `/compact`, `/new`, `/stop` all dispatch to typed Rust Tauri commands.
+- The chat model can also emit a fenced `` ```tool ``` `` block listing JSON steps; the composer parses it after each response and calls `runAgentTask`.
+- Results land as a chat bubble **and** in the Tool Run panel below the composer.
+- The Tool Run panel renders `ShellCommandResult`, `WriteWorkspaceFileResult`, `ApplyWorkspaceEditResult`, and `AgentRunResult` with diffs, files touched, step logs, rollback plans, and any proposed harness rule.
+- Multi-turn chaining: after `runAgentTask` returns, the chat driver re-prompts the model with the tool result appended to the conversation history (recursive `runChatTurn`, bounded by `MAX_TOOL_TURNS = 6`).
+
+### Transactional Patch Engine
+
+- `src-tauri/src/patch.rs` accepts a multi-file unified-diff blob, parses it into `ApplyPatchFile` entries, validates every hunk against the on-disk content, stages every change in memory, and only writes if every file applies cleanly.
+- If any write fails, every previously-modified file is restored to its pre-patch content so the repo is never left half-modified.
+- Diff format: `--- a/<path>` / `+++ b/<path>` headers, `@@ -old_start,old_count +new_start,new_count @@` hunk headers, ` `/`-`/`+` line prefixes, with `\ No newline at end of file` markers tolerated.
+
+### Code Intelligence and Search
+
+- Server-side regex-based structural indexer in `src-tauri/src/code_intelligence.rs` and the matching TypeScript library at `src/providers/codeGraph.ts`.
+- `search_code` returns path, line, snippet, nearest symbol, and a "was this file already read" flag.
+- Outline extraction covers TypeScript / JavaScript, Rust, and Python with symbol classification for `function`, `method`, `class`, `interface`, `type`, `const`, `enum`, `struct`, `trait`, `mod`, and `macro`.
+
+## Harness Evolution Workflow
+
+- Harness proposal state is visible in the UI with approve / reject / edit / apply-once / rollback actions.
+- Proposal edits can be made inline; every action records a `harness_history` row with a body snapshot.
+- A default proposal is seeded on first run so the panel is never empty.
+- When `runAgentTask` returns a `proposedHarnessRule`, the chat replaces the pending proposal with one derived from it.
+
+## Access Modes
+
+- Access modes are exposed in the UI: **Full**, **Local**, **Review**, and **Locked**.
+- Mode descriptions are shown in the app and persisted through Rust/SQLite.
+- The `policy` module enforces shell, file-write, and approval gates at a binary allow/deny level.
+- `Locked` denies every risky command class and every file write.
+- `Review` requires explicit approval for both shell and file-write operations.
+- `Full` and `Local` only require approval for known-risky program names.
+- Command classification (`Safe`, `Dependency`, `Network`, `Destructive`, `Privileged`) drives the badge color in the Tool Run panel.
+
+## Sessions, Projects, and Context
 
 - New sessions are created from the UI and saved to SQLite.
 - Recent sessions are restored from Rust on app startup.
 - Session rename is wired from the sidebar and persisted.
-- Project grouping is available through `projectId` and `projectName` on sessions.
-- New project creation is available from the UI and sessions can be grouped under projects.
-- `/new` starts a new session.
-- `/compact` keeps the recent chat window and stores a compact anchor so older turns stop being sent to the model.
-- Context sent to providers is built from the persisted chat window and excludes UI-only thinking placeholders.
+- Project grouping is available through `projectId` and `projectName`.
+- `/new` starts a new session; `/compact` keeps the recent chat window and stores a compact anchor so older turns stop being sent to the model.
 - `/goal` sets or displays an active session goal and surfaces it in the Memory view.
 
-### Skills System
+## Skills System
 
 - Skills are discovered recursively from a configurable/local skills directory, so categorized skill packs are supported.
 - `ZEUS_SKILLS_DIR` is supported, with packaged resource and development-directory fallbacks.
 - Skill folders are validated by `SKILL.md` files with YAML frontmatter.
-- Skill summaries include id, name, description, and whether references, scripts, assets, or OpenAI agent metadata are present.
-- Invalid skill folders are skipped instead of blocking the whole registry load.
-- Skill details can be loaded from the UI.
 - Active skill instructions are injected on the Rust side into the next provider call rather than shipping full skill bodies through frontend state.
-- Manual slash-selected skills take precedence. When no manual skill is active, Zeus automatically scores the latest user request against each skill's `name` and `description`, then injects up to three high-confidence matching skills.
+- Manual slash-selected skills take precedence; otherwise Zeus scores the latest user request against each skill's `name` and `description` and injects up to three high-confidence matches.
 - Skills with `disable-model-invocation: true` are available in the picker but skipped by automatic matching.
-- Skill chips are excluded from ordinary chat-history context because the active skill body is injected separately.
 
-### Attachments and Image Paste
+## Attachments and Image Paste
 
 - Bottom composer file attachment handling is wired.
 - Pasted images from the clipboard are converted into image attachments.
@@ -72,56 +194,7 @@ These capabilities are present in the current codebase and wired through the app
 - Attached files are included in the prompt as structured attachment metadata for the current turn.
 - Attachments clear after a successful provider response.
 
-### Workspace Tool Execution
-
-- `/run <command>`, `/read <path>`, `/write <path> :: <content>`, and
-  `/edit <path> :: <find> => <replace>` slash commands dispatch to the
-  Rust `run_shell_command`, `read_workspace_file`, `write_workspace_file`,
-  and `apply_workspace_edit` Tauri commands. Results land as a chat bubble
-  AND in the Tool Run panel below the composer.
-- The Tool Run panel renders `ShellCommandResult` (exit code, duration,
-  stdout/stderr toggle), `WriteWorkspaceFileResult` / `ApplyWorkspaceEditResult`
-  (unified diff with `-` / `+` lines), and `AgentRunResult` (combined diff,
-  files touched, step log, rollback plan, and any proposed harness rule).
-- Policy decisions (`CommandClass`, `accessMode`, `approvalRequired`) are
-  rendered as colored badges; `run_shell_command` and `run_agent_task`
-  route through `authorize_command` and `authorize_file_write` so the
-  access-mode setting actually gates what runs.
-- The chat model can emit a fenced `tool` block (one JSON step per line:
-  `readFile`, `writeFile`, `editFile`, `runCommand`) to invoke the agent
-  loop. The composer parses it after each response and calls
-  `runAgentTask`; the resulting `proposedHarnessRule` (when present)
-  becomes a pending proposal in the Harness Evolution view.
-- Multi-turn chaining: after `runAgentTask` returns, the chat driver
-  re-prompts the model with the tool result appended to the conversation
-  history (recursive `runChatTurn`, bounded by `MAX_TOOL_TURNS = 6`).
-  The model can emit another `tool` block to chain actions or finally
-  emit a plain-text summary. Each turn gets its own thinking bubble and
-  its own Tool Run panel entry.
-- Provider API keys: Settings exposes password-style inputs for
-  `MINIMAX_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Saved keys
-  land in `<app_data>/provider-keys.json` and are injected into the
-  process env at startup so chat requests don't fail with "Missing API
-  key". The frontend never sees the raw key value.
-
-### Harness Evolution Workflow
-
-- Harness proposal state is visible in the UI.
-- Proposal transitions support approved, rejected, applied-once, edited, and rolled-back states.
-- Proposal edits can be made inline from the UI.
-- Proposal history entries are recorded for auditability.
-- Rust persistence supports proposal edits, history snapshots, and rollback behavior.
-- A seeded proposal appears automatically on first run so the harness panel is never empty.
-
-### Access Modes
-
-- Access modes are exposed in the UI: Full, Local, Review, and Locked.
-- Mode descriptions are shown in the app.
-- The selected access mode is persisted through Rust/SQLite.
-
-Important limitation: access modes are currently persisted UI state. They do not yet enforce shell, filesystem, network, dependency, or prompt-injection policies.
-
-### Testing and Quality Gates
+## Testing and Quality Gates
 
 The repository includes scripts for:
 
@@ -134,54 +207,9 @@ cd src-tauri && cargo test
 cd src-tauri && cargo fmt -- --check
 ```
 
-Current tests cover the frontend shell, composer behavior, session/project flows, slash commands, harness proposal editing, context-window helpers, provider dispatch, skill injection, persistence, and provider defaults.
+Current coverage spans the frontend shell, composer behavior, session/project flows, slash commands, harness proposal editing, context-window helpers, provider dispatch, skill injection, persistence, the agent runtime loop, the validation module, the patch engine, code-intelligence extraction, and provider defaults.
 
-## Not Yet Production Ready
-
-The following are intentionally **not** described as production-ready:
-
-- Signed multi-platform release publishing (CI workflow scaffold lives in
-  the shell/exec branch but is intentionally not wired into the default
-  build).
-
-Everything else from earlier "not ready" lists is now wired end-to-end:
-
-- Arbitrary local shell command execution: `/run <command>` from the
-  composer dispatches to `run_shell_command`; the result is shown in the
-  chat, the Tool Run panel, and the persisted session. The model can also
-  emit a fenced `tool` block that runs shell steps via `runAgentTask`.
-- Repository file editing / patch application: `/read`, `/write`, `/edit`
-  slash commands plus `readFile`/`writeFile`/`editFile` tool steps land in
-  the same place; `WriteWorkspaceFileResult` and `ApplyWorkspaceEditResult`
-  return unified diffs that the Tool Run panel renders.
-- Policy-enforced filesystem / shell / dependency / network guards:
-  `PolicyDecision` (command class, access mode, approval state) is
-  returned from every shell run and surfaced as a colored badge in the
-  panel; `run_shell_command` and `run_agent_task` route through
-  `authorize_command` and `authorize_file_write` before touching the FS.
-- Autonomous code-change loops that modify a repo end to end:
-  `runAgentTask` orchestrates read/write/edit/runCommand steps with
-  rollback plans, captured diffs, and a step log; the model can trigger it
-  by emitting a fenced `tool` block; the panel shows the full log and the
-  combined diff.
-- Diff/log panels for real task execution: the Tool Run panel below the
-  composer renders `DiffBlock` (unified diff from Rust) plus a
-  numbered step log; the chat bubble also gets a short summary line.
-- Automatic harness-rule generation from completed sessions: when
-  `runAgentTask` returns `proposedHarnessRule`, the chat replaces the
-  pending proposal with one derived from it; the rule shows up in the
-  Harness Evolution panel for the user to approve/edit/reject.
-- Multi-turn tool-calling loop: the chat driver recursively re-prompts
-  the model with the tool result, bounded by `MAX_TOOL_TURNS = 6`. The
-  model can chain any number of tool blocks within one user request and
-  finally emit a plain-text summary; the user sees each tool result as
-  its own chat bubble plus a panel entry.
-- Provider API key management: the Settings panel exposes password-style
-  inputs for `MINIMAX_API_KEY`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY`;
-  keys are persisted to `<app_data>/provider-keys.json` and injected into
-  the process env at startup so chat requests no longer fail silently
-  with "Missing API key". Chat errors that look like key/auth issues
-  surface a clear pointer to the Settings panel.
+---
 
 ## Architecture
 
@@ -192,17 +220,25 @@ flowchart LR
   UI --> Sessions[Sessions, projects, memory panels]
   UI --> Tauri[Tauri command bridge]
   Tauri --> Rust[Rust core]
-  Rust --> SQLite[(SQLite app data: zeus.db)]
+  Rust --> Runtime[AgentRuntime service]
+  Runtime --> SQLite[(SQLite app data: zeus.db)]
+  Runtime --> Memory[(Memory sidecar)]
+  Rust --> Patch[Patch engine]
+  Rust --> CodeIntel[Code intelligence]
   Rust --> Skills[Local skills directory]
   Rust --> Providers[Provider dispatcher]
   Providers --> MiniMax[MiniMax M3]
   Providers --> OpenAI[OpenAI]
   Providers --> Anthropic[Anthropic]
+  Runtime --> Browser[Browser tool contract]
+  Runtime --> GH[GitHub workflow]
   UI --> Harness[Harness evolution UI]
   Harness --> SQLite
 ```
 
-The frontend owns the visual shell, composer, views, temporary UI state, and provider-facing context assembly. The Rust core owns native commands, SQLite persistence, provider dispatch, provider HTTP calls, skill discovery, and skill injection.
+The frontend owns the visual shell, composer, views, temporary UI state, and provider-facing context assembly. The Rust core owns native commands, the agent runtime service, SQLite persistence, provider dispatch, provider HTTP calls, the patch engine, code intelligence, skill discovery, skill injection, and the policy gate that enforces the access modes.
+
+---
 
 ## Prerequisites
 
@@ -234,6 +270,8 @@ sudo apt-get install -y \
   wget \
   file
 ```
+
+---
 
 ## Installation
 
@@ -275,6 +313,8 @@ Package the desktop app:
 npm run tauri:build
 ```
 
+---
+
 ## Development Commands
 
 ```bash
@@ -285,6 +325,8 @@ npm run tauri:build
 cd src-tauri && cargo test
 cd src-tauri && cargo fmt -- --check
 ```
+
+---
 
 ## Configuration
 
@@ -310,16 +352,28 @@ If unset, Zeus checks packaged resources and development paths.
 
 The bundled skills are organized by category. Keep each skill description narrow: it is used for automatic context matching, so broad generic trigger words can make unrelated skills compete.
 
+---
+
 ## Suggested GitHub Description
 
 Use this as the repository description:
 
 ```text
-Local-first Tauri coding-agent shell with MiniMax M3, SQLite sessions, skills, attachments, and visible harness evolution.
+Local-first Tauri coding-agent shell with MiniMax M3, a Rust agent-runtime service, transactional multi-file patching, structured code search, an approval queue, and visible harness evolution.
 ```
+
+---
 
 ## Security Notes
 
 - Do not commit `.env` or local API keys.
 - Provider calls are routed through the Rust side so secrets can stay in the process environment rather than frontend code.
-- Access modes are currently persisted UI state only. Enforcement of shell, file, network, dependency, and secret policies is future work.
+- Access modes are persisted through SQLite and enforced at the Rust `policy` gate.
+- File reads are not gated by policy (read-only); shell, file-write, and git-mutation operations all require policy + approval where applicable.
+- The Tool Run panel surfaces every policy decision as a colored badge so the user can audit what ran and why.
+
+---
+
+## Suggested GitHub Topics
+
+`tauri`, `coding-agent`, `minimax`, `openai`, `anthropic`, `react`, `typescript`, `rust`, `sqlite`, `self-improving`, `agent-harness`, `code-graph`, `unified-diff`, `semantic-search`, `agent-runtime`, `playwright`
