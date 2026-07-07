@@ -13,6 +13,11 @@ function withSelectedWorkspace<T extends { workspaceDir?: string }>(request: T):
   return { ...request, workspaceDir: request.workspaceDir ?? getSelectedWorkspaceDir() };
 }
 
+function normalizeWorkspacePath(path: string): string {
+  const trimmed = path.trim();
+  return trimmed === "." || trimmed === "./" ? "" : trimmed;
+}
+
 export interface PolicyDecision {
   accessMode: string;
   commandClass: string;
@@ -139,6 +144,21 @@ export interface AgentRunResult {
   rollbackPlan: string[];
 }
 
+export function normalizeAgentStep(step: AgentStepRequest): AgentStepRequest {
+  switch (step.kind) {
+    case "listDir":
+      return { ...step, path: normalizeWorkspacePath(step.path) };
+    case "runCommand":
+      return { ...step, cwd: step.cwd ? normalizeWorkspacePath(step.cwd) || undefined : undefined };
+    case "readFile":
+    case "writeFile":
+    case "editFile":
+      return { ...step, path: normalizeWorkspacePath(step.path) };
+    default:
+      return step;
+  }
+}
+
 function ensureRuntime(feature: string): void {
   if (!isTauriRuntime()) {
     throw new Error(`${feature} is available inside the Zeus desktop runtime.`);
@@ -152,12 +172,12 @@ export async function runShellCommand(request: ShellCommandRequest): Promise<She
 
 export async function readWorkspaceFile(path: string, maxBytes?: number, workspaceDir?: string): Promise<ReadWorkspaceFileResult> {
   ensureRuntime("Workspace file reads");
-  return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: withSelectedWorkspace({ path, maxBytes, workspaceDir }) });
+  return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: withSelectedWorkspace({ path: normalizeWorkspacePath(path), maxBytes, workspaceDir }) });
 }
 
 export async function listWorkspaceDir(path: string, maxEntries?: number, workspaceDir?: string): Promise<ListWorkspaceDirResult> {
   ensureRuntime("Workspace directory listing");
-  return invoke<ListWorkspaceDirResult>("list_workspace_dir", { request: withSelectedWorkspace({ path, maxEntries, workspaceDir }) });
+  return invoke<ListWorkspaceDirResult>("list_workspace_dir", { request: withSelectedWorkspace({ path: normalizeWorkspacePath(path), maxEntries, workspaceDir }) });
 }
 
 export async function loadProjectConfig(workspaceDir?: string): Promise<ProjectConfigSnapshot> {
@@ -175,6 +195,15 @@ export async function runProjectTest(args: string[] = [], workspaceDir?: string,
   return invoke<TestRunResult>("run_project_test", { request: withSelectedWorkspace({ args, workspaceDir, timeoutMs }) });
 }
 
+export async function runBrowserSmoke(visible = false, workspaceDir?: string, timeoutMs = 120_000): Promise<ShellCommandResult> {
+  return runShellCommand({
+    program: "npm",
+    args: ["run", visible ? "browser:smoke:visible" : "browser:smoke"],
+    workspaceDir,
+    timeoutMs,
+  });
+}
+
 export async function writeWorkspaceFile(args: {
   path: string;
   content: string;
@@ -185,7 +214,7 @@ export async function writeWorkspaceFile(args: {
   approved?: boolean;
 }): Promise<WriteWorkspaceFileResult> {
   ensureRuntime("Workspace file writes");
-  return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: withSelectedWorkspace(args) });
+  return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: withSelectedWorkspace({ ...args, path: normalizeWorkspacePath(args.path) }) });
 }
 
 export async function applyWorkspaceEdit(args: {
@@ -197,12 +226,12 @@ export async function applyWorkspaceEdit(args: {
   approved?: boolean;
 }): Promise<ApplyWorkspaceEditResult> {
   ensureRuntime("Workspace file edits");
-  return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace(args) });
+  return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace({ ...args, path: normalizeWorkspacePath(args.path) }) });
 }
 
 export async function runAgentTask(request: AgentRunRequest): Promise<AgentRunResult> {
   ensureRuntime("Agent task execution");
-  return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace(request) });
+  return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace({ ...request, steps: request.steps.map(normalizeAgentStep) }) });
 }
 
 export function parseShellWords(input: string): string[] {
