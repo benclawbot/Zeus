@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { mkdir } from "node:fs/promises";
+
 const target = process.env.ZEUS_TEST_BASE_URL || "http://127.0.0.1:5173";
 const visible = process.env.ZEUS_BROWSER_VISIBLE === "1";
 
@@ -13,6 +15,7 @@ async function main() {
     process.exit(1);
   }
 
+  await mkdir("artifacts", { recursive: true });
   const browser = await chromium.launch({ headless: !visible });
   const page = await browser.newPage({ viewport: { width: 1440, height: 920 } });
   try {
