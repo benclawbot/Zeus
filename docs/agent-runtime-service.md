@@ -58,6 +58,59 @@ The runtime memory starts as project-scoped retrieval with source/provenance, ta
 
 This is meant to reduce blind full-file reads and give the planner a cheaper exploration tool.
 
-## Wiring status
+## Command bridge
 
-The Rust runtime core and frontend client contract are present in this PR. The full Tauri command wiring is the next integration step because the current `lib.rs` is a large monolithic file and should be split rather than patched blindly through whole-file replacement.
+`src-tauri/src/agent_runtime_commands.rs` now contains the Tauri command bridge for the runtime service:
+
+- `agent_runtime_health`
+- `agent_runtime_status`
+- `agent_runtime_open_session`
+- `agent_runtime_define_plan`
+- `agent_runtime_create_approval`
+- `agent_runtime_list_approvals`
+- `agent_runtime_resolve_approval`
+- `agent_runtime_browser_tool`
+- `agent_runtime_upsert_memory`
+- `agent_runtime_retrieve_memories`
+- `agent_runtime_search_code`
+
+The bridge expects `AgentRuntimeService` to be managed by the Tauri app and returns a clear error if that state has not been registered.
+
+## Remaining integration point
+
+To make the bridge live, `src-tauri/src/lib.rs` still needs a small registration patch:
+
+```rust
+mod agent_runtime;
+mod agent_runtime_commands;
+
+use agent_runtime::AgentRuntimeService;
+```
+
+In setup, after `zeus.db` is initialized:
+
+```rust
+let runtime_path = db_path.with_file_name("agent-runtime.json");
+let runtime = AgentRuntimeService::load_or_create(runtime_path)
+    .map_err(|e| -> Box<dyn std::error::Error> { format!("runtime: {e}").into() })?;
+app.manage(runtime);
+```
+
+And in `tauri::generate_handler!`:
+
+```rust
+agent_runtime_commands::agent_runtime_health,
+agent_runtime_commands::agent_runtime_status,
+agent_runtime_commands::agent_runtime_open_session,
+agent_runtime_commands::agent_runtime_define_plan,
+agent_runtime_commands::agent_runtime_create_approval,
+agent_runtime_commands::agent_runtime_list_approvals,
+agent_runtime_commands::agent_runtime_resolve_approval,
+agent_runtime_commands::agent_runtime_browser_tool,
+agent_runtime_commands::agent_runtime_upsert_memory,
+agent_runtime_commands::agent_runtime_retrieve_memories,
+agent_runtime_commands::agent_runtime_retrieve_memories_request,
+agent_runtime_commands::agent_runtime_search_code,
+```
+
+I did not blindly rewrite `lib.rs` through whole-file replacement because it is the app bootstrap file and the connector does not provide a patch operation. The bridge and client are ready for that precise registration patch.
