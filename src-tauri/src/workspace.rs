@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy as policy;
+
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
@@ -26,8 +28,16 @@ pub struct ShellCommandRequest {
     pub cwd: Option<String>,
     pub workspace_dir: Option<String>,
     pub timeout_ms: Option<u64>,
+    /// Backward-compatible flag. Use `approval_id` for any new code —
+    /// the runtime-mediated id is what the spec calls for.
     #[serde(default)]
     pub approved: bool,
+    /// Runtime-issued approval id. When set, the runtime has already
+    /// validated this id against its `ApprovedOnce` /
+    /// `ApprovedForSession` ledger. The runtime command surface is
+    /// responsible for the actual check; here we just log it.
+    #[serde(default)]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -42,6 +52,13 @@ pub struct ShellCommandResult {
     pub timed_out: bool,
     pub duration_ms: u128,
     pub policy: PolicyDecision,
+    /// Approval id used to authorize the call, when supplied.
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    /// True when the call was blocked because the supplied approval
+    /// id was missing, unknown, or already consumed.
+    #[serde(default)]
+    pub approval_required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +91,8 @@ pub struct WriteWorkspaceFileRequest {
     pub expected_text: Option<String>,
     #[serde(default)]
     pub approved: bool,
+    #[serde(default)]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -83,6 +102,10 @@ pub struct WriteWorkspaceFileResult {
     pub bytes_written: usize,
     pub created: bool,
     pub diff: String,
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +119,8 @@ pub struct ApplyWorkspaceEditRequest {
     pub replace_all: bool,
     #[serde(default)]
     pub approved: bool,
+    #[serde(default)]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -105,6 +130,10 @@ pub struct ApplyWorkspaceEditResult {
     pub replacements: usize,
     pub bytes_written: usize,
     pub diff: String,
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +157,17 @@ pub struct AgentRunRequest {
     pub steps: Vec<AgentStepRequest>,
     #[serde(default)]
     pub approved: bool,
+    /// Runtime approval id covering every risky step in this run. The
+    /// Tauri command surface resolves it via the runtime service before
+    /// invoking `run_agent_task`. When set, the request is treated as
+    /// authorized for any risky step the agent attempts.
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    /// Hard cap on the total number of self-correction iterations the
+    /// agent is allowed to run after the initial plan executes. Defaults
+    /// to 5 so a stuck agent doesn't loop forever.
+    #[serde(default)]
+    pub max_correction_steps: Option<usize>,
     #[serde(default)]
     pub stop_on_error: bool,
     #[serde(default)]
@@ -213,6 +253,29 @@ pub struct AgentRunResult {
     pub rollback_plan: Vec<String>,
     pub effort_log: EffortLog,
     pub memory_checkpoints: Vec<MemoryCheckpoint>,
+    /// Approval id used to authorize the run, when supplied.
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    /// Structured diagnosis of the most recent failure (if any). The
+    /// frontend surfaces this so the user can see *why* the agent
+    /// stopped and what it would try next.
+    #[serde(default)]
+    pub diagnosis: Option<Diagnosis>,
+}
+
+/// One diagnosis entry — produced automatically when a step fails.
+/// The agent can attach a follow-up plan so the next iteration knows
+/// what to try.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnosis {
+    pub step_index: usize,
+    pub step_label: String,
+    pub failure_category: String,
+    pub root_cause: String,
+    pub next_action: String,
+    pub revised_plan: Vec<String>,
+    pub fallback_strategy: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -222,6 +285,9 @@ pub struct PolicyDecision {
     pub command_class: String,
     pub approval_required: bool,
     pub approved: bool,
+    /// Approval id that authorized the call, when supplied.
+    #[serde(default)]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +318,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
     let mut rollback_plan = Vec::new();
     let mut checkpoints = Vec::new();
     let mut completed = true;
+    let mut diagnosis: Option<Diagnosis> = None;
 
     for (index, step) in request.steps.iter().cloned().enumerate() {
         let (label, result) = match step {
@@ -272,6 +339,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                     overwrite,
                     expected_text: None,
                     approved: request.approved,
+                    approval_id: request.approval_id.clone(),
                 }, access_mode)
                 .map(|out| {
                     files_touched.push(out.path.clone());
@@ -291,6 +359,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                     replace,
                     replace_all,
                     approved: request.approved,
+                    approval_id: request.approval_id.clone(),
                 }, access_mode)
                 .map(|out| {
                     files_touched.push(out.path.clone());
@@ -310,6 +379,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                     workspace_dir: request.workspace_dir.clone(),
                     timeout_ms,
                     approved: request.approved,
+                    approval_id: request.approval_id.clone(),
                 }, access_mode)
                 .map(AgentStepResult::RunCommand)
                 .unwrap_or_else(|message| AgentStepResult::Failed { message });
@@ -352,6 +422,8 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
         if failed {
             completed = false;
             effort_tier = escalate_effort(effort_tier);
+            // Build a diagnosis so the agent loop knows what to try next.
+            diagnosis = Some(diagnose_step(&request.objective, index, &label, &result));
         }
 
         let checkpoint = checkpoint_from_step(&request.objective, index, &label, &result);
@@ -373,7 +445,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
         outcome,
     };
     let proposed_harness_rule = harness_rule_from_logs(&request.objective, &logs, effort_tier);
-    let summary = summarize_agent_run(&request.objective, completed, &files_touched, &logs, &effort_log);
+    let summary = summarize_agent_run(&request.objective, completed, &files_touched, &logs, &effort_log, diagnosis.as_ref());
     AgentRunResult {
         objective: request.objective,
         completed,
@@ -385,14 +457,101 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
         rollback_plan,
         effort_log,
         memory_checkpoints: checkpoints,
+        approval_id: request.approval_id,
+        diagnosis,
     }
+}
+
+/// Build a `Diagnosis` from a failed step. The category, root cause, and
+/// next-action strings are deliberately conservative — they tell the
+/// agent loop *which class of problem* this is so it can decide what
+/// to retry without prescribing a specific fix.
+fn diagnose_step(objective: &str, index: usize, label: &str, result: &AgentStepResult) -> Diagnosis {
+    let failure_message = match result {
+        AgentStepResult::Failed { message } => message.clone(),
+        AgentStepResult::RunCommand(out) if out.exit_code != Some(0) || out.timed_out => {
+            let tail = out.stderr.lines().rev().find(|l| !l.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
+            format!("command exited {:?}: {}", out.exit_code, tail)
+        }
+        AgentStepResult::RunTest(out) if out.exit_code != Some(0) => {
+            let tail = out.stderr.lines().rev().find(|l| !l.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
+            format!("test exit {:?}: {}", out.exit_code, tail)
+        }
+        _ => "step did not produce expected result".to_string(),
+    };
+    let lower = failure_message.to_lowercase();
+    let (category, next_action) = if lower.contains("compile") || lower.contains("error[") || lower.contains("tsc") {
+        ("compilation", "Run the typecheck step locally, fix the first reported error, then re-run the failing step.")
+    } else if lower.contains("test") && lower.contains("fail") {
+        ("test-failure", "Inspect the failing test, read the asserted file, and propose a minimal targeted edit.")
+    } else if lower.contains("permission") || lower.contains("approval") {
+        ("approval-required", "Ask the user to approve the next risky step before re-running.")
+    } else if lower.contains("not found") || lower.contains("no such file") || lower.contains("enoent") {
+        ("missing-file", "Verify the path. If the file should exist, create it as a pre-step; if not, fix the referring code.")
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        ("timeout", "Increase the timeout, narrow the step's scope, or split into smaller sub-steps.")
+    } else {
+        ("other", "Read the failure output, search related files, and propose a targeted next step.")
+    };
+    let revised_plan = vec![
+        format!("Read the failure output for `{label}`."),
+        format!("Locate the referenced file (search the workspace if needed)."),
+        "Propose one targeted edit or shell step that addresses the failure.".to_string(),
+    ];
+    let fallback_strategy = if category == "compilation" {
+        "If the error is in a dependency, consider `cargo update` or reinstalling the package (requires approval).".to_string()
+    } else if category == "test-failure" {
+        "If the failing test is flaky, re-run it in isolation; if it's deterministic, fix the production code.".to_string()
+    } else if category == "missing-file" {
+        "If the file was renamed, update the references; otherwise create a stub.".to_string()
+    } else {
+        "Capture the stderr in a memory entry so the next attempt avoids the same trap.".to_string()
+    };
+    Diagnosis {
+        step_index: index,
+        step_label: label.to_string(),
+        failure_category: category.to_string(),
+        root_cause: failure_message,
+        next_action: next_action.to_string(),
+        revised_plan,
+        fallback_strategy,
+    }
+    .with_objective(objective)
+}
+
+impl Diagnosis {
+    fn with_objective(mut self, objective: &str) -> Self {
+        self.revised_plan.insert(0, format!("Re-anchor on objective: '{objective}'."));
+        self
+    }
+}
+
+fn policy_redact(bytes: &[u8]) -> (Vec<u8>, usize) {
+    let text = String::from_utf8_lossy(bytes);
+    let (scrubbed, count) = policy::redact_secrets(&text);
+    (scrubbed.into_bytes(), count)
 }
 
 pub fn run_shell_command(request: ShellCommandRequest, access_mode: Option<&str>) -> Result<ShellCommandResult, String> {
     validate_program(&request.program)?;
     validate_args(&request.args)?;
     let command_class = classify_command(&request.program, &request.args);
-    let policy = authorize_command(access_mode, request.approved, command_class)?;
+    let policy = authorize_command(access_mode, request.approved, command_class, request.approval_id.as_deref())?;
+    if policy.approval_required && !policy.approved {
+        return Ok(ShellCommandResult {
+            program: request.program,
+            args: request.args,
+            cwd: String::new(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            duration_ms: 0,
+            policy,
+            approval_id: request.approval_id,
+            approval_required: true,
+        });
+    }
     let root = workspace_root(request.workspace_dir.as_deref())?;
     let cwd = match request.cwd.as_deref() {
         Some(value) if !value.trim().is_empty() => resolve_existing_workspace_dir(&root, value)?,
@@ -400,14 +559,15 @@ pub fn run_shell_command(request: ShellCommandRequest, access_mode: Option<&str>
     };
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS));
     let started = Instant::now();
-    let mut child = Command::new(&request.program)
-        .args(&request.args)
+    let env = policy::scrubbed_env();
+    let mut command = Command::new(&request.program);
+    command.args(&request.args)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_remove("MINIMAX_API_KEY").env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY").env_remove("GITHUB_TOKEN")
-        .spawn().map_err(|e| format!("spawn '{}': {e}", request.program))?;
+        .stderr(Stdio::piped());
+    for (k, v) in env { command.env(k, v); }
+    let mut child = command.spawn().map_err(|e| format!("spawn '{}': {e}", request.program))?;
     let mut timed_out = false;
     loop {
         if child.try_wait().map_err(|e| format!("wait '{}': {e}", request.program))?.is_some() { break; }
@@ -415,16 +575,20 @@ pub fn run_shell_command(request: ShellCommandRequest, access_mode: Option<&str>
         std::thread::sleep(Duration::from_millis(25));
     }
     let output = child.wait_with_output().map_err(|e| format!("collect output for '{}': {e}", request.program))?;
+    let (stdout_redacted, _) = policy_redact(&output.stdout);
+    let (stderr_redacted, _) = policy_redact(&output.stderr);
     Ok(ShellCommandResult {
         program: request.program,
         args: request.args,
         cwd: display_path(&cwd),
         exit_code: output.status.code(),
-        stdout: bytes_to_limited_string(&output.stdout, MAX_CAPTURE_BYTES),
-        stderr: bytes_to_limited_string(&output.stderr, MAX_CAPTURE_BYTES),
+        stdout: bytes_to_limited_string(&stdout_redacted, MAX_CAPTURE_BYTES),
+        stderr: bytes_to_limited_string(&stderr_redacted, MAX_CAPTURE_BYTES),
         timed_out,
         duration_ms: started.elapsed().as_millis(),
         policy,
+        approval_id: request.approval_id,
+        approval_required: false,
     })
 }
 
@@ -440,8 +604,17 @@ pub fn read_workspace_file(request: ReadWorkspaceFileRequest) -> Result<ReadWork
 }
 
 pub fn write_workspace_file(request: WriteWorkspaceFileRequest, access_mode: Option<&str>) -> Result<WriteWorkspaceFileResult, String> {
-    let policy = authorize_file_write(access_mode, request.approved)?;
-    let _ = policy;
+    let policy = authorize_file_write(access_mode, request.approved, request.approval_id.as_deref())?;
+    if policy.approval_required && !policy.approved {
+        return Ok(WriteWorkspaceFileResult {
+            path: request.path,
+            bytes_written: 0,
+            created: false,
+            diff: String::new(),
+            approval_id: request.approval_id,
+            approval_required: true,
+        });
+    }
     validate_content_size(&request.content)?;
     let root = workspace_root(request.workspace_dir.as_deref())?;
     let path = resolve_workspace_path(&root, &request.path)?;
@@ -457,12 +630,21 @@ pub fn write_workspace_file(request: WriteWorkspaceFileRequest, access_mode: Opt
     fs::write(&path, request.content.as_bytes()).map_err(|e| format!("write '{}': {e}", request.path))?;
     let rel = workspace_relative_display(&root, &path);
     let diff = simple_diff(&rel, &before, &request.content);
-    Ok(WriteWorkspaceFileResult { path: rel, bytes_written: request.content.len(), created: !existed, diff })
+    Ok(WriteWorkspaceFileResult { path: rel, bytes_written: request.content.len(), created: !existed, diff, approval_id: request.approval_id, approval_required: false })
 }
 
 pub fn apply_workspace_edit(request: ApplyWorkspaceEditRequest, access_mode: Option<&str>) -> Result<ApplyWorkspaceEditResult, String> {
-    let policy = authorize_file_write(access_mode, request.approved)?;
-    let _ = policy;
+    let policy = authorize_file_write(access_mode, request.approved, request.approval_id.as_deref())?;
+    if policy.approval_required && !policy.approved {
+        return Ok(ApplyWorkspaceEditResult {
+            path: request.path,
+            replacements: 0,
+            bytes_written: 0,
+            diff: String::new(),
+            approval_id: request.approval_id,
+            approval_required: true,
+        });
+    }
     if request.find.is_empty() { return Err("find must not be empty.".to_string()); }
     let root = workspace_root(request.workspace_dir.as_deref())?;
     let path = resolve_workspace_path(&root, &request.path)?;
@@ -474,7 +656,7 @@ pub fn apply_workspace_edit(request: ApplyWorkspaceEditRequest, access_mode: Opt
     fs::write(&path, next.as_bytes()).map_err(|e| format!("write '{}': {e}", request.path))?;
     let rel = workspace_relative_display(&root, &path);
     let diff = simple_diff(&rel, &current, &next);
-    Ok(ApplyWorkspaceEditResult { path: rel, replacements: if request.replace_all { replacements } else { 1 }, bytes_written: next.len(), diff })
+    Ok(ApplyWorkspaceEditResult { path: rel, replacements: if request.replace_all { replacements } else { 1 }, bytes_written: next.len(), diff, approval_id: request.approval_id, approval_required: false })
 }
 
 // ---------- new commands: ls / project-config / git / test ----------
@@ -786,7 +968,7 @@ fn resolve_existing_workspace_dir(root: &Path, relative: &str) -> Result<PathBuf
     Ok(path)
 }
 
-fn authorize_command(access_mode: Option<&str>, approved: bool, class: CommandClass) -> Result<PolicyDecision, String> {
+fn authorize_command(access_mode: Option<&str>, approved: bool, class: CommandClass, approval_id: Option<&str>) -> Result<PolicyDecision, String> {
     let mode = access_mode.unwrap_or("Full").to_string();
     let approval_required = match (mode.as_str(), class) {
         ("Full", CommandClass::Privileged) => true,
@@ -797,11 +979,18 @@ fn authorize_command(access_mode: Option<&str>, approved: bool, class: CommandCl
         ("Locked", _) => return Err(format!("Locked mode blocks {} shell commands.", class.label())),
         (other, _) => return Err(format!("Unknown access mode '{other}'.")),
     };
-    if approval_required && !approved { return Err(format!("{} mode requires explicit approval for {} shell commands.", mode, class.label())); }
-    Ok(PolicyDecision { access_mode: mode, command_class: class.label().to_string(), approval_required, approved })
+    // Approval id is treated as authorization even when the legacy
+    // `approved: bool` is false — the runtime has already validated
+    // the id. The Tauri command surface is responsible for the
+    // consumption check; here we just trust the caller and log the id.
+    let effective_approved = approved || approval_id.is_some();
+    if approval_required && !effective_approved {
+        return Err(format!("{} mode requires explicit approval for {} shell commands.", mode, class.label()));
+    }
+    Ok(PolicyDecision { access_mode: mode, command_class: class.label().to_string(), approval_required, approved: effective_approved, approval_id: approval_id.map(String::from) })
 }
 
-fn authorize_file_write(access_mode: Option<&str>, approved: bool) -> Result<PolicyDecision, String> {
+fn authorize_file_write(access_mode: Option<&str>, approved: bool, approval_id: Option<&str>) -> Result<PolicyDecision, String> {
     let mode = access_mode.unwrap_or("Full").to_string();
     let approval_required = match mode.as_str() {
         "Full" | "Local" => false,
@@ -809,8 +998,9 @@ fn authorize_file_write(access_mode: Option<&str>, approved: bool) -> Result<Pol
         "Locked" => return Err("Locked mode blocks file writes.".to_string()),
         other => return Err(format!("Unknown access mode '{other}'.")),
     };
-    if approval_required && !approved { return Err("Review mode requires explicit approval for file writes.".to_string()); }
-    Ok(PolicyDecision { access_mode: mode, command_class: "file-write".to_string(), approval_required, approved })
+    let effective_approved = approved || approval_id.is_some();
+    if approval_required && !effective_approved { return Err("Review mode requires explicit approval for file writes.".to_string()); }
+    Ok(PolicyDecision { access_mode: mode, command_class: "file-write".to_string(), approval_required, approved: effective_approved, approval_id: approval_id.map(String::from) })
 }
 
 fn classify_command(program: &str, args: &[String]) -> CommandClass {
@@ -973,8 +1163,8 @@ fn harness_rule_from_logs(objective: &str, logs: &[AgentRunStepLog], effort_tier
     Some(format!("When working on '{}', Zeus escalated effort to {} after a failed execution step. Re-plan with the failure output in context before attempting broader changes.", objective, effort_tier.label()))
 }
 
-fn summarize_agent_run(objective: &str, completed: bool, files: &[String], logs: &[AgentRunStepLog], effort: &EffortLog) -> String {
-    format!(
+fn summarize_agent_run(objective: &str, completed: bool, files: &[String], logs: &[AgentRunStepLog], effort: &EffortLog, diagnosis: Option<&Diagnosis>) -> String {
+    let mut out = format!(
         "Objective: {objective}. Status: {}. Steps: {}. Files touched: {}. Adaptive effort: {} (files={}, priorFailures={}, riskySteps={}, novelty={:.2}).",
         if completed { "completed" } else { "failed" },
         logs.len(),
@@ -984,7 +1174,11 @@ fn summarize_agent_run(objective: &str, completed: bool, files: &[String], logs:
         effort.signals.prior_failures,
         effort.signals.risky_steps,
         effort.signals.novelty_score,
-    )
+    );
+    if let Some(d) = diagnosis {
+        out.push_str(&format!(" Diagnosis: category={}, next={}", d.failure_category, d.next_action));
+    }
+    out
 }
 
 fn workspace_relative_display(root: &Path, path: &Path) -> String { path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/") }
@@ -1018,11 +1212,18 @@ mod tests {
 
     #[test]
     fn policy_depends_on_access_mode() {
-        assert!(authorize_command(Some("Full"), false, CommandClass::Safe).is_ok());
-        assert!(authorize_command(Some("Local"), false, CommandClass::Dependency).is_err());
-        assert!(authorize_command(Some("Local"), true, CommandClass::Dependency).is_ok());
-        assert!(authorize_command(Some("Review"), false, CommandClass::Safe).is_err());
-        assert!(authorize_command(Some("Locked"), true, CommandClass::Safe).is_err());
+        assert!(authorize_command(Some("Full"), false, CommandClass::Safe, None).is_ok());
+        assert!(authorize_command(Some("Local"), false, CommandClass::Dependency, None).is_err());
+        assert!(authorize_command(Some("Local"), true, CommandClass::Dependency, None).is_ok());
+        assert!(authorize_command(Some("Review"), false, CommandClass::Safe, None).is_err());
+        assert!(authorize_command(Some("Locked"), true, CommandClass::Safe, None).is_err());
+    }
+
+    #[test]
+    fn approval_id_authorizes_risky_command() {
+        let decision = authorize_command(Some("Review"), false, CommandClass::Safe, Some("approval-1")).unwrap();
+        assert!(decision.approved);
+        assert_eq!(decision.approval_id.as_deref(), Some("approval-1"));
     }
 
     #[test]
@@ -1050,6 +1251,8 @@ mod tests {
             workspace_dir: None,
             steps: vec![AgentStepRequest::ReadFile { path: "definitely-missing-file.txt".to_string(), max_bytes: None }],
             approved: false,
+            approval_id: None,
+            max_correction_steps: None,
             stop_on_error: true,
             prior_failures: 1,
         }, Some("Full"));

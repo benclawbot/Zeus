@@ -12,8 +12,14 @@ use tauri::Manager;
 
 mod agent_runtime;
 mod agent_runtime_commands;
+mod code_intelligence;
+mod github_workflow;
+mod memory;
+mod patch;
 mod persistence;
+mod policy;
 mod providers;
+mod validation;
 mod workspace;
 
 use agent_runtime::AgentRuntimeService;
@@ -1082,6 +1088,20 @@ pub fn run() {
             agent_runtime_commands::agent_runtime_retrieve_memories,
             agent_runtime_commands::agent_runtime_retrieve_memories_request,
             agent_runtime_commands::agent_runtime_search_code,
+            agent_runtime_commands::agent_runtime_check_approval,
+            agent_runtime_commands::agent_runtime_apply_patch,
+            agent_runtime_commands::agent_runtime_suggest_tests,
+            agent_runtime_commands::agent_runtime_dependency_graph,
+            agent_runtime_commands::agent_runtime_run_validation,
+            agent_runtime_commands::agent_runtime_github_create_branch,
+            agent_runtime_commands::agent_runtime_github_commit,
+            agent_runtime_commands::agent_runtime_github_create_pr,
+            agent_runtime_commands::agent_runtime_github_read_pr,
+            agent_runtime_commands::agent_runtime_github_ci_status,
+            agent_runtime_commands::agent_runtime_github_fix_ci,
+            agent_runtime_commands::agent_runtime_upsert_memory_v2,
+            agent_runtime_commands::agent_runtime_retrieve_memories_v2,
+            agent_runtime_commands::agent_runtime_inject_memories,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");

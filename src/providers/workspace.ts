@@ -23,6 +23,7 @@ export interface PolicyDecision {
   commandClass: string;
   approvalRequired: boolean;
   approved: boolean;
+  approvalId?: string | null;
 }
 
 export interface ShellCommandRequest {
@@ -32,6 +33,10 @@ export interface ShellCommandRequest {
   workspaceDir?: string;
   timeoutMs?: number;
   approved?: boolean;
+  /** Runtime approval id. Preferred over `approved: bool` for risky
+   *  actions — the runtime has validated this id against its
+   *  ApprovedOnce/ApprovedForSession ledger. */
+  approvalId?: string;
 }
 
 export interface ShellCommandResult {
@@ -44,6 +49,10 @@ export interface ShellCommandResult {
   timedOut: boolean;
   durationMs: number;
   policy: PolicyDecision;
+  approvalId?: string | null;
+  /** True when the call was blocked because the supplied approval id
+   *  was missing, unknown, or already consumed. */
+  approvalRequired?: boolean;
 }
 
 export interface ReadWorkspaceFileResult {
@@ -121,6 +130,8 @@ export interface WriteWorkspaceFileResult {
   bytesWritten: number;
   created: boolean;
   diff: string;
+  approvalId?: string | null;
+  approvalRequired?: boolean;
 }
 
 export interface ApplyWorkspaceEditResult {
@@ -128,6 +139,8 @@ export interface ApplyWorkspaceEditResult {
   replacements: number;
   bytesWritten: number;
   diff: string;
+  approvalId?: string | null;
+  approvalRequired?: boolean;
 }
 
 export type AgentStepRequest =
@@ -145,6 +158,13 @@ export interface AgentRunRequest {
   workspaceDir?: string;
   steps: AgentStepRequest[];
   approved?: boolean;
+  /** Runtime approval id covering every risky step in this run. The
+   *  frontend surfaces a single approval card and passes the resolved
+   *  id down to the Rust runtime, which consumes or honors it. */
+  approvalId?: string;
+  /** Hard cap on the self-correction iterations the agent loop is
+   *  allowed to perform. Defaults to 5 in the Rust runtime. */
+  maxCorrectionSteps?: number;
   stopOnError?: boolean;
 }
 
@@ -152,6 +172,16 @@ export interface AgentRunStepLog {
   index: number;
   label: string;
   result: unknown;
+}
+
+export interface Diagnosis {
+  stepIndex: number;
+  stepLabel: string;
+  failureCategory: string;
+  rootCause: string;
+  nextAction: string;
+  revisedPlan: string[];
+  fallbackStrategy: string;
 }
 
 export interface AgentRunResult {
@@ -163,6 +193,9 @@ export interface AgentRunResult {
   summary: string;
   proposedHarnessRule: string | null;
   rollbackPlan: string[];
+  approvalId?: string | null;
+  /** Structured diagnosis of the most recent failure (if any). */
+  diagnosis?: Diagnosis | null;
 }
 
 export function normalizeAgentStep(step: AgentStepRequest): AgentStepRequest {
@@ -257,6 +290,7 @@ export async function writeWorkspaceFile(args: {
   overwrite?: boolean;
   expectedText?: string;
   approved?: boolean;
+  approvalId?: string;
 }): Promise<WriteWorkspaceFileResult> {
   ensureRuntime("Workspace file writes");
   return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: withSelectedWorkspace(withExplicitComposerApproval({ ...args, path: normalizeWorkspacePath(args.path) })) });
@@ -269,6 +303,7 @@ export async function applyWorkspaceEdit(args: {
   replace: string;
   replaceAll?: boolean;
   approved?: boolean;
+  approvalId?: string;
 }): Promise<ApplyWorkspaceEditResult> {
   ensureRuntime("Workspace file edits");
   return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace(withExplicitComposerApproval({ ...args, path: normalizeWorkspacePath(args.path) })) });
