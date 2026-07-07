@@ -377,17 +377,19 @@ describe("App", () => {
     expect(screen.getByText("Usage: /edit <path> :: <find> => <replace>")).toBeInTheDocument();
   });
 
-  it("shows the working folder button in the composer", () => {
-      render(<App />);
-    // The picker button is present at the composer level, next to the
-    // Access mode select. No "Access" text label in the composer anymore.
+  it("does not render a composer-level working-folder picker (moved out of composer by upstream 852b3e7)", () => {
+    render(<App />);
+
     const composer = screen.getByLabelText("Message composer");
-    const folderButton = within(composer).getByRole("button", { name: /Pick a working folder|Working folder:/i });
-    expect(folderButton).toBeInTheDocument();
+    // Upstream commit 852b3e7 removed the per-session bottom-bar workspace
+    // selector. Workspace selection is now resolved by the Tauri runtime,
+    // not by a composer control, so the picker button must be absent.
+    expect(within(composer).queryByRole("button", { name: /Pick a working folder|Working folder:/i })).not.toBeInTheDocument();
+    // The composer must not advertise the obsolete "Access" text label.
     expect(within(composer).queryByText("Access")).not.toBeInTheDocument();
   });
 
-it("shows the empty tool-run panel on the Home view", () => {
+  it("shows the empty tool-run panel on the Home view", () => {
       render(<App />);
       expect(screen.getByText("Tool runs")).toBeInTheDocument();
       expect(screen.getByText("no runs yet")).toBeInTheDocument();
