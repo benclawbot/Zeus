@@ -99,7 +99,7 @@ function statusGlyph(status: PlanStatus, index: number): string {
 
 function latestUserObjective(): string {
   const userMessages = Array.from(document.querySelectorAll<HTMLElement>(".chat-bubble.chat-user .chat-md-para"));
-  const last = userMessages.at(-1)?.textContent?.trim();
+  const last = userMessages.length > 0 ? userMessages[userMessages.length - 1].textContent?.trim() : undefined;
   return last || "No active objective yet";
 }
 
@@ -157,18 +157,31 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch] ?? ch));
 }
 
+function planSignature(plan: RuntimePlan | null): string {
+  if (!plan) return "idle";
+  return `${plan.status}|${plan.steps.map((step) => `${step.id}:${step.status}:${step.detail ?? ""}`).join(",")}`;
+}
+
 function replacePlanPanel(): void {
   const inspector = document.querySelector<HTMLElement>(".inspector");
   if (!inspector) return;
   const current = document.getElementById(PANEL_ID) ?? Array.from(inspector.querySelectorAll<HTMLElement>(".panel")).find((panel) => panel.querySelector("h2")?.textContent?.trim() === "Plan Progress");
   if (!current) return;
-  renderPlan(current, inferPlan());
+  const plan = inferPlan();
+  if (current.dataset.signature === planSignature(plan)) return;
+  renderPlan(current, plan);
+  current.dataset.signature = planSignature(plan);
 }
 
+let bootScheduled = false;
 function boot(): void {
   ensureStyle();
   replacePlanPanel();
-  const observer = new MutationObserver(() => replacePlanPanel());
+  const observer = new MutationObserver(() => {
+    if (bootScheduled) return;
+    bootScheduled = true;
+    queueMicrotask(() => { bootScheduled = false; replacePlanPanel(); });
+  });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 }
 

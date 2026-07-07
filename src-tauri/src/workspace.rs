@@ -776,7 +776,7 @@ fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, String
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return Err(format!("Workspace path '{}' escapes the workspace.", relative)),
         }
     }
-    if clean.as_os_str().is_empty() { return Err("Workspace path must point inside the workspace.".to_string()); }
+    if clean.as_os_str().is_empty() { return Ok(root.to_path_buf()); }
     Ok(root.join(clean))
 }
 
@@ -1001,6 +1001,19 @@ mod tests {
         assert!(resolve_workspace_path(&root, "src/main.rs").is_ok());
         assert!(resolve_workspace_path(&root, "../secret.txt").is_err());
         assert!(resolve_workspace_path(&root, "/tmp/secret.txt").is_err());
+    }
+
+    #[test]
+    fn resolve_treats_current_dir_as_root() {
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let dot = resolve_workspace_path(&root, ".").expect("dot resolves");
+        let dot_slash = resolve_workspace_path(&root, "./").expect("./ resolves");
+        let dot_dot_slash = resolve_workspace_path(&root, "./.").expect("./. resolves");
+        let nested = resolve_workspace_path(&root, "./src/main.rs").expect("./src/main.rs resolves");
+        assert_eq!(dot, root);
+        assert_eq!(dot_slash, root);
+        assert_eq!(dot_dot_slash, root);
+        assert_eq!(nested, root.join("src").join("main.rs"));
     }
 
     #[test]

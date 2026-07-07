@@ -18,5 +18,21 @@ describe("workspace provider normalization", () => {
       args: ["test"],
       cwd: undefined,
     });
+    expect(normalizeAgentStep({ kind: "runCommand", program: "npm", args: ["test"], cwd: "./" })).toEqual({
+      kind: "runCommand",
+      program: "npm",
+      args: ["test"],
+      cwd: undefined,
+    });
+  });
+
+  it("preserves non-dot relative paths through normalization", () => {
+    expect(normalizeAgentStep({ kind: "writeFile", path: "./src/foo.ts", content: "x", create: true, overwrite: true })).toEqual({
+      kind: "writeFile",
+      path: "./src/foo.ts",
+      content: "x",
+      create: true,
+      overwrite: true,
+    });
   });
 });
