@@ -13,6 +13,11 @@ function withSelectedWorkspace<T extends { workspaceDir?: string }>(request: T):
   return { ...request, workspaceDir: request.workspaceDir ?? getSelectedWorkspaceDir() };
 }
 
+function normalizeWorkspacePath(path: string): string {
+  const trimmed = path.trim();
+  return trimmed === "." || trimmed === "./" ? "" : trimmed;
+}
+
 export interface PolicyDecision {
   accessMode: string;
   commandClass: string;
@@ -139,6 +144,28 @@ export interface AgentRunResult {
   rollbackPlan: string[];
 }
 
+export function normalizeAgentStep(step: AgentStepRequest): AgentStepRequest {
+  switch (step.kind) {
+    case "listDir":
+      return { ...step, path: normalizeWorkspacePath(step.path) };
+    case "runCommand":
+      return { ...step, cwd: step.cwd ? normalizeWorkspacePath(step.cwd) || undefined : undefined };
+    case "readFile":
+    case "writeFile":
+    case "editFile":
+      return { ...step, path: normalizeWorkspacePath(step.path) };
+    default:
+      return step;
+  }
+}
+
+function withExplicitComposerApproval<T extends { approved?: boolean }>(request: T): T {
+  // Direct slash-command helpers are only reached after the human submits the
+  // composer command. Agent tool loops still go through runAgentTask and must
+  // pass their own approval decision explicitly.
+  return { ...request, approved: request.approved ?? true };
+}
+
 function ensureRuntime(feature: string): void {
   if (!isTauriRuntime()) {
     throw new Error(`${feature} is available inside the Zeus desktop runtime.`);
@@ -147,17 +174,17 @@ function ensureRuntime(feature: string): void {
 
 export async function runShellCommand(request: ShellCommandRequest): Promise<ShellCommandResult> {
   ensureRuntime("Shell execution");
-  return invoke<ShellCommandResult>("run_shell_command", { request: withSelectedWorkspace(request) });
+  return invoke<ShellCommandResult>("run_shell_command", { request: withSelectedWorkspace(withExplicitComposerApproval(request)) });
 }
 
 export async function readWorkspaceFile(path: string, maxBytes?: number, workspaceDir?: string): Promise<ReadWorkspaceFileResult> {
   ensureRuntime("Workspace file reads");
-  return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: withSelectedWorkspace({ path, maxBytes, workspaceDir }) });
+  return invoke<ReadWorkspaceFileResult>("read_workspace_file", { request: withSelectedWorkspace({ path: normalizeWorkspacePath(path), maxBytes, workspaceDir }) });
 }
 
 export async function listWorkspaceDir(path: string, maxEntries?: number, workspaceDir?: string): Promise<ListWorkspaceDirResult> {
   ensureRuntime("Workspace directory listing");
-  return invoke<ListWorkspaceDirResult>("list_workspace_dir", { request: withSelectedWorkspace({ path, maxEntries, workspaceDir }) });
+  return invoke<ListWorkspaceDirResult>("list_workspace_dir", { request: withSelectedWorkspace({ path: normalizeWorkspacePath(path), maxEntries, workspaceDir }) });
 }
 
 export async function loadProjectConfig(workspaceDir?: string): Promise<ProjectConfigSnapshot> {
@@ -167,12 +194,21 @@ export async function loadProjectConfig(workspaceDir?: string): Promise<ProjectC
 
 export async function runGitOperation(args: string[], workspaceDir?: string, timeoutMs?: number): Promise<GitOperationResult> {
   ensureRuntime("Git operations");
-  return invoke<GitOperationResult>("run_git_operation", { request: withSelectedWorkspace({ args, workspaceDir, timeoutMs }) });
+  return invoke<GitOperationResult>("run_git_operation", { request: withSelectedWorkspace({ args, workspaceDir, timeoutMs, approved: true }) });
 }
 
 export async function runProjectTest(args: string[] = [], workspaceDir?: string, timeoutMs?: number): Promise<TestRunResult> {
   ensureRuntime("Test execution");
   return invoke<TestRunResult>("run_project_test", { request: withSelectedWorkspace({ args, workspaceDir, timeoutMs }) });
+}
+
+export async function runBrowserSmoke(visible = false, workspaceDir?: string, timeoutMs = 120_000): Promise<ShellCommandResult> {
+  return runShellCommand({
+    program: "npm",
+    args: ["run", visible ? "browser:smoke:visible" : "browser:smoke"],
+    workspaceDir,
+    timeoutMs,
+  });
 }
 
 export async function writeWorkspaceFile(args: {
@@ -185,7 +221,7 @@ export async function writeWorkspaceFile(args: {
   approved?: boolean;
 }): Promise<WriteWorkspaceFileResult> {
   ensureRuntime("Workspace file writes");
-  return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: withSelectedWorkspace(args) });
+  return invoke<WriteWorkspaceFileResult>("write_workspace_file", { request: withSelectedWorkspace(withExplicitComposerApproval({ ...args, path: normalizeWorkspacePath(args.path) })) });
 }
 
 export async function applyWorkspaceEdit(args: {
@@ -197,12 +233,12 @@ export async function applyWorkspaceEdit(args: {
   approved?: boolean;
 }): Promise<ApplyWorkspaceEditResult> {
   ensureRuntime("Workspace file edits");
-  return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace(args) });
+  return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace(withExplicitComposerApproval({ ...args, path: normalizeWorkspacePath(args.path) })) });
 }
 
 export async function runAgentTask(request: AgentRunRequest): Promise<AgentRunResult> {
   ensureRuntime("Agent task execution");
-  return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace(request) });
+  return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace({ ...request, steps: request.steps.map(normalizeAgentStep) }) });
 }
 
 export function parseShellWords(input: string): string[] {

@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "browser:smoke": "node scripts/browser-smoke.mjs",
+    "browser:smoke:visible": "ZEUS_BROWSER_VISIBLE=1 node scripts/browser-smoke.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
@@ -29,6 +31,7 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^25.0.1",
+    "playwright": "^1.57.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
     "vitest": "^4.1.9"
