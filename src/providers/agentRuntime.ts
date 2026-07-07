@@ -99,8 +99,18 @@ export interface AgentRuntimeStatus {
   browserSessions: number;
 }
 
+export interface RuntimeWiringHealth {
+  ok: boolean;
+  registeredCommands: string[];
+}
+
 function requireRuntime(feature: string): void {
   if (!isTauriRuntime()) throw new Error(`${feature} is available inside the Zeus desktop runtime.`);
+}
+
+export async function agentRuntimeHealth(): Promise<RuntimeWiringHealth> {
+  requireRuntime("Agent runtime health");
+  return invoke<RuntimeWiringHealth>("agent_runtime_health");
 }
 
 export async function agentRuntimeStatus(): Promise<AgentRuntimeStatus> {
@@ -118,6 +128,18 @@ export async function defineRuntimePlan(args: { sessionId: string; objective: st
   return invoke<RuntimePlan>("agent_runtime_define_plan", { request: args });
 }
 
+export async function createPendingApproval(args: {
+  sessionId: string;
+  objective: string;
+  actionLabels: string[];
+  affectedFiles: string[];
+  riskClass: RiskClass;
+  diffPreview?: string | null;
+}): Promise<PendingApproval> {
+  requireRuntime("Approval queue");
+  return invoke<PendingApproval>("agent_runtime_create_approval", { request: args });
+}
+
 export async function listPendingApprovals(sessionId?: string): Promise<PendingApproval[]> {
   requireRuntime("Approval queue");
   return invoke<PendingApproval[]>("agent_runtime_list_approvals", { sessionId });
@@ -131,6 +153,11 @@ export async function resolveApproval(id: string, status: ApprovalStatus, note?:
 export async function browserTool(request: BrowserToolRequest): Promise<BrowserToolResult> {
   requireRuntime("Semantic browser tool");
   return invoke<BrowserToolResult>("agent_runtime_browser_tool", { request });
+}
+
+export async function upsertProjectMemory(memory: ProjectMemory): Promise<ProjectMemory> {
+  requireRuntime("Project memory persistence");
+  return invoke<ProjectMemory>("agent_runtime_upsert_memory", { memory });
 }
 
 export async function retrieveProjectMemories(projectId: string, query: string, limit = 5): Promise<MemoryHit[]> {
