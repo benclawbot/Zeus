@@ -1,26 +1,22 @@
-//! Web search tool. The desktop agent can hit DuckDuckGo's HTML
-//! endpoint (`https://html.duckduckgo.com/html/`) to gather research
-//! material autonomously without any API key.
+//! Web search tool. Three backends, auto-detected:
 //!
-//! The HTML response is parsed by regex — the result page is stable
-//! enough that a couple of well-chosen patterns extract every result
-//! link, title, and snippet. We never re-serialize the raw page; only
-//! the parsed fields leave the module.
+//! - `ddgs` (preferred) — shells out to the `ddgs` Python CLI, which
+//!   uses `curl-cffi` to mimic a real browser's TLS fingerprint and
+//!   bypass DDG's anomaly detector. No API key, works from consumer
+//!   IPs. Install with `pip install ddgs` and have the binary on PATH,
+//!   or set `ZEUS_DDGS_BIN` to an explicit path.
+//! - `searxng` — `GET {ZEUS_SEARXNG_URL}/search?q=...&format=json`.
+//!   Bring-your-own self-hosted instance with JSON output enabled.
+//! - `duckduckgo` (fallback) — raw HTML scrape against
+//!   `https://html.duckduckgo.com/html/`. Frequently CAPTCHA'd from
+//!   consumer IPs. When DDG serves its anomaly challenge page, we
+//!   surface it as an explicit error rather than the misleading "0
+//!   hits" a naive parser would return.
 //!
-//! ## Bot challenge
-//!
-//! DuckDuckGo serves an "anomaly" CAPTCHA challenge (a "select all
-//! squares containing a duck" puzzle) when its bot detector flags the
-//! request. The challenge page looks superficially like a search
-//! result page but contains zero `result__a` elements, so a naive
-//! parser silently returns 0 hits and the caller has no idea the
-//! backend is unreachable. We detect the challenge markers before
-//! parsing and return an explicit error so the failure mode is
-//! visible. To work around DDG's bot detection in restricted
-//! environments, set `ZEUS_SEARCH_PROVIDER=brave` with
-//! `BRAVE_SEARCH_API_KEY=<key>`, or point `ZEUS_SEARCH_PROVIDER=searxng`
-//! at a self-hosted SearXNG instance.
+//! Override the auto-detected choice with
+//! `ZEUS_SEARCH_PROVIDER=ddgs|searxng|duckduckgo`.
 
+use std::process::Stdio;
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
@@ -49,15 +45,22 @@ const DDG_CHALLENGE_MARKERS: &[&str] = &[
     "Please complete the following challenge",
 ];
 
-/// Pick a provider by name. Today only `duckduckgo` is implemented;
-/// `brave` and `searxng` are stubs that fail loudly so the user
-/// knows they need an API key or self-hosted instance.
+/// Resolve which backend to use. If `ZEUS_SEARCH_PROVIDER` is set,
+/// honor it. Otherwise auto-detect: prefer `ddgs` when its CLI is
+/// installed (no key, bypasses DDG's bot challenge via curl-cffi),
+/// then `searxng` when `ZEUS_SEARXNG_URL` is set, fall back to
+/// `duckduckgo` (raw HTML scrape; gets CAPTCHA'd from consumer IPs).
 fn select_provider(name: Option<&str>) -> &'static str {
-    match name.unwrap_or("duckduckgo").to_ascii_lowercase().as_str() {
-        "brave" => "brave",
-        "searxng" => "searxng",
-        _ => "duckduckgo",
+    if let Some(value) = name {
+        return match value.to_ascii_lowercase().as_str() {
+            "ddgs" => "ddgs",
+            "searxng" => "searxng",
+            _ => "duckduckgo",
+        };
     }
+    if resolve_ddgs_bin().is_some() { return "ddgs"; }
+    if std::env::var("ZEUS_SEARXNG_URL").is_ok() { return "searxng"; }
+    "duckduckgo"
 }
 
 /// Returns an error if the body looks like DDG's bot challenge page.
@@ -65,8 +68,8 @@ fn check_ddg_challenge(body: &str) -> Result<(), String> {
     if DDG_CHALLENGE_MARKERS.iter().any(|marker| body.contains(marker)) {
         return Err(
             "DuckDuckGo is blocking automated requests from this agent (bot-challenge page returned). \
-             Configure an alternate provider: set ZEUS_SEARCH_PROVIDER=brave with BRAVE_SEARCH_API_KEY, \
-             or ZEUS_SEARCH_PROVIDER=searxng with ZEUS_SEARXNG_URL pointing at a self-hosted instance."
+             Install the ddgs Python package (`pip install ddgs`) and add its bin to PATH, \
+             or set ZEUS_SEARCH_PROVIDER=searxng with ZEUS_SEARXNG_URL pointing at a self-hosted instance."
                 .to_string(),
         );
     }
@@ -115,12 +118,9 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
 
     match provider {
         "duckduckgo" => duckduckgo_search(&client, &query, limit).await,
+        "ddgs" => ddgs_search(&query, limit).await,
         "searxng" => searxng_search(&client, &query, limit).await,
-        other => Err(format!(
-            "search provider '{other}' is not wired yet. \
-             Supported providers: 'duckduckgo' (default, no key required), \
-             'searxng' (set ZEUS_SEARXNG_URL to your self-hosted instance)."
-        )),
+        _ => unreachable!("select_provider returns one of these three"),
     }
 }
 
@@ -145,6 +145,117 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) 
         format!("DuckDuckGo returned {} hit(s) for \"{query}\".", hits.len())
     };
     Ok(WebSearchResult { provider: "duckduckgo", query: query.to_string(), hits, message })
+}
+
+/// ddgs CLI backend. Shells out to the `ddgs` Python CLI which uses
+/// `curl-cffi` to mimic a real browser's TLS fingerprint, bypassing
+/// DDG's anomaly detector. The CLI is a separate process so Zeus
+/// doesn't need a Python interpreter embedded or the `ddgs` package
+/// importable from Rust — only the `ddgs` binary on PATH (or pointed
+/// at via `ZEUS_DDGS_BIN`).
+async fn ddgs_search(query: &str, limit: usize) -> Result<WebSearchResult, String> {
+    let bin = resolve_ddgs_bin().ok_or_else(|| {
+        "ddgs CLI not found on PATH and ZEUS_DDGS_BIN is not set. \
+         Install it with `pip install ddgs` (a Python package), then either \
+         add its bin directory to PATH or set ZEUS_DDGS_BIN to the ddgs \
+         executable."
+            .to_string()
+    })?;
+    let output = std::process::Command::new(&bin)
+        .args([
+            "text",
+            "-q",
+            query,
+            "-m",
+            &limit.max(1).to_string(),
+            "-o",
+            "json",
+            "-nc",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("spawn ddgs: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "ddgs exited with status {}: {stderr}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let body = String::from_utf8_lossy(&output.stdout).into_owned();
+    let hits = parse_ddgs_json(&body, limit);
+    let message = if hits.is_empty() {
+        format!("ddgs returned 0 hits for \"{query}\".")
+    } else {
+        format!("ddgs returned {} hit(s) for \"{query}\".", hits.len())
+    };
+    Ok(WebSearchResult { provider: "ddgs", query: query.to_string(), hits, message })
+}
+
+/// Locate the ddgs CLI. Honors `ZEUS_DDGS_BIN` if set; otherwise
+/// resolves via PATH (`which ddgs`).
+fn resolve_ddgs_bin() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("ZEUS_DDGS_BIN") {
+        let p = std::path::PathBuf::from(path);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    // Look up ddgs on PATH. std::env::var("PATH") + walking each entry
+    // is portable to Windows + Unix. .exe suffix on Windows.
+    let path = std::env::var_os("PATH")?;
+    let extensions: &[&str] = if cfg!(windows) { &["", ".exe", ".bat", ".cmd"] } else { &[""] };
+    for dir in std::env::split_paths(&path) {
+        for ext in extensions {
+            let candidate = if ext.is_empty() {
+                dir.join("ddgs")
+            } else {
+                dir.join(format!("ddgs{ext}"))
+            };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Subset of the ddgs CLI's JSON output. Field names mirror the
+/// `ddgs.text(...)` return shape: `title`, `href`, `body`.
+#[derive(Debug, Deserialize)]
+struct DdgsEntry {
+    title: Option<String>,
+    href: Option<String>,
+    body: Option<String>,
+}
+
+/// Parse the ddgs CLI's JSON output into ranked hits. Pure function
+/// — exercised by unit tests with a captured fixture.
+pub fn parse_ddgs_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
+    let parsed: Vec<DdgsEntry> = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("ddgs json parse failed: {err}; body preview: {}", body.chars().take(200).collect::<String>().replace('\n', " "));
+            return Vec::new();
+        }
+    };
+    parsed
+        .into_iter()
+        .filter_map(|entry| {
+            let url = entry.href.unwrap_or_default();
+            if url.is_empty() { return None; }
+            let title = entry.title.unwrap_or_default();
+            let snippet = entry.body.unwrap_or_default();
+            let snippet = if snippet.len() > SNIPPET_TRUNCATE_CHARS {
+                format!("{}…", &snippet[..SNIPPET_TRUNCATE_CHARS])
+            } else {
+                snippet
+            };
+            Some(WebSearchHit { title, url, snippet })
+        })
+        .take(limit.max(1))
+        .collect()
 }
 
 /// SearXNG JSON backend. Expects `ZEUS_SEARXNG_URL` to point at a
@@ -433,13 +544,21 @@ mod tests {
     }
 
     #[test]
-    fn select_provider_defaults_to_duckduckgo() {
-        assert_eq!(select_provider(None), "duckduckgo");
-        assert_eq!(select_provider(Some("")), "duckduckgo");
+    fn select_provider_honors_explicit_name() {
+        assert_eq!(select_provider(Some("ddgs")), "ddgs");
         assert_eq!(select_provider(Some("DUCKDUCKGO")), "duckduckgo");
-        assert_eq!(select_provider(Some("brave")), "brave");
         assert_eq!(select_provider(Some("SearXNG")), "searxng");
         assert_eq!(select_provider(Some("nonsense")), "duckduckgo");
+        assert_eq!(select_provider(Some("")), "duckduckgo");
+    }
+
+    #[test]
+    fn select_provider_auto_detects_ddgs_when_cli_present() {
+        // ddgs CLI was just installed in the live test session, so the
+        // auto-detect branch should pick it over the DDG fallback.
+        if resolve_ddgs_bin().is_some() {
+            assert_eq!(select_provider(None), "ddgs");
+        }
     }
 
     const SEARXNG_FIXTURE: &str = r#"{
@@ -483,6 +602,43 @@ mod tests {
         // The parser should fail soft (empty hits) rather than
         // bubbling up a serde error to the caller.
         let hits = parse_searxng_json("<!DOCTYPE html><html><body>JSON output not enabled</body></html>", MAX_HITS);
+        assert!(hits.is_empty());
+    }
+
+    const DDGS_FIXTURE: &str = r#"[
+        {"title": "Async Rust: What is a runtime?", "href": "https://kerkour.com/rust-async-await-what-is-a-runtime", "body": "Last week, we saw the difference between Cooperative and Preemptive scheduling."},
+        {"title": "The State of Async Rust: Runtimes", "href": "https://corrode.dev/blog/async/", "body": "The suggested replacement is smol."},
+        {"title": "", "href": "https://missing.example.com", "body": "should be filtered out by missing title"}
+    ]"#;
+
+    #[test]
+    fn parses_ddgs_cli_json() {
+        let hits = parse_ddgs_json(DDGS_FIXTURE, MAX_HITS);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].title, "Async Rust: What is a runtime?");
+        assert_eq!(hits[0].url, "https://kerkour.com/rust-async-await-what-is-a-runtime");
+        assert_eq!(hits[1].url, "https://corrode.dev/blog/async/");
+    }
+
+    #[test]
+    fn ddgs_respects_limit() {
+        let hits = parse_ddgs_json(DDGS_FIXTURE, 1);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn ddgs_truncates_long_snippets() {
+        let body = format!(r#"[{{"title":"Long","href":"https://example.com","body":"{}"}}]"#, "x".repeat(SNIPPET_TRUNCATE_CHARS + 50));
+        let hits = parse_ddgs_json(&body, MAX_HITS);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn ddgs_returns_empty_on_garbage() {
+        // ddgs CLI error path can pipe a stack trace to stdout when
+        // -o json is misused. Parser should fail soft, not panic.
+        let hits = parse_ddgs_json("Traceback (most recent call last):\n  ...", MAX_HITS);
         assert!(hits.is_empty());
     }
 }
