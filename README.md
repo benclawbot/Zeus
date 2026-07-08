@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/build-passing-2ea44f?style=flat-square" alt="build: passing" />
-  <img src="https://img.shields.io/badge/tests-180%2B%20passing-2ea44f?style=flat-square" alt="tests: passing" />
+  <img src="https://img.shields.io/badge/tests-200%2B%20passing-2ea44f?style=flat-square" alt="tests: passing" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT" />
   <img src="https://img.shields.io/badge/release-v1.0.0-0e1f3a?style=flat-square" alt="release: v1.0.0" />
   <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python: 3.11+" />
