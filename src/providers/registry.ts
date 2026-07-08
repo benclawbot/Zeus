@@ -412,6 +412,12 @@ function formatStepLog(log: AgentRunStepLog): string {
     }).join("\n");
     return `${head}\n${formatted}`;
   }
+  if (result.kind === "failed" && typeof result.message === "string" && /blocking automated|search provider|webSearch|duckduckgo/i.test(result.message)) {
+    // Network-tier failure (bot challenge, dead backend, alternate
+    // provider not wired). Surface it loudly so the model doesn't
+    // // silently report 0 hits and move on.
+    return `Step ${log.index + 1} (${log.label}) failed: ${result.message}\n  Suggestion: ${result.message.includes("blocking automated") ? "DuckDuckGo's anomaly detector is blocking this IP. Configure BRAVE_SEARCH_API_KEY + ZEUS_SEARCH_PROVIDER=brave, or point ZEUS_SEARXNG_URL at a self-hosted SearXNG instance, then retry." : "Switch provider or retry later."}`;
+  }
   if (result.kind === "failed" || typeof result.code === "string") {
     const detailParts: string[] = [];
     if (typeof result.occurrences === "number") detailParts.push(`${result.occurrences} occurrences`);

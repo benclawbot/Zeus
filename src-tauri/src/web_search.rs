@@ -6,6 +6,20 @@
 //! enough that a couple of well-chosen patterns extract every result
 //! link, title, and snippet. We never re-serialize the raw page; only
 //! the parsed fields leave the module.
+//!
+//! ## Bot challenge
+//!
+//! DuckDuckGo serves an "anomaly" CAPTCHA challenge (a "select all
+//! squares containing a duck" puzzle) when its bot detector flags the
+//! request. The challenge page looks superficially like a search
+//! result page but contains zero `result__a` elements, so a naive
+//! parser silently returns 0 hits and the caller has no idea the
+//! backend is unreachable. We detect the challenge markers before
+//! parsing and return an explicit error so the failure mode is
+//! visible. To work around DDG's bot detection in restricted
+//! environments, set `ZEUS_SEARCH_PROVIDER=brave` with
+//! `BRAVE_SEARCH_API_KEY=<key>`, or point `ZEUS_SEARCH_PROVIDER=searxng`
+//! at a self-hosted SearXNG instance.
 
 use std::time::Duration;
 
@@ -24,6 +38,40 @@ const MAX_HITS: usize = 20;
 /// carries both the visible snippet and a nullable fallback for
 /// testing.
 const SNIPPET_TRUNCATE_CHARS: usize = 280;
+
+/// Markers that distinguish a real DDG search result page from the
+/// bot-challenge page they serve to suspected scrapers. Any one of
+/// these present means the request was intercepted.
+const DDG_CHALLENGE_MARKERS: &[&str] = &[
+    "anomaly-modal",
+    "challenge-form",
+    "Unfortunately, bots use DuckDuckGo too",
+    "Please complete the following challenge",
+];
+
+/// Pick a provider by name. Today only `duckduckgo` is implemented;
+/// `brave` and `searxng` are stubs that fail loudly so the user
+/// knows they need an API key or self-hosted instance.
+fn select_provider(name: Option<&str>) -> &'static str {
+    match name.unwrap_or("duckduckgo").to_ascii_lowercase().as_str() {
+        "brave" => "brave",
+        "searxng" => "searxng",
+        _ => "duckduckgo",
+    }
+}
+
+/// Returns an error if the body looks like DDG's bot challenge page.
+fn check_ddg_challenge(body: &str) -> Result<(), String> {
+    if DDG_CHALLENGE_MARKERS.iter().any(|marker| body.contains(marker)) {
+        return Err(
+            "DuckDuckGo is blocking automated requests from this agent (bot-challenge page returned). \
+             Configure an alternate provider: set ZEUS_SEARCH_PROVIDER=brave with BRAVE_SEARCH_API_KEY, \
+             or ZEUS_SEARCH_PROVIDER=searxng with ZEUS_SEARXNG_URL pointing at a self-hosted instance."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +105,14 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
     validate_query(&request.query)?;
     let query = request.query.trim().to_string();
     let limit = request.max_results.unwrap_or(MAX_HITS).clamp(1, MAX_HITS);
+    let provider = select_provider(std::env::var("ZEUS_SEARCH_PROVIDER").ok().as_deref());
+    if provider != "duckduckgo" {
+        return Err(format!(
+            "search provider '{provider}' is not wired yet. \
+             Today only 'duckduckgo' is implemented. \
+             Set ZEUS_SEARCH_PROVIDER=duckduckgo (or unset it) for the default backend."
+        ));
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -76,6 +132,7 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
     if !status.is_success() {
         return Err(format!("duckduckgo responded with status {status}"));
     }
+    check_ddg_challenge(&body)?;
     let hits = parse_ddg_html(&body, limit);
     let message = if hits.is_empty() {
         format!("DuckDuckGo returned 0 hits for \"{query}\".")
@@ -262,5 +319,38 @@ mod tests {
             "https://example.com/foo"
         );
         assert_eq!(normalize_url("https://example.org/bar"), "https://example.org/bar");
+    }
+
+    #[test]
+    fn detects_ddg_bot_challenge_page() {
+        // Minimal challenge page (captured form DDG's anomaly
+        // detector on this IP — the real page is 14KB of JS, but the
+        // marker text is the same).
+        let challenge_body = r#"<html><body>
+            <form id="challenge-form" action="//duckduckgo.com/anomaly.js"></form>
+            <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+            <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+        </body></html>"#;
+        let result = check_ddg_challenge(challenge_body);
+        assert!(result.is_err(), "expected challenge detection to fire");
+        let message = result.unwrap_err();
+        assert!(message.contains("blocking automated requests"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn passes_through_normal_results_page() {
+        // The fixture HTML is a synthetic results page with zero
+        // challenge markers — challenge detection should NOT fire.
+        assert!(check_ddg_challenge(FIXTURE).is_ok());
+    }
+
+    #[test]
+    fn select_provider_defaults_to_duckduckgo() {
+        assert_eq!(select_provider(None), "duckduckgo");
+        assert_eq!(select_provider(Some("")), "duckduckgo");
+        assert_eq!(select_provider(Some("DUCKDUCKGO")), "duckduckgo");
+        assert_eq!(select_provider(Some("brave")), "brave");
+        assert_eq!(select_provider(Some("SearXNG")), "searxng");
+        assert_eq!(select_provider(Some("nonsense")), "duckduckgo");
     }
 }
