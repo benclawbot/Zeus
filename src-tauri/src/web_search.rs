@@ -106,13 +106,6 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
     let query = request.query.trim().to_string();
     let limit = request.max_results.unwrap_or(MAX_HITS).clamp(1, MAX_HITS);
     let provider = select_provider(std::env::var("ZEUS_SEARCH_PROVIDER").ok().as_deref());
-    if provider != "duckduckgo" {
-        return Err(format!(
-            "search provider '{provider}' is not wired yet. \
-             Today only 'duckduckgo' is implemented. \
-             Set ZEUS_SEARCH_PROVIDER=duckduckgo (or unset it) for the default backend."
-        ));
-    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -120,7 +113,19 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
-    let form = [("q", query.as_str()), ("kl", "us-en")];
+    match provider {
+        "duckduckgo" => duckduckgo_search(&client, &query, limit).await,
+        "searxng" => searxng_search(&client, &query, limit).await,
+        other => Err(format!(
+            "search provider '{other}' is not wired yet. \
+             Supported providers: 'duckduckgo' (default, no key required), \
+             'searxng' (set ZEUS_SEARXNG_URL to your self-hosted instance)."
+        )),
+    }
+}
+
+async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) -> Result<WebSearchResult, String> {
+    let form = [("q", query), ("kl", "us-en")];
     let response = client
         .post(DEFAULT_ENDPOINT)
         .form(&form)
@@ -139,7 +144,90 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
     } else {
         format!("DuckDuckGo returned {} hit(s) for \"{query}\".", hits.len())
     };
-    Ok(WebSearchResult { provider: "duckduckgo", query, hits, message })
+    Ok(WebSearchResult { provider: "duckduckgo", query: query.to_string(), hits, message })
+}
+
+/// SearXNG JSON backend. Expects `ZEUS_SEARXNG_URL` to point at a
+/// running SearXNG instance with JSON output enabled (`server:
+/// {"json": true}` in settings.yml). Uses the documented `/search`
+/// endpoint with `format=json`.
+async fn searxng_search(client: &reqwest::Client, query: &str, limit: usize) -> Result<WebSearchResult, String> {
+    let base = std::env::var("ZEUS_SEARXNG_URL")
+        .map_err(|_| "ZEUS_SEARCH_PROVIDER=searxng requires ZEUS_SEARXNG_URL (e.g. https://searx.example.com).".to_string())?;
+    let endpoint = format!("{}/search", base.trim_end_matches('/'));
+    let response = client
+        .get(&endpoint)
+        .query(&[("q", query), ("format", "json"), ("categories", "general"), ("language", "en-US")])
+        .send()
+        .await
+        .map_err(|e| format!("searxng request failed: {e}"))?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| format!("read searxng response: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("searxng responded with status {status}"));
+    }
+    let hits = parse_searxng_json(&body, limit);
+    let message = if hits.is_empty() {
+        format!("SearXNG returned 0 hits for \"{query}\".")
+    } else {
+        format!("SearXNG returned {} hit(s) for \"{query}\".", hits.len())
+    };
+    Ok(WebSearchResult { provider: "searxng", query: query.to_string(), hits, message })
+}
+
+/// Subset of SearXNG's JSON result shape. We only deserialize the
+/// fields we surface; engines/parsed_url/etc. are ignored.
+#[derive(Debug, Deserialize)]
+struct SearxngResultEntry {
+    title: Option<String>,
+    url: Option<String>,
+    content: Option<String>,
+}
+
+/// Subset of SearXNG's response envelope.
+#[derive(Debug, Deserialize)]
+struct SearxngResponse {
+    #[serde(default)]
+    results: Vec<SearxngResultEntry>,
+}
+
+/// Parse a SearXNG JSON response body into ranked hits. Pure function
+/// — exercised by unit tests below with a captured fixture.
+pub fn parse_searxng_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
+    let parsed: SearxngResponse = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(err) => {
+            // SearXNG returns HTML error pages when JSON output is
+            // disabled in settings.yml. Surface a clean empty result
+            // rather than a JSON parse error so the caller can retry
+            // without seeing an opaque serde dump.
+            log_parse_failure(body, &err);
+            return Vec::new();
+        }
+    };
+    parsed
+        .results
+        .into_iter()
+        .filter_map(|entry| {
+            let url = entry.url.unwrap_or_default();
+            if url.is_empty() { return None; }
+            let title = entry.title.unwrap_or_default();
+            let snippet = entry.content.unwrap_or_default();
+            let snippet = if snippet.len() > SNIPPET_TRUNCATE_CHARS {
+                format!("{}…", &snippet[..SNIPPET_TRUNCATE_CHARS])
+            } else {
+                snippet
+            };
+            Some(WebSearchHit { title, url, snippet })
+        })
+        .take(limit.max(1))
+        .collect()
+}
+
+fn log_parse_failure(body: &str, err: &serde_json::Error) {
+    let preview: String = body.chars().take(200).collect();
+    let body_snippet = preview.replace('\n', " ");
+    eprintln!("searxng json parse failed: {err}; body preview: {body_snippet}");
 }
 
 fn user_agent() -> String {
@@ -352,5 +440,49 @@ mod tests {
         assert_eq!(select_provider(Some("brave")), "brave");
         assert_eq!(select_provider(Some("SearXNG")), "searxng");
         assert_eq!(select_provider(Some("nonsense")), "duckduckgo");
+    }
+
+    const SEARXNG_FIXTURE: &str = r#"{
+        "query": "rust async runtime",
+        "results": [
+            {"title": "Tokio", "url": "https://tokio.rs", "content": "An async runtime for Rust.", "engine": "bing"},
+            {"title": "async-std", "url": "https://async.rs", "content": "Async runtime for Rust.", "engine": "duckduckgo"},
+            {"title": "", "url": "https://missing.example.com", "content": "should be filtered out by missing title", "engine": "bing"}
+        ]
+    }"#;
+
+    #[test]
+    fn parses_searxng_json_results() {
+        let hits = parse_searxng_json(SEARXNG_FIXTURE, MAX_HITS);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].title, "Tokio");
+        assert_eq!(hits[0].url, "https://tokio.rs");
+        assert_eq!(hits[0].snippet, "An async runtime for Rust.");
+        assert_eq!(hits[1].url, "https://async.rs");
+    }
+
+    #[test]
+    fn searxng_respects_limit() {
+        let hits = parse_searxng_json(SEARXNG_FIXTURE, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://tokio.rs");
+    }
+
+    #[test]
+    fn searxng_truncates_long_snippets() {
+        let body = format!(r#"{{"results":[{{"title":"Long","url":"https://example.com","content":"{}"}}]}}"#, "x".repeat(SNIPPET_TRUNCATE_CHARS + 50));
+        let hits = parse_searxng_json(&body, MAX_HITS);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.ends_with('…'));
+        assert!(hits[0].snippet.chars().count() <= SNIPPET_TRUNCATE_CHARS + 1);
+    }
+
+    #[test]
+    fn searxng_returns_empty_on_html_response() {
+        // SearXNG with JSON output disabled returns HTML error pages.
+        // The parser should fail soft (empty hits) rather than
+        // bubbling up a serde error to the caller.
+        let hits = parse_searxng_json("<!DOCTYPE html><html><body>JSON output not enabled</body></html>", MAX_HITS);
+        assert!(hits.is_empty());
     }
 }

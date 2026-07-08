@@ -66,7 +66,7 @@ One tool, eight actions: `status`, `open`, `snapshot`, `click`, `type`, `screens
 <td width="33%" valign="top">
 
 ### 🔭 Autonomous Web Search
-`webSearch` hits DuckDuckGo's HTML endpoint and returns ranked title + URL + snippet hits — no API key required. The model can emit `webSearch {"query":"..."}` from any chat turn to pull external context for research, doc lookups, or competitive analysis without leaving the composer.
+`webSearch` hits DuckDuckGo's HTML endpoint by default and returns ranked title + URL + snippet hits — no API key required. When DuckDuckGo's anomaly detector blocks this IP, switch to a self-hosted SearXNG instance via `ZEUS_SEARCH_PROVIDER=searxng` + `ZEUS_SEARXNG_URL=<base>`. The model can emit `webSearch {"query":"..."}` from any chat turn to pull external context for research, doc lookups, or competitive analysis without leaving the composer.
 
 </td>
 <td width="33%" valign="top">
