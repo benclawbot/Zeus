@@ -2266,3 +2266,42 @@ textarea:focus-visible {
   font-weight: 600;
   line-height: 1;
 }
+
+/* PlanProgressPanel — runtime-derived plan steps (replaces the side-loaded
+   zeusUiRuntimeFixes.ts patch). Pill background and detail row are scoped
+   to the inspector so they do not leak into chat bubbles or task rows. */
+
+.inspector .plan-objective {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.inspector .plan-empty {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.inspector .compact-row[data-status="failed"] .status-dot {
+  color: #fff;
+  background: var(--danger, #c0392b);
+  border-color: var(--danger, #c0392b);
+}
+
+.inspector .compact-row[data-status="todo"] .status-dot {
+  color: var(--muted);
+  background: #fff;
+}
+
+.inspector .compact-row strong {
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.inspector .compact-row-detail {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}

@@ -1,7 +1,6 @@
 import {
   Archive,
   Bot,
-  Check,
   ChevronDown,
   Clock3,
   FileText,
@@ -57,6 +56,7 @@ import {
   type ProjectConfigSnapshot,
 } from "./providers/workspace";
 import { ToolRunPanel, type ToolRunEntry } from "./components/ToolRunPanel";
+import { PlanProgressPanel } from "./components/PlanProgressPanel";
 import { MarkdownView } from "./components/MarkdownView";
 import { StatusBar } from "./components/StatusBar";
 import { WorkingFolderButton } from "./WorkingFolderButton";
@@ -101,16 +101,6 @@ interface ChatMessage {
     partial: boolean;
   };
 }
-
-const planItems = [
-  { label: "Initialize Tauri + React project", status: "Completed" },
-  { label: "Wire MiniMax M3 adapter", status: "Completed" },
-  { label: "Pluggable chat providers (OpenAI + Anthropic)", status: "Completed" },
-  { label: "Slash-command composer + skill registry", status: "Completed" },
-  { label: "Local memory model + SQLite persistence", status: "Completed" },
-  { label: "Harness approvals", status: "Completed" },
-  { label: "Package desktop builds", status: "In Progress" },
-];
 
 interface SessionRef {
   id: string;
@@ -552,9 +542,6 @@ export function App() {
       .catch(() => { if (cancelled) return; });
     return () => { cancelled = true; };
   }, [isTauri]);
-
-  const completed = planItems.filter((item) => item.status === "Completed").length;
-  const progress = Math.round((completed / planItems.length) * 100);
 
   const accessSummary = useMemo(() => {
     if (accessMode === "Full") return "Files, shell, internet, dependencies and configured APIs with guards enabled.";
@@ -1809,6 +1796,29 @@ useEffect(() => {
     }
   }
 
+  // Derive the inputs PlanProgressPanel needs from current chat + tool run state.
+  // The plan mirrors what the runtime driver would do, so the inspector panel
+  // stays in sync with the agent loop without a side-loaded DOM hijack.
+  const latestUserObjective = useMemo(() => {
+    for (let i = chat.length - 1; i >= 0; i -= 1) {
+      if (chat[i].role === "user" && chat[i].text.trim().length > 0) return chat[i].text;
+    }
+    return message.trim();
+  }, [chat, message]);
+  const lastAgentRun = useMemo(() => {
+    for (let i = chat.length - 1; i >= 0; i -= 1) {
+      const ap = chat[i].agentProgress;
+      if (ap) return { steps: ap.steps, partial: ap.partial };
+    }
+    return null;
+  }, [chat]);
+  const lastToolFailed = useMemo(() => {
+    if (lastAgentRun?.partial) return true;
+    if (history.length === 0) return false;
+    const first = history[0];
+    return /agent run failed|failed:|status:\s*failed/i.test(`${first.action} ${first.at}`);
+  }, [lastAgentRun, history]);
+
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Primary">
@@ -2352,25 +2362,11 @@ useEffect(() => {
       </section>
 
       <aside className="inspector" aria-label="Progress and memory">
-        <section className="panel">
-          <div className="panel-heading">
-            <h2>Plan Progress</h2>
-            <span>{completed} / {planItems.length} completed</span>
-          </div>
-          <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
-          <p className="progress-percent">{progress}%</p>
-          <div className="compact-list">
-            {planItems.map((item, index) => (
-              <div className="compact-row" key={item.label}>
-                <span className={item.status === "Completed" ? "status-dot done" : item.status === "In Progress" ? "status-dot live" : "status-dot"}>
-                  {item.status === "Completed" ? <Check size={12} /> : index + 1}
-                </span>
-                <span>{item.label}</span>
-                <em>{item.status}</em>
-              </div>
-            ))}
-          </div>
-        </section>
+        <PlanProgressPanel
+          latestUserObjective={latestUserObjective}
+          lastAgentRun={lastAgentRun}
+          lastToolFailed={lastToolFailed}
+        />
 
         <section className="panel memory-panel">
           <div className="panel-heading">
