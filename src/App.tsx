@@ -276,9 +276,6 @@ interface GoalState {
 const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
   { label: "Home", icon: Home },
   { label: "Sessions", icon: Archive },
-  { label: "Skills", icon: Wrench },
-  { label: "Memory", icon: MemoryStick },
-  { label: "Harness Evolution", icon: Sparkles },
   { label: "Settings", icon: Settings },
 ];
 
@@ -1892,16 +1889,6 @@ useEffect(() => {
             ))
           )}
         </section>
-        <section className="harness-card" aria-labelledby="harness-title">
-          <p className="section-label">Next session review</p>
-          <h2 id="harness-title">{proposal.title}</h2>
-          <p>{proposal.summary}</p>
-          <div className="proposal-actions">
-            <button type="button" onClick={applyProposal}>Apply</button>
-            <button type="button" onClick={discardProposal}>Discard</button>
-          </div>
-          <p className="proposal-status">Status: {proposal.status}</p>
-        </section>
         <div className="profile-row">
           <div className="avatar">B</div><span>benclawbot</span><ChevronDown size={14} />
         </div>
@@ -2043,7 +2030,7 @@ useEffect(() => {
                 </div>
               ) : null}
 
-              <textarea aria-label="Message Zeus" onChange={(event) => { setMessage(event.target.value); resizeComposer(); }} onKeyDown={handleComposerKeyDown} onPaste={handleComposerPaste} placeholder="Type / for skills and commands - Message Zeus..." ref={composerRef} rows={1} value={message} />
+              <textarea aria-label="Message Zeus" onChange={(event) => { setMessage(event.target.value); resizeComposer(); }} onKeyDown={handleComposerKeyDown} onPaste={handleComposerPaste} placeholder="Ask Zeus to inspect, edit, test, or explain this project..." ref={composerRef} rows={1} value={message} />
               <div className="composer-bottom">
                 <div className="composer-tools">
                   <input aria-label="Choose files" className="file-input" multiple onChange={(event) => handleFileSelection(event.target.files)} ref={fileInputRef} type="file" />
@@ -2089,7 +2076,7 @@ useEffect(() => {
                       ? (runState === "running" ? "Slash picker open - run in progress, Esc to close" : "Up Down navigate - Enter to pick")
                       : runState === "running"
                         ? "Generating... press the stop button to cancel"
-                        : "Enter to send / Shift+Enter newline"
+                        : "Enter sends · Shift+Enter adds a line"
                   }</span>
                   {runState === "running" ? (
                     <button aria-label="Stop run" className="stop-button" onClick={stopRun} type="button"><Square size={14} /></button>
@@ -2367,47 +2354,25 @@ useEffect(() => {
         )}
       </section>
 
-      <aside className="inspector" aria-label="Progress and memory">
+      <aside className="inspector" aria-label="Run details">
         <PlanProgressPanel
           latestUserObjective={latestUserObjective}
           lastAgentRun={lastAgentRun}
           lastToolFailed={lastToolFailed}
         />
 
-        <section className="panel memory-panel">
+        <section className="panel session-panel">
           <div className="panel-heading">
-            <h2>Memory Snapshot</h2>
-            <span>{activeSession ? `${chat.length} turn(s)` : "no session"}</span>
+            <h2>Session</h2>
+            <span>{runState === "running" ? "running" : `${chat.length} messages`}</span>
           </div>
-          <dl className="token-totals" aria-label="Token totals">
-            <div><dt>Tokens (in / out)</dt><dd>{tokenTotals.prompt.toLocaleString()} / {tokenTotals.completion.toLocaleString()}</dd></div>
-            <div><dt>Est. cost</dt><dd>${tokenTotals.costUsd.toFixed(4)}</dd></div>
-            {projectConfig ? <div><dt>Workspace</dt><dd><code>{projectConfig.path}</code></dd></div> : null}
-          </dl>
           <dl>
-            <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
-            <div><dt>Session</dt><dd>{activeSession ? `${activeSession.projectName} / ${activeSession.label}` : "none"}</dd></div>
-            <div><dt>Goal</dt><dd>{activeGoal?.objective ?? "none"}</dd></div>
-            <div><dt>Tech</dt><dd>Tauri, React, Rust, SQLite</dd></div>
-            <div><dt>Provider</dt><dd>{activeProviderLabel}{providerKeysStatus.minimax ? "" : activeProviderId === "minimax" ? " (key missing)" : ""}</dd></div>
-            <div><dt>Access</dt><dd>{accessMode} — {accessSummary}</dd></div>
-            <div><dt>Last action</dt><dd>{history[0] ? `${history[0].action} at ${new Date(history[0].at).toLocaleTimeString()}` : "none"}</dd></div>
+            <div><dt>Provider</dt><dd>{activeProviderLabel}{providerKeysStatus.minimax ? "" : activeProviderId === "minimax" ? " · key missing" : ""}</dd></div>
+            <div><dt>Access</dt><dd>{accessMode}</dd></div>
+            {projectConfig ? <div><dt>Folder</dt><dd><code>{projectConfig.path}</code></dd></div> : null}
+            <div><dt>Context</dt><dd>{livePromptTokens.toLocaleString()} tokens</dd></div>
           </dl>
-          <button type="button" onClick={() => setActiveView("Memory")}>View Memory</button>
-        </section>
-
-        <section className="panel history-panel">
-          <div className="panel-heading">
-            <h2>Change History</h2>
-            <Bot size={16} />
-          </div>
-          {history.length === 0 ? (
-            <p>No harness changes applied in this session.</p>
-          ) : (
-            history.map((entry) => (
-              <p key={`${entry.proposalId}-${entry.at}`}>{entry.action} / {new Date(entry.at).toLocaleTimeString()}</p>
-            ))
-          )}
+          <button type="button" onClick={() => setActiveView("Settings")}>Open settings</button>
         </section>
       </aside>
     </main>
