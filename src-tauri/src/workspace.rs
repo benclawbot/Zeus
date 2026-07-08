@@ -147,6 +147,10 @@ pub enum AgentStepRequest {
     LoadProjectConfig,
     GitOp { args: Vec<String>, timeout_ms: Option<u64> },
     RunTest { args: Vec<String>, timeout_ms: Option<u64> },
+    /// Autonomous web research. Hits DuckDuckGo's HTML endpoint and
+    /// returns ranked title + URL + snippet so the model can pull
+    /// external context without a browser session.
+    WebSearch { query: String, max_results: Option<usize> },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +189,7 @@ pub enum AgentStepResult {
     ProjectConfig(ProjectConfigResult),
     GitOp(GitOperationResult),
     RunTest(TestRunResult),
+    WebSearch(crate::web_search::WebSearchResult),
     Failed { message: String },
 }
 
@@ -414,6 +419,15 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                 let result = run_project_test(TestRunRequest { workspace_dir: request.workspace_dir.clone(), args, timeout_ms }, access_mode)
                     .map(AgentStepResult::RunTest)
                     .unwrap_or_else(|message| AgentStepResult::Failed { message });
+                (label, result)
+            }
+            AgentStepRequest::WebSearch { query, max_results } => {
+                let label = format!("web search \"{query}\"");
+                let search_request = crate::web_search::WebSearchRequest { query: query.clone(), max_results };
+                let result = match tauri::async_runtime::block_on(crate::web_search::web_search(search_request)) {
+                    Ok(value) => AgentStepResult::WebSearch(value),
+                    Err(message) => AgentStepResult::Failed { message },
+                };
                 (label, result)
             }
         };
@@ -1073,6 +1087,7 @@ fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
             AgentStepRequest::LoadProjectConfig => {}
             AgentStepRequest::GitOp { .. } => {}
             AgentStepRequest::RunTest { .. } => {}
+            AgentStepRequest::WebSearch { .. } => {}
         }
     }
     files.sort();

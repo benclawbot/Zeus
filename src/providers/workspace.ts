@@ -150,7 +150,8 @@ export type AgentStepRequest =
   | { kind: "listDir"; path: string; maxEntries?: number }
   | { kind: "loadProjectConfig" }
   | { kind: "gitOp"; args: string[]; timeoutMs?: number }
-  | { kind: "runTest"; args?: string[]; timeoutMs?: number };
+  | { kind: "runTest"; args?: string[]; timeoutMs?: number }
+  | { kind: "webSearch"; query: string; maxResults?: number };
 
 export interface AgentRunRequest {
   objective: string;

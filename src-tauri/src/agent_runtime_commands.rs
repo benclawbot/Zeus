@@ -141,6 +141,7 @@ pub fn agent_runtime_health() -> RuntimeWiringHealth {
             "agent_runtime_github_read_pr",
             "agent_runtime_github_ci_status",
             "agent_runtime_github_fix_ci",
+            "web_search",
         ],
     }
 }

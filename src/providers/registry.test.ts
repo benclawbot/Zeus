@@ -41,6 +41,17 @@ describe("registry tool parsing", () => {
     expect(steps[1]).toMatchObject({ kind: "readFile", path: "package.json" });
   });
 
+  it("parses a webSearch step with optional maxResults", () => {
+    const content = [
+      "```tool",
+      "webSearch {\"query\":\"duckduckgo html api\",\"maxResults\":5}",
+      "```",
+    ].join("\n");
+    const steps = parseToolSteps(content);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ kind: "webSearch", query: "duckduckgo html api", maxResults: 5 });
+  });
+
   it("skips malformed JSON lines without dropping valid siblings", () => {
     const content = [
       "```tool",
@@ -188,6 +199,25 @@ describe("observation formatting", () => {
       result: { kind: "readFile", bytesRead: 1234 },
     });
     expect(line).toBe("Step 2 (read package.json) ok.");
+  });
+
+  it("renders webSearch hits as a markdown list for the model", () => {
+    const line = formatStepLog({
+      index: 0,
+      label: "web search \"rust async runtime\"",
+      result: {
+        kind: "webSearch",
+        provider: "duckduckgo",
+        query: "rust async runtime",
+        hits: [
+          { title: "Tokio", url: "https://tokio.rs", snippet: "An async runtime for Rust." },
+          { title: "async-std", url: "https://async.rs", snippet: "" },
+        ],
+      },
+    });
+    expect(line).toContain("duckduckgo returned 2 hit(s) for \"rust async runtime\"");
+    expect(line).toContain("1. Tokio <https://tokio.rs> — An async runtime for Rust.");
+    expect(line).toContain("2. async-std <https://async.rs>");
   });
 
   it("renders a failed agent run with all per-step details", () => {

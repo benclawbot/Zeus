@@ -1547,6 +1547,12 @@ export function App() {
       const template = item.id === "write" ? "/write path :: content" : "/edit path :: find => replace";
       setMessage(template);
       requestAnimationFrame(() => composerRef.current?.focus());
+    } else if (item.id === "websearch") {
+      // Prefill with a fenced `tool` block the model can execute
+      // directly. The user types their query after the colon.
+      const template = "Run a web search and summarize the findings.\n\n```tool\nwebSearch {\"query\":\"\"}\n```";
+      setMessage(template);
+      requestAnimationFrame(() => composerRef.current?.focus());
     }
   }
 

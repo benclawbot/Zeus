@@ -74,8 +74,8 @@ const MAX_REPEATED_TOOL_BLOCKS = 3;
 const WORKSPACE_TOOL_PROMPT = [
   "# Zeus workspace tools",
   "The desktop runtime executes fenced `tool` blocks and returns a structured observation before your final reply.",
-  "Available tools: `listDir`, `readFile`, `search`, `editFile`, `writeFile`, `createArtifact`, `runCommand`, `gitOp`, `runTest`, `loadProjectConfig`.",
-  "Use `listDir` to inspect structure, `search` for grep/symbol lookup, `readFile` for contents, `editFile` for targeted patches, `writeFile`/`createArtifact` to materialize files (see below), and `runCommand`/`gitOp`/`runTest` for verification.",
+  "Available tools: `listDir`, `readFile`, `search`, `webSearch`, `editFile`, `writeFile`, `createArtifact`, `runCommand`, `gitOp`, `runTest`, `loadProjectConfig`.",
+  "Use `listDir` to inspect structure, `search` for grep/symbol lookup, `readFile` for contents, `webSearch` for autonomous research (DuckDuckGo, no API key needed — pass `query` and optional `maxResults`), `editFile` for targeted patches, `writeFile`/`createArtifact` to materialize files (see below), and `runCommand`/`gitOp`/`runTest` for verification.",
   "Each tool line is `<toolName> <json>`, for example: `search {\"query\":\"runAgentTask\",\"maxResults\":20}`.",
   "`createArtifact` is a special raw-body tool for standalone deliverables (HTML pages, READMEs, single-file scripts). Use it like this so you don't have to JSON-escape a large file body:",
   "```tool",
@@ -312,6 +312,9 @@ function parseToolStep(kind: string, parsed: Record<string, unknown>): ParsedToo
   if (kind === "runTest") {
     return { kind: "runTest", args: Array.isArray(parsed.args) ? stringList(parsed.args) : [], timeoutMs: numberField(parsed.timeoutMs) };
   }
+  if (kind === "webSearch" && typeof parsed.query === "string") {
+    return { kind: "webSearch", query: parsed.query, maxResults: numberField(parsed.maxResults) };
+  }
   return null;
 }
 
@@ -390,7 +393,25 @@ function formatStepLog(log: AgentRunStepLog): string {
     suggestion?: string;
     occurrences?: number;
     source?: string;
+    provider?: string;
+    query?: string;
+    hits?: Array<{ title?: string; url?: string; snippet?: string }>;
   };
+  if (result.kind === "webSearch") {
+    const provider = typeof result.provider === "string" ? result.provider : "web";
+    const query = typeof result.query === "string" ? result.query : "";
+    const hits = Array.isArray(result.hits) ? result.hits : [];
+    const head = `Step ${log.index + 1} (${log.label}) ok: ${provider} returned ${hits.length} hit(s) for "${query}".`;
+    if (hits.length === 0) return head;
+    const formatted = hits.slice(0, 10).map((hit, idx) => {
+      const title = typeof hit.title === "string" ? hit.title : "(untitled)";
+      const url = typeof hit.url === "string" ? hit.url : "";
+      const snippet = typeof hit.snippet === "string" ? hit.snippet : "";
+      const snippetLine = snippet ? ` — ${snippet}` : "";
+      return `  ${idx + 1}. ${title}${url ? ` <${url}>` : ""}${snippetLine}`;
+    }).join("\n");
+    return `${head}\n${formatted}`;
+  }
   if (result.kind === "failed" || typeof result.code === "string") {
     const detailParts: string[] = [];
     if (typeof result.occurrences === "number") detailParts.push(`${result.occurrences} occurrences`);

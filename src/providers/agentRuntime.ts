@@ -3,6 +3,24 @@ import { isTauriRuntime } from "./minimax";
 
 export type PlanStatus = "todo" | "inProgress" | "done" | "failed";
 export type RiskClass = "readOnly" | "localWrite" | "shell" | "network" | "dependency" | "browser" | "destructive";
+
+export interface WebSearchHit {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface WebSearchResult {
+  provider: "duckduckgo";
+  query: string;
+  hits: WebSearchHit[];
+  message: string;
+}
+
+export interface WebSearchRequest {
+  query: string;
+  maxResults?: number;
+}
 export type ApprovalStatus = "pending" | "approvedOnce" | "rejected" | "approvedForSession";
 
 export interface RuntimePlanStep {
@@ -180,4 +198,9 @@ export async function searchCode(args: { root: string; query: string; maxResults
 export function summarizeMemoryHits(hits: MemoryHit[]): string {
   if (hits.length === 0) return "No project memories were injected.";
   return hits.map((hit) => `- ${hit.memory.source}: ${hit.reason}; ${hit.memory.content}`).join("\n");
+}
+
+export async function webSearch(request: WebSearchRequest): Promise<WebSearchResult> {
+  requireRuntime("Web search");
+  return invoke<WebSearchResult>("web_search", { request });
 }

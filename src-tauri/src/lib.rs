@@ -22,6 +22,7 @@ mod persistence;
 mod policy;
 mod providers;
 mod validation;
+mod web_search;
 mod workspace;
 
 use agent_runtime::AgentRuntimeService;
@@ -1224,6 +1225,11 @@ fn agent_engine_execute_tools(
 }
 
 #[tauri::command]
+async fn web_search(request: web_search::WebSearchRequest) -> Result<web_search::WebSearchResult, String> {
+    web_search::web_search(request).await
+}
+
+#[tauri::command]
 fn list_providers() -> Vec<ProviderInfo> {
     list_provider_info()
 }
@@ -1546,6 +1552,7 @@ pub fn run() {
             agent_runtime_commands::agent_runtime_upsert_memory_v2,
             agent_runtime_commands::agent_runtime_retrieve_memories_v2,
             agent_runtime_commands::agent_runtime_inject_memories,
+            web_search,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zeus");

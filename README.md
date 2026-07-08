@@ -65,6 +65,12 @@ One tool, eight actions: `status`, `open`, `snapshot`, `click`, `type`, `screens
 <tr>
 <td width="33%" valign="top">
 
+### 🔭 Autonomous Web Search
+`webSearch` hits DuckDuckGo's HTML endpoint and returns ranked title + URL + snippet hits — no API key required. The model can emit `webSearch {"query":"..."}` from any chat turn to pull external context for research, doc lookups, or competitive analysis without leaving the composer.
+
+</td>
+<td width="33%" valign="top">
+
 ### 🧠 Memory Sidecar
 Project-scoped retrieval with source / provenance, tags, stale flags, and supersession links. Deterministic lexical matching for now so it stays local and testable; embeddings can drop in later behind the same interface.
 

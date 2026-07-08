@@ -182,6 +182,7 @@ pub fn tool_manifest() -> Vec<EngineToolManifest> {
         EngineToolManifest { name: "runCommand", label: "Run command", risk_class: "shell", execution_mode: ToolExecutionMode::Sequential, description: "Run a local command with Zeus output capture and secret redaction." },
         EngineToolManifest { name: "gitOp", label: "Git operation", risk_class: "shell", execution_mode: ToolExecutionMode::Sequential, description: "Run git in a chosen directory through the existing Git wrapper." },
         EngineToolManifest { name: "runTest", label: "Run tests", risk_class: "shell", execution_mode: ToolExecutionMode::Sequential, description: "Run configured project tests and parse pass/fail counts." },
+        EngineToolManifest { name: "webSearch", label: "Web search", risk_class: "network", execution_mode: ToolExecutionMode::Parallel, description: "Search DuckDuckGo and return ranked title + URL + snippet hits for autonomous research." },
     ]
 }
 
@@ -370,6 +371,15 @@ fn run_tool(
             cache.ensure(&PathBuf::from(root)).map_err(|e| format!("build symbol index: {e}"))?;
             let hits = code_intelligence::search(&cache.index, &query, &seen, max);
             Ok((format!("search returned {} hits for {:?}", hits.len(), query), json!({ "query": query, "hits": hits })))
+        }
+        "webSearch" | "web_search" => {
+            let query = required_string_arg(&call.args, "query")?;
+            let max_results = usize_arg(&call.args, "maxResults");
+            let request = crate::web_search::WebSearchRequest { query, max_results };
+            let result = tauri::async_runtime::block_on(crate::web_search::web_search(request))
+                .map_err(|e| format!("web search: {e}"))?;
+            let summary = format!("web search returned {} hit(s) for {:?}", result.hits.len(), result.query);
+            Ok((summary, json!(result)))
         }
         "agentTask" | "agent_task" => {
             let steps_value = call.args.get("steps").cloned().ok_or_else(|| "agentTask requires steps".to_string())?;
