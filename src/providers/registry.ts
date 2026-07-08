@@ -57,20 +57,38 @@ type SearchStep = { kind: "search"; query: string; maxResults?: number; seenFile
 type ParsedToolStep = AgentStepRequest | SearchStep;
 
 const TOOL_BLOCK_PATTERN = /```tool\s*\n([\s\S]*?)\n```/g;
-const MAX_TOOL_TURNS = 6;
-const MAX_TOOL_OBSERVATION_CHARS = 60_000;
+// 12 turns is enough for a "produce a standalone artifact + verify"
+// task while still bounding runaway iteration. Earlier default was 6
+// which only fit tight in-workspace edits.
+const MAX_TOOL_TURNS = 12;
+// Allow a little more headroom for the observation so the model can
+// see complete HTML/text output of files it just wrote, even when
+// individual tool results are large.
+const MAX_TOOL_OBSERVATION_CHARS = 80_000;
 // When the model emits the same tool block twice in a row, break out
-// immediately instead of burning the rest of the budget. This catches the
-// most common stuck-iteration failure mode (the model retries a failing
+// instead of burning the rest of the budget. This catches the most
+// common stuck-iteration failure mode (the model retries a failing
 // edit because the previous failure observation didn't reach it).
-const MAX_REPEATED_TOOL_BLOCKS = 2;
+const MAX_REPEATED_TOOL_BLOCKS = 3;
 
 const WORKSPACE_TOOL_PROMPT = [
   "# Zeus workspace tools",
   "The desktop runtime executes fenced `tool` blocks and returns a structured observation before your final reply.",
-  "Available tools: `listDir`, `readFile`, `search`, `editFile`, `writeFile`, `runCommand`, `gitOp`, `runTest`, `loadProjectConfig`.",
-  "Use `listDir` to inspect structure, `search` for grep/symbol lookup, `readFile` for contents, `editFile` for targeted patches, `writeFile` for creates or deliberate overwrites, and `runCommand`/`gitOp`/`runTest` for verification.",
+  "Available tools: `listDir`, `readFile`, `search`, `editFile`, `writeFile`, `createArtifact`, `runCommand`, `gitOp`, `runTest`, `loadProjectConfig`.",
+  "Use `listDir` to inspect structure, `search` for grep/symbol lookup, `readFile` for contents, `editFile` for targeted patches, `writeFile`/`createArtifact` to materialize files (see below), and `runCommand`/`gitOp`/`runTest` for verification.",
   "Each tool line is `<toolName> <json>`, for example: `search {\"query\":\"runAgentTask\",\"maxResults\":20}`.",
+  "`createArtifact` is a special raw-body tool for standalone deliverables (HTML pages, READMEs, single-file scripts). Use it like this so you don't have to JSON-escape a large file body:",
+  "```tool",
+  "createArtifact path=coding-agents.html",
+  "<!doctype html>",
+  "<html><head><title>...</title></head>",
+  "<body>...</body>",
+  "</html>",
+  "<<<END",
+  "```",
+  "The first line declares `path=...` (and optionally `create=false` / `overwrite=false`); every line that follows is the literal file body, until a line containing only `<<<END` on its own ends the artifact.",
+  "`writeFile {\"path\":...,\"content\":\"...\"}` is for in-repo source edits where you want `create:false` / `overwrite:false` semantics; `createArtifact` is for artifacts where creating-or-overwriting is the expected behavior.",
+  "Path resolution: in `Full` access mode you may use absolute paths (Windows drive letters like `C:\\path\\file.html` are accepted); in `Local`/`Review`/`Locked` modes the path must be relative to the workspace root. The resolver canonicalizes whatever you pass; absolute paths are allowed because Full mode grants unrestricted file access.",
   "Important: when an observation reports `failed [code]: message` with a Suggestion block, fix the call before re-emitting. Do not retry the same tool block if the previous attempt produced a `failed` line.",
   "After two failed attempts for the same tool, switch tools (e.g. `readFile` then `editFile`) or stop and explain what you tried.",
 ].join("\n");
@@ -169,24 +187,85 @@ function extractToolBlocks(content: string): RawToolBlock[] {
   return blocks;
 }
 
+// Sentinel that marks the end of a `createArtifact` raw-body block. Each
+// line up to (and not including) this marker is appended verbatim to the
+// file body. The sentinel must appear on its own line, optionally
+// indented; the matching is exact against `RAW_BODY_END_MARKER`.
+const RAW_BODY_END_MARKER = "<<<END";
+
 function parseToolBlocks(blocks: RawToolBlock[]): ParsedToolStep[] {
+  // Each block may contain one or more tool calls. Two syntaxes are
+  // supported side by side so the LLM never has to JSON-escape a large
+  // multi-line file body just to call a tool.
+  //
+  //   Standard call — one line:
+  //     <kind> <json>
+  //
+  //   Raw-body call (`createArtifact`) — header line + body lines until
+  //   the explicit sentinel `<<<END`:
+  //     createArtifact path=coding-agents.html
+  //         <!doctype html>
+  //         <html>...</html>
+  //         <<<END
+  // The header line carries `key=value` metadata rather than JSON so the
+  // LLM doesn't have to escape every line of a 30 KB HTML body. The body
+  // is collected verbatim until the sentinel.
+  const RAW_BODY_KINDS = new Set(["createArtifact"]);
   const steps: ParsedToolStep[] = [];
   for (const block of blocks) {
-    for (const rawLine of block.rawLines) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith("#")) continue;
-      const split = line.indexOf(" ");
-      if (split === -1) continue;
-      const kind = line.slice(0, split).trim();
-      const json = line.slice(split + 1).trim();
+    let i = 0;
+    while (i < block.rawLines.length) {
+      const rawLine = block.rawLines[i];
+      const trimmed = rawLine.trim();
+      if (!trimmed || trimmed.startsWith("#")) { i += 1; continue; }
+      const split = rawLine.indexOf(" ");
+      if (split === -1) { i += 1; continue; }
+      const kind = rawLine.slice(0, split).trim();
+      const rest = rawLine.slice(split + 1).trim();
+      if (RAW_BODY_KINDS.has(kind)) {
+        const metadata: Record<string, string> = {};
+        for (const token of rest.split(/\s+/)) {
+          if (!token) continue;
+          const eq = token.indexOf("=");
+          if (eq === -1) continue;
+          metadata[token.slice(0, eq)] = token.slice(eq + 1);
+        }
+        const bodyLines: string[] = [];
+        let j = i + 1;
+        let endSeen = false;
+        while (j < block.rawLines.length && !endSeen) {
+          const next = block.rawLines[j];
+          const nextTrim = next.trim();
+          if (nextTrim === RAW_BODY_END_MARKER) {
+            endSeen = true;
+            j += 1;
+            break;
+          }
+          bodyLines.push(next);
+          j += 1;
+        }
+        i = j;
+        if (metadata.path) {
+          steps.push({
+            kind: "writeFile",
+            path: metadata.path,
+            content: bodyLines.join("\n"),
+            create: metadata.create !== "false",
+            overwrite: metadata.overwrite !== "false",
+          });
+        }
+        continue;
+      }
       let parsed: Record<string, unknown>;
       try {
-        parsed = JSON.parse(json);
+        parsed = JSON.parse(rest);
       } catch {
+        i += 1;
         continue;
       }
       const step = parseToolStep(kind, parsed);
       if (step) steps.push(step);
+      i += 1;
     }
   }
   return steps;

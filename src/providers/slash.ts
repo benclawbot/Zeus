@@ -38,6 +38,8 @@ const BUILTINS: BuiltinCommand[] = [
   { id: "git", label: "/git", description: "Run a guarded git subcommand. Example: /git status, /git diff, /git commit -m msg", kind: "builtin" },
   { id: "search", label: "/search", description: "Run a configured public research query before planning changes.", kind: "builtin" },
   { id: "playwright", label: "/playwright", description: "Run headed or headless browser checks for generated UI work.", kind: "builtin" },
+  { id: "ralph", label: "/ralph", description: "Run an autonomous Ralph loop until the model emits the completion marker or the iteration cap is reached. Example: /ralph build me an HTML page that explains prompt caching.", kind: "builtin" },
+  { id: "artifact", label: "/artifact", description: "Materialize a standalone file artifact at the given path. Example: /artifact path=coding-agents.html <<< then paste the body and end with <<<END on its own line.", kind: "builtin" },
 ];
 
 export function detectSlash(value: string): string | null {

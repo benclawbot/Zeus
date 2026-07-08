@@ -314,6 +314,49 @@ export async function runAgentTask(request: AgentRunRequest): Promise<AgentRunRe
   return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace({ ...request, steps: request.steps.map(normalizeAgentStep) }) });
 }
 
+export interface RalphVerifier {
+  program: string;
+  args?: string[];
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+export interface RunRalphRequest {
+  provider: string;
+  objective: string;
+  systemMessage?: string;
+  maxIterations?: number;
+  completionMarker?: string;
+  verifier?: RalphVerifier;
+  skillId?: string;
+  model?: string;
+  baseUrl?: string;
+}
+
+export interface RalphIteration {
+  index: number;
+  markerSeen: boolean;
+  assistantExcerpt: string;
+}
+
+export interface RunRalphResult {
+  completed: boolean;
+  iterationsRun: number;
+  exitReason: string;
+  marker: string;
+  iterations: RalphIteration[];
+}
+
+/// Run a Ralph-style autonomous loop. Each iteration is a fresh chat call
+/// against the configured provider; the model only "completes" when it
+/// emits the marker (and the optional verifier exits 0). Use this for
+/// long-running tasks that need backpressure (tests, builds, lints) to
+/// know when work is genuinely done.
+export async function runRalphLoop(request: RunRalphRequest): Promise<RunRalphResult> {
+  ensureRuntime("Ralph loop execution");
+  return invoke<RunRalphResult>("run_ralph_loop", { request });
+}
+
 export function parseShellWords(input: string): string[] {
   const words: string[] = [];
   let current = "";

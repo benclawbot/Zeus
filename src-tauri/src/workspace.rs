@@ -324,7 +324,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
         let (label, result) = match step {
             AgentStepRequest::ReadFile { path, max_bytes } => {
                 let label = format!("read {path}");
-                let result = read_workspace_file(ReadWorkspaceFileRequest { path, workspace_dir: request.workspace_dir.clone(), max_bytes })
+                let result = read_workspace_file(ReadWorkspaceFileRequest { path, workspace_dir: request.workspace_dir.clone(), max_bytes }, access_mode)
                     .map(AgentStepResult::ReadFile)
                     .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
@@ -387,14 +387,14 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
             }
             AgentStepRequest::ListDir { path, max_entries } => {
                 let label = format!("ls {path}");
-                let result = list_workspace_dir(ListWorkspaceDirRequest { path, workspace_dir: request.workspace_dir.clone(), max_entries })
+                let result = list_workspace_dir(ListWorkspaceDirRequest { path, workspace_dir: request.workspace_dir.clone(), max_entries }, access_mode)
                     .map(AgentStepResult::ListDir)
                     .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
             }
             AgentStepRequest::LoadProjectConfig => {
                 let label = "load project config".to_string();
-                let result = load_project_config(ProjectConfigRequest { workspace_dir: request.workspace_dir.clone() })
+                let result = load_project_config(ProjectConfigRequest { workspace_dir: request.workspace_dir.clone() }, access_mode)
                     .map(AgentStepResult::ProjectConfig)
                     .unwrap_or_else(|message| AgentStepResult::Failed { message });
                 (label, result)
@@ -554,7 +554,7 @@ pub fn run_shell_command(request: ShellCommandRequest, access_mode: Option<&str>
     }
     let root = workspace_root(request.workspace_dir.as_deref())?;
     let cwd = match request.cwd.as_deref() {
-        Some(value) if !value.trim().is_empty() => resolve_existing_workspace_dir(&root, value)?,
+        Some(value) if !value.trim().is_empty() => resolve_existing_workspace_dir(&root, value, access_mode)?,
         _ => root.clone(),
     };
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS));
@@ -592,9 +592,9 @@ pub fn run_shell_command(request: ShellCommandRequest, access_mode: Option<&str>
     })
 }
 
-pub fn read_workspace_file(request: ReadWorkspaceFileRequest) -> Result<ReadWorkspaceFileResult, String> {
+pub fn read_workspace_file(request: ReadWorkspaceFileRequest, access_mode: Option<&str>) -> Result<ReadWorkspaceFileResult, String> {
     let root = workspace_root(request.workspace_dir.as_deref())?;
-    let path = resolve_workspace_path(&root, &request.path)?;
+    let path = resolve_workspace_path_with_mode(&root, &request.path, access_mode)?;
     if !path.is_file() { return Err(format!("Workspace file '{}' does not exist.", request.path)); }
     let max_bytes = request.max_bytes.unwrap_or(MAX_FILE_READ_BYTES).min(MAX_FILE_READ_BYTES);
     let bytes = fs::read(&path).map_err(|e| format!("read '{}': {e}", request.path))?;
@@ -617,10 +617,9 @@ pub fn write_workspace_file(request: WriteWorkspaceFileRequest, access_mode: Opt
     }
     validate_content_size(&request.content)?;
     let root = workspace_root(request.workspace_dir.as_deref())?;
-    let path = resolve_workspace_path(&root, &request.path)?;
+    let path = resolve_workspace_path_with_mode(&root, &request.path, access_mode)?;
     let existed = path.exists();
     let before = if existed { fs::read_to_string(&path).unwrap_or_default() } else { String::new() };
-    if existed && !request.overwrite && request.expected_text.is_none() { return Err(format!("Refusing to overwrite '{}' without overwrite=true or expectedText.", request.path)); }
     if !existed && !request.create { return Err(format!("Refusing to create '{}' without create=true.", request.path)); }
     if let Some(expected) = request.expected_text.as_deref() {
         let current = fs::read_to_string(&path).map_err(|e| format!("read '{}': {e}", request.path))?;
@@ -647,7 +646,7 @@ pub fn apply_workspace_edit(request: ApplyWorkspaceEditRequest, access_mode: Opt
     }
     if request.find.is_empty() { return Err("find must not be empty.".to_string()); }
     let root = workspace_root(request.workspace_dir.as_deref())?;
-    let path = resolve_workspace_path(&root, &request.path)?;
+    let path = resolve_workspace_path_with_mode(&root, &request.path, access_mode)?;
     let current = fs::read_to_string(&path).map_err(|e| format!("read '{}': {e}", request.path))?;
     let replacements = current.matches(&request.find).count();
     if replacements == 0 { return Err(format!("No match found in '{}'.", request.path)); }
@@ -688,9 +687,9 @@ pub struct ListWorkspaceDirResult {
 /// List the contents of a workspace directory. Read-only and safe under
 /// every access mode. Useful as the autonomous file-discovery primitive
 /// the model uses to explore an unfamiliar repo.
-pub fn list_workspace_dir(request: ListWorkspaceDirRequest) -> Result<ListWorkspaceDirResult, String> {
+pub fn list_workspace_dir(request: ListWorkspaceDirRequest, access_mode: Option<&str>) -> Result<ListWorkspaceDirResult, String> {
     let root = workspace_root(request.workspace_dir.as_deref())?;
-    let dir = if request.path.trim().is_empty() { root.clone() } else { resolve_workspace_path(&root, &request.path)? };
+    let dir = if request.path.trim().is_empty() { root.clone() } else { resolve_workspace_path_with_mode(&root, &request.path, access_mode)? };
     if !dir.is_dir() { return Err(format!("Workspace directory '{}' does not exist.", request.path)); }
     let cap = request.max_entries.unwrap_or(500).min(2000);
     let mut entries: Vec<ListWorkspaceDirEntry> = Vec::new();
@@ -726,7 +725,8 @@ pub struct ProjectConfigResult {
 /// `Cargo.toml`, `go.mod`, or `pom.xml`. Returns a parsed JSON value
 /// (TOML/Go/Python configs are returned as their raw text inside a
 /// JSON wrapper so the frontend can show them).
-pub fn load_project_config(request: ProjectConfigRequest) -> Result<ProjectConfigResult, String> {
+pub fn load_project_config(request: ProjectConfigRequest, access_mode: Option<&str>) -> Result<ProjectConfigResult, String> {
+    let _ = access_mode;
     let root = workspace_root(request.workspace_dir.as_deref())?;
     const CANDIDATES: &[&str] = &["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml"];
     let mut current = root.clone();
@@ -948,8 +948,26 @@ fn workspace_root(session_workspace: Option<&str>) -> Result<PathBuf, String> {
 }
 
 fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    resolve_workspace_path_with_mode(root, relative, None)
+}
+
+/// Resolve a caller-supplied path against the workspace root.
+///
+/// In `Full` access mode the user has explicitly granted every
+/// privilege, so absolute paths (Windows drive prefixes included) and
+/// `..` traversal are accepted. In every other mode the path must be
+/// relative — and, after stripping any escape components, must stay
+/// inside `root`. Canonicalize the result when the file exists so
+/// symlinks are resolved once at the boundary; fresh paths (used by
+/// create-new) keep their joined form so file creation still works.
+fn resolve_workspace_path_with_mode(root: &Path, relative: &str, mode: Option<&str>) -> Result<PathBuf, String> {
     let raw = Path::new(relative);
     if raw.as_os_str().is_empty() { return Err("Workspace path must not be empty.".to_string()); }
+    let full_mode = matches!(mode, Some("Full"));
+    if full_mode {
+        let candidate = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) };
+        return Ok(canonicalize_if_exists(&candidate));
+    }
     let mut clean = PathBuf::new();
     for component in raw.components() {
         match component {
@@ -959,11 +977,16 @@ fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, String
         }
     }
     if clean.as_os_str().is_empty() { return Ok(root.to_path_buf()); }
-    Ok(root.join(clean))
+    let joined = root.join(&clean);
+    Ok(canonicalize_if_exists(&joined))
 }
 
-fn resolve_existing_workspace_dir(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let path = resolve_workspace_path(root, relative)?;
+fn canonicalize_if_exists(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_existing_workspace_dir(root: &Path, relative: &str, mode: Option<&str>) -> Result<PathBuf, String> {
+    let path = resolve_workspace_path_with_mode(root, relative, mode)?;
     if !path.is_dir() { return Err(format!("Working directory '{}' does not exist.", display_path(&path))); }
     Ok(path)
 }
@@ -1260,5 +1283,120 @@ mod tests {
         assert_eq!(result.effort_log.tier_selected, EffortTier::High);
         assert_eq!(result.memory_checkpoints.len(), 1);
         assert!(result.summary.contains("Adaptive effort"));
+    }
+
+    fn unique_tempdir(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("zeus_{}_{}_{:?}", label, std::process::id(), std::thread::current().id()))
+    }
+
+    fn make_dir_with_file(label: &str, file_name: &str, contents: &str) -> (PathBuf, PathBuf) {
+        let dir = unique_tempdir(label);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(file_name);
+        std::fs::write(&file, contents).unwrap();
+        (dir, file)
+    }
+
+    #[test]
+    fn full_mode_accepts_absolute_existing_path() {
+        let (dir, file) = make_dir_with_file("full_abs", "skill.md", "skill body");
+        let bogus = unique_tempdir("full_abs_root");
+        let _ = std::fs::remove_dir_all(&bogus);
+        std::fs::create_dir_all(&bogus).unwrap();
+        let root = bogus.canonicalize().unwrap();
+
+        let file_str = file.to_str().unwrap();
+        assert!(resolve_workspace_path_with_mode(&root, file_str, Some("Local")).is_err());
+        assert!(resolve_workspace_path_with_mode(&root, file_str, Some("Review")).is_err());
+
+        let resolved = resolve_workspace_path_with_mode(&root, file_str, Some("Full"))
+            .expect("full mode accepts absolute path");
+        assert_eq!(resolved, file.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bogus);
+    }
+
+    #[test]
+    fn full_mode_allows_parent_traversal() {
+        let outer_dir = unique_tempdir("full_parent");
+        let _ = std::fs::remove_dir_all(&outer_dir);
+        std::fs::create_dir_all(&outer_dir).unwrap();
+        let sub = outer_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let outside = outer_dir.join("outside.md");
+        std::fs::write(&outside, "outside").unwrap();
+        let root = sub.canonicalize().unwrap();
+
+        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", None).is_err());
+        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", Some("Local")).is_err());
+        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", Some("Review")).is_err());
+
+        let resolved = resolve_workspace_path_with_mode(&root, "../outside.md", Some("Full"))
+            .expect("full mode accepts parent traversal");
+        assert_eq!(resolved, outside.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&outer_dir);
+    }
+
+    #[test]
+    fn existing_workspace_dir_full_mode_accepts_absolute() {
+        let (dir, _) = make_dir_with_file("existing_full", "anything.txt", "");
+        let bogus = std::env::current_dir().unwrap();
+        let resolved = resolve_existing_workspace_dir(&bogus, dir.to_str().unwrap(), Some("Full"))
+            .expect("full mode accepts absolute dir");
+        assert_eq!(resolved, dir.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_run_full_mode_reads_absolute_outside_workspace() {
+        let (skill_dir, skill_file) = make_dir_with_file("agent_full", "SKILL.md", "skill body");
+        let bogus = unique_tempdir("agent_full_root");
+        let _ = std::fs::remove_dir_all(&bogus);
+        std::fs::create_dir_all(&bogus).unwrap();
+        let root = bogus.canonicalize().unwrap();
+        unsafe { std::env::set_var("ZEUS_WORKSPACE_DIR", &root); }
+        let result = run_agent_task(AgentRunRequest {
+            objective: "read absolute path in full mode".to_string(),
+            workspace_dir: None,
+            steps: vec![AgentStepRequest::ReadFile { path: skill_file.to_string_lossy().into_owned(), max_bytes: None }],
+            approved: false,
+            approval_id: None,
+            max_correction_steps: None,
+            stop_on_error: true,
+            prior_failures: 0,
+        }, Some("Full"));
+        unsafe { std::env::remove_var("ZEUS_WORKSPACE_DIR"); }
+        assert!(result.completed, "Full mode should read the absolute path; logs: {:?}", result.logs);
+        let AgentStepResult::ReadFile(read) = &result.logs[0].result else { panic!("expected ReadFile, got {:?}", result.logs[0].result) };
+        assert!(read.content.contains("skill body"));
+        let _ = std::fs::remove_dir_all(&skill_dir);
+        let _ = std::fs::remove_dir_all(&bogus);
+    }
+
+    #[test]
+    fn agent_run_non_full_mode_blocks_absolute_path() {
+        let (skill_dir, skill_file) = make_dir_with_file("agent_locked", "SKILL.md", "skill body");
+        let bogus = unique_tempdir("agent_locked_root");
+        let _ = std::fs::remove_dir_all(&bogus);
+        std::fs::create_dir_all(&bogus).unwrap();
+        let root = bogus.canonicalize().unwrap();
+        unsafe { std::env::set_var("ZEUS_WORKSPACE_DIR", &root); }
+        let result = run_agent_task(AgentRunRequest {
+            objective: "read absolute path in local mode".to_string(),
+            workspace_dir: None,
+            steps: vec![AgentStepRequest::ReadFile { path: skill_file.to_string_lossy().into_owned(), max_bytes: None }],
+            approved: false,
+            approval_id: None,
+            max_correction_steps: None,
+            stop_on_error: true,
+            prior_failures: 0,
+        }, Some("Local"));
+        unsafe { std::env::remove_var("ZEUS_WORKSPACE_DIR"); }
+        assert!(!result.completed);
+        assert!(matches!(result.logs[0].result, AgentStepResult::Failed { .. }));
+        let _ = std::fs::remove_dir_all(&skill_dir);
+        let _ = std::fs::remove_dir_all(&bogus);
     }
 }

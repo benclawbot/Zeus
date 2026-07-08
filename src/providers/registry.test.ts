@@ -69,6 +69,66 @@ describe("registry tool parsing", () => {
     expect(steps[0]).toMatchObject({ kind: "listDir", path: "src" });
     expect(steps[1]).toMatchObject({ kind: "search", query: "foo", maxResults: 5 });
   });
+
+  it("captures a raw-body createArtifact call with multi-line content until <<<END", () => {
+    const content = [
+      "```tool",
+      "createArtifact path=coding-agents.html",
+      "<!doctype html>",
+      "<html><head><title>Building coding agents</title></head>",
+      "<body><h1>From loops to agents</h1>",
+      "<p>Start with the simplest feedback loop.</p>",
+      "</body></html>",
+      "<<<END",
+      "```",
+    ].join("\n");
+    const steps = parseToolSteps(content);
+    expect(steps).toHaveLength(1);
+    const step = steps[0] as Extract<typeof steps[0], { kind: "writeFile" }>;
+    expect(step.kind).toBe("writeFile");
+    expect(step.path).toBe("coding-agents.html");
+    expect(step.content).toContain("<!doctype html>");
+    expect(step.content).toContain("<h1>From loops to agents</h1>");
+    expect(step.content.split("\n").length).toBeGreaterThanOrEqual(5);
+    expect(step.create).toBe(true);
+    expect(step.overwrite).toBe(true);
+  });
+
+  it("ends a raw-body createArtifact when <<<END is reached and continues with the next tool call", () => {
+    const content = [
+      "```tool",
+      "createArtifact path=notes.md",
+      "# Heading",
+      "",
+      "Body line.",
+      "<<<END",
+      "listDir {\"path\":\".\"}",
+      "```",
+    ].join("\n");
+    const steps = parseToolSteps(content);
+    expect(steps).toHaveLength(2);
+    const artifact = steps[0] as Extract<typeof steps[0], { kind: "writeFile" }>;
+    const ls = steps[1] as Extract<typeof steps[1], { kind: "listDir" }>;
+    expect(artifact.kind).toBe("writeFile");
+    expect(artifact.path).toBe("notes.md");
+    expect(artifact.content).toBe("# Heading\n\nBody line.");
+    expect(ls.kind).toBe("listDir");
+  });
+
+  it("honours createArtifact create=false / overwrite=false overrides", () => {
+    const content = [
+      "```tool",
+      "createArtifact path=existing.txt create=false overwrite=false",
+      "hi",
+      "<<<END",
+      "```",
+    ].join("\n");
+    const steps = parseToolSteps(content);
+    expect(steps).toHaveLength(1);
+    const step = steps[0] as Extract<typeof steps[0], { kind: "writeFile" }>;
+    expect(step.create).toBe(false);
+    expect(step.overwrite).toBe(false);
+  });
 });
 
 describe("withWorkspaceToolPrompt", () => {
