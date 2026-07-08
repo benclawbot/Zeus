@@ -53,7 +53,7 @@ export interface ChatResponse {
   usage?: unknown;
 }
 
-type SearchStep = { kind: "search"; query: string; maxResults?: number; seenFiles?: string[] };
+type SearchStep = { kind: "search"; query: string; root?: string; workspaceDir?: string; maxResults?: number; seenFiles?: string[] };
 type ParsedToolStep = AgentStepRequest | SearchStep;
 
 const TOOL_BLOCK_PATTERN = /```tool\s*\n([\s\S]*?)\n```/g;
@@ -88,7 +88,7 @@ const WORKSPACE_TOOL_PROMPT = [
   "```",
   "The first line declares `path=...` (and optionally `create=false` / `overwrite=false`); every line that follows is the literal file body, until a line containing only `<<<END` on its own ends the artifact.",
   "`writeFile {\"path\":...,\"content\":\"...\"}` is for in-repo source edits where you want `create:false` / `overwrite:false` semantics; `createArtifact` is for artifacts where creating-or-overwriting is the expected behavior.",
-  "Path resolution: in `Full` access mode you may use absolute paths (Windows drive letters like `C:\\path\\file.html` are accepted); in `Local`/`Review`/`Locked` modes the path must be relative to the workspace root. The resolver canonicalizes whatever you pass; absolute paths are allowed because Full mode grants unrestricted file access.",
+  "Path resolution: Zeus is currently unrestricted. Use absolute paths whenever needed (Windows drive letters like `C:\\path\\file.html` are accepted), and `..` traversal is allowed. `workspaceDir` is only an anchor for relative paths, not a boundary. For `search`, pass `root` or `workspaceDir` when you need to search outside the launch directory.",
   "Important: when an observation reports `failed [code]: message` with a Suggestion block, fix the call before re-emitting. Do not retry the same tool block if the previous attempt produced a `failed` line.",
   "After two failed attempts for the same tool, switch tools (e.g. `readFile` then `editFile`) or stop and explain what you tried.",
 ].join("\n");
@@ -301,7 +301,7 @@ function parseToolStep(kind: string, parsed: Record<string, unknown>): ParsedToo
     return { kind: "listDir", path: parsed.path, maxEntries: numberField(parsed.maxEntries) };
   }
   if (kind === "search" && typeof parsed.query === "string") {
-    return { kind: "search", query: parsed.query, maxResults: numberField(parsed.maxResults), seenFiles: Array.isArray(parsed.seenFiles) ? stringList(parsed.seenFiles) : undefined };
+    return { kind: "search", query: parsed.query, root: typeof parsed.root === "string" ? parsed.root : undefined, workspaceDir: typeof parsed.workspaceDir === "string" ? parsed.workspaceDir : undefined, maxResults: numberField(parsed.maxResults), seenFiles: Array.isArray(parsed.seenFiles) ? stringList(parsed.seenFiles) : undefined };
   }
   if (kind === "loadProjectConfig") {
     return { kind: "loadProjectConfig" };
@@ -337,7 +337,7 @@ async function runToolSteps(steps: ParsedToolStep[], objective: string): Promise
   const searchSteps: Array<Extract<SearchStep, { kind: "search" }>> = [];
   for (const step of steps) {
     if (step.kind === "search") {
-      searchSteps.push({ kind: "search", query: step.query, maxResults: step.maxResults, seenFiles: step.seenFiles });
+      searchSteps.push({ kind: "search", query: step.query, root: step.root, workspaceDir: step.workspaceDir, maxResults: step.maxResults, seenFiles: step.seenFiles });
     } else {
       agentSteps.push(step);
     }
@@ -357,8 +357,8 @@ async function runToolSteps(steps: ParsedToolStep[], objective: string): Promise
 
   for (const search of searchSteps) {
     try {
-      const hits = await searchWorkspaceCode({ query: search.query, maxResults: search.maxResults, seenFiles: search.seenFiles });
-      lines.push(`search "${search.query}" returned ${Array.isArray(hits) ? hits.length : 0} hits.`);
+      const hits = await searchWorkspaceCode({ query: search.query, workspaceDir: search.root ?? search.workspaceDir, maxResults: search.maxResults, seenFiles: search.seenFiles });
+      lines.push(`search "${search.query}" returned ${hits.hits.length} hits under ${hits.root}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       lines.push(`search "${search.query}" failed: ${message}`);

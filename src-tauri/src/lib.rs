@@ -14,6 +14,7 @@ use tauri::Manager;
 mod agent_runtime;
 mod agent_runtime_commands;
 mod code_intelligence;
+mod engine;
 mod github_workflow;
 mod memory;
 mod patch;
@@ -1203,6 +1204,26 @@ fn excerpt(content: &str, max: usize) -> String {
 /// List every registered provider. The frontend uses this to render the
 /// provider picker in the Settings view.
 #[tauri::command]
+fn agent_engine_health() -> engine::AgentEngineHealth {
+    engine::health()
+}
+
+#[tauri::command]
+fn agent_engine_follow_up_plan() -> Vec<engine::FollowUpMilestone> {
+    engine::follow_up_plan()
+}
+
+#[tauri::command]
+fn agent_engine_execute_tools(
+    state: tauri::State<'_, AppState>,
+    request: engine::AgentEngineToolBatchRequest,
+) -> Result<engine::AgentEngineToolBatchResult, String> {
+    let conn = state.db.lock();
+    let access_mode = current_access_mode(&conn)?;
+    Ok(engine::execute_tool_batch(request, access_mode.as_deref()))
+}
+
+#[tauri::command]
 fn list_providers() -> Vec<ProviderInfo> {
     list_provider_info()
 }
@@ -1496,6 +1517,9 @@ pub fn run() {
             set_provider_keys,
             get_provider_keys,
             test_provider,
+            agent_engine_health,
+            agent_engine_follow_up_plan,
+            agent_engine_execute_tools,
             agent_runtime_commands::agent_runtime_health,
             agent_runtime_commands::agent_runtime_status,
             agent_runtime_commands::agent_runtime_open_session,

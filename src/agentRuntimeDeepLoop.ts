@@ -63,7 +63,7 @@ export function updatePlanFromObservations(plan: RuntimePlan, observations: Tool
 }
 
 export function classifyAgentFailure(message: string): "workspace" | "tool_args" | "policy" | "transient" | "unknown" {
-  if (/workspace path|must point inside|not inside|does not exist/i.test(message)) return "workspace";
+  if (/workspace path|path must not be empty|does not exist|no such file|not found/i.test(message)) return "workspace";
   if (/json|parse|argument|schema|missing|required/i.test(message)) return "tool_args";
   if (/policy|approval|denied|forbidden|locked|review/i.test(message)) return "policy";
   if (/timeout|network|fetch failed|econnreset|econnrefused|503|502|500|504|429/i.test(message)) return "transient";
@@ -74,7 +74,7 @@ export function recoveryInstructionFor(message: string): string {
   const kind = classifyAgentFailure(message);
   switch (kind) {
     case "workspace":
-      return "The previous tool action failed because the workspace/path was invalid. Re-plan by listing the workspace root first, then use only relative paths discovered from that listing. Do not stop after this failure.";
+      return "The previous tool action failed because the path was invalid or missing. Re-plan by listing the relevant absolute directory, then use the exact absolute path or cwd in the next tool call. Do not stop after this failure.";
     case "tool_args":
       return "The previous tool action failed because the tool arguments were invalid. Re-emit a smaller corrected tool block with valid JSON and one narrowly scoped action.";
     case "policy":

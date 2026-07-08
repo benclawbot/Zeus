@@ -7,7 +7,7 @@
 // `workspace.rs` and `agent_runtime.rs`.
 
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
@@ -244,38 +244,16 @@ pub fn validate_args(args: &[String]) -> Result<(), String> {
 
 /// Block workspace path escape. Mirrors the resolver in `workspace.rs` so
 /// sandboxing and path resolution agree on what "inside the workspace"
-/// means. `Full` access mode skips the check — the user has explicitly
-/// granted every privilege, so the path boundary is intentionally wide
-/// open.
+/// Zeus currently runs in unrestricted filesystem mode. The workspace path
+/// is now only a convenience anchor for relative paths, not a security
+/// boundary. This guard intentionally allows targets anywhere for every
+/// access mode; policy can be tightened again later in one place.
 pub fn ensure_inside_workspace(root: &Path, target: &Path) -> Result<(), String> {
     ensure_inside_workspace_with_mode(root, target, None)
 }
 
 pub fn ensure_inside_workspace_with_mode(root: &Path, target: &Path, mode: Option<&str>) -> Result<(), String> {
-    if matches!(mode, Some("Full")) {
-        return Ok(());
-    }
-    let cleaned = target
-        .components()
-        .try_fold(PathBuf::new(), |mut acc, c| {
-            match c {
-                Component::Normal(part) => { acc.push(part); Ok(acc) }
-                Component::CurDir => Ok(acc),
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    Err(format!("Path '{}' escapes the workspace.", target.display()))
-                }
-            }
-        })?;
-    let resolved = if cleaned.as_os_str().is_empty() { root.to_path_buf() } else { root.join(cleaned) };
-    let canon_root = root.canonicalize().map_err(|e| format!("canonicalize root: {e}"))?;
-    let canon_target = if resolved.exists() {
-        resolved.canonicalize().map_err(|e| format!("canonicalize target: {e}"))?
-    } else {
-        resolved
-    };
-    if !canon_target.starts_with(&canon_root) {
-        return Err(format!("Path '{}' escapes the workspace.", target.display()));
-    }
+    let _ = (root, target, mode);
     Ok(())
 }
 
@@ -492,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn full_mode_ensure_inside_skips_check() {
+    fn ensure_inside_all_modes_allow_any_path() {
         let bogus_root = std::env::temp_dir()
             .join(format!("zeus_ensure_root_{}_{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&bogus_root);
@@ -500,11 +478,10 @@ mod tests {
         let bogus = bogus_root.canonicalize().unwrap();
         let elsewhere = std::env::temp_dir();
 
-        // Non-Full: target outside root is rejected.
-        assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, Some("Local")).is_err());
-        assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, Some("Review")).is_err());
-        assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, None).is_err());
-        // Full: always allowed.
+        // Workspace limits are disabled: every mode allows paths outside the anchor.
+        assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, Some("Local")).is_ok());
+        assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, Some("Review")).is_ok());
+        assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, None).is_ok());
         assert!(ensure_inside_workspace_with_mode(&bogus, &elsewhere, Some("Full")).is_ok());
 
         let _ = std::fs::remove_dir_all(&bogus_root);

@@ -109,7 +109,7 @@ function inferPlan(): RuntimePlan | null {
   const plan = derivePlanFromObjective(objective);
   const rows = Array.from(document.querySelectorAll<HTMLElement>(".agent-progress-step, .tool-run-entry, .terminal-card, .compact-row"));
   const text = document.body.textContent ?? "";
-  const failed = /agent run failed|failed:|status:\s*failed|Workspace path must point inside/i.test(text);
+  const failed = /agent run failed|failed:|status:\s*failed|Workspace path does not exist/i.test(text);
   const running = /Thinking|running \d+ agent step|Generating/i.test(text);
   const done = /agent run completed|test passed|exit 0/i.test(text);
 

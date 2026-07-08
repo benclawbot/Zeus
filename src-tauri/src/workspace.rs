@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -951,34 +951,19 @@ fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, String
     resolve_workspace_path_with_mode(root, relative, None)
 }
 
-/// Resolve a caller-supplied path against the workspace root.
-///
-/// In `Full` access mode the user has explicitly granted every
-/// privilege, so absolute paths (Windows drive prefixes included) and
-/// `..` traversal are accepted. In every other mode the path must be
-/// relative — and, after stripping any escape components, must stay
-/// inside `root`. Canonicalize the result when the file exists so
-/// symlinks are resolved once at the boundary; fresh paths (used by
-/// create-new) keep their joined form so file creation still works.
+/// Resolve a caller-supplied path. Zeus currently runs in unrestricted
+/// filesystem mode: absolute paths, Windows drive prefixes, and `..`
+/// traversal are accepted for every access mode. Relative paths are still
+/// resolved against the session workspace/current directory for convenience,
+/// but the workspace is no longer a security boundary.
 fn resolve_workspace_path_with_mode(root: &Path, relative: &str, mode: Option<&str>) -> Result<PathBuf, String> {
+    let _ = mode;
     let raw = Path::new(relative);
-    if raw.as_os_str().is_empty() { return Err("Workspace path must not be empty.".to_string()); }
-    let full_mode = matches!(mode, Some("Full"));
-    if full_mode {
-        let candidate = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) };
-        return Ok(canonicalize_if_exists(&candidate));
+    if raw.as_os_str().is_empty() {
+        return Err("Path must not be empty.".to_string());
     }
-    let mut clean = PathBuf::new();
-    for component in raw.components() {
-        match component {
-            Component::Normal(part) => clean.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return Err(format!("Workspace path '{}' escapes the workspace.", relative)),
-        }
-    }
-    if clean.as_os_str().is_empty() { return Ok(root.to_path_buf()); }
-    let joined = root.join(&clean);
-    Ok(canonicalize_if_exists(&joined))
+    let candidate = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) };
+    Ok(canonicalize_if_exists(&candidate))
 }
 
 fn canonicalize_if_exists(path: &Path) -> PathBuf {
@@ -1213,11 +1198,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_blocks_parent_traversal() {
+    fn resolve_allows_unrestricted_paths() {
         let root = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert!(resolve_workspace_path(&root, "src/main.rs").is_ok());
-        assert!(resolve_workspace_path(&root, "../secret.txt").is_err());
-        assert!(resolve_workspace_path(&root, "/tmp/secret.txt").is_err());
+        assert!(resolve_workspace_path(&root, "../secret.txt").is_ok());
+        assert!(resolve_workspace_path(&root, "/tmp/secret.txt").is_ok());
     }
 
     #[test]
@@ -1300,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn full_mode_accepts_absolute_existing_path() {
+    fn all_modes_accept_absolute_existing_path() {
         let (dir, file) = make_dir_with_file("full_abs", "skill.md", "skill body");
         let bogus = unique_tempdir("full_abs_root");
         let _ = std::fs::remove_dir_all(&bogus);
@@ -1308,18 +1293,18 @@ mod tests {
         let root = bogus.canonicalize().unwrap();
 
         let file_str = file.to_str().unwrap();
-        assert!(resolve_workspace_path_with_mode(&root, file_str, Some("Local")).is_err());
-        assert!(resolve_workspace_path_with_mode(&root, file_str, Some("Review")).is_err());
+        assert!(resolve_workspace_path_with_mode(&root, file_str, Some("Local")).is_ok());
+        assert!(resolve_workspace_path_with_mode(&root, file_str, Some("Review")).is_ok());
 
         let resolved = resolve_workspace_path_with_mode(&root, file_str, Some("Full"))
-            .expect("full mode accepts absolute path");
+            .expect("all modes accept absolute path; Full shown here for compatibility");
         assert_eq!(resolved, file.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&bogus);
     }
 
     #[test]
-    fn full_mode_allows_parent_traversal() {
+    fn all_modes_allow_parent_traversal() {
         let outer_dir = unique_tempdir("full_parent");
         let _ = std::fs::remove_dir_all(&outer_dir);
         std::fs::create_dir_all(&outer_dir).unwrap();
@@ -1329,22 +1314,22 @@ mod tests {
         std::fs::write(&outside, "outside").unwrap();
         let root = sub.canonicalize().unwrap();
 
-        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", None).is_err());
-        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", Some("Local")).is_err());
-        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", Some("Review")).is_err());
+        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", None).is_ok());
+        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", Some("Local")).is_ok());
+        assert!(resolve_workspace_path_with_mode(&root, "../outside.md", Some("Review")).is_ok());
 
         let resolved = resolve_workspace_path_with_mode(&root, "../outside.md", Some("Full"))
-            .expect("full mode accepts parent traversal");
+            .expect("all modes accept parent traversal; Full shown here for compatibility");
         assert_eq!(resolved, outside.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&outer_dir);
     }
 
     #[test]
-    fn existing_workspace_dir_full_mode_accepts_absolute() {
+    fn existing_workspace_dir_accepts_absolute_in_all_modes() {
         let (dir, _) = make_dir_with_file("existing_full", "anything.txt", "");
         let bogus = std::env::current_dir().unwrap();
         let resolved = resolve_existing_workspace_dir(&bogus, dir.to_str().unwrap(), Some("Full"))
-            .expect("full mode accepts absolute dir");
+            .expect("absolute dir accepted");
         assert_eq!(resolved, dir.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1376,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_non_full_mode_blocks_absolute_path() {
+    fn agent_run_local_mode_reads_absolute_outside_workspace() {
         let (skill_dir, skill_file) = make_dir_with_file("agent_locked", "SKILL.md", "skill body");
         let bogus = unique_tempdir("agent_locked_root");
         let _ = std::fs::remove_dir_all(&bogus);
@@ -1394,8 +1379,9 @@ mod tests {
             prior_failures: 0,
         }, Some("Local"));
         unsafe { std::env::remove_var("ZEUS_WORKSPACE_DIR"); }
-        assert!(!result.completed);
-        assert!(matches!(result.logs[0].result, AgentStepResult::Failed { .. }));
+        assert!(result.completed, "Local mode should also read absolute paths while workspace limits are disabled; logs: {:?}", result.logs);
+        let AgentStepResult::ReadFile(read) = &result.logs[0].result else { panic!("expected ReadFile, got {:?}", result.logs[0].result) };
+        assert!(read.content.contains("skill body"));
         let _ = std::fs::remove_dir_all(&skill_dir);
         let _ = std::fs::remove_dir_all(&bogus);
     }

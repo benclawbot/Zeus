@@ -1010,8 +1010,8 @@ export function App() {
   }
 
   // /ls <path> — autonomous file discovery. Empty path defaults to the
-  // workspace root so the agent can boot a fresh repo without being told
-  // a specific directory.
+  // runtime launch directory, but absolute paths are accepted so the agent
+  // can inspect anywhere on the machine.
   async function handleListCommand(input: string): Promise<boolean> {
     const path = input.replace(/^\/ls\s+/, "").trim();
     if (!isTauri) { appendZeusMessage("Workspace listing is only available inside the Zeus desktop runtime."); return true; }

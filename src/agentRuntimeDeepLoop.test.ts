@@ -12,7 +12,7 @@ describe("agentRuntimeDeepLoop", () => {
   it("marks failed observations as recoverable instead of terminal", () => {
     const plan = derivePlanFromObjective("Fix workspace path failure");
     const next = updatePlanFromObservations(plan, [
-      { label: "ls .", ok: false, message: "Workspace path must point inside the workspace." },
+      { label: "ls .", ok: false, message: "Workspace path does not exist." },
     ]);
     expect(next.status).toBe("in_progress");
     expect(next.steps.find((step) => step.id === "recover")?.status).toBe("in_progress");
@@ -20,7 +20,7 @@ describe("agentRuntimeDeepLoop", () => {
   });
 
   it("classifies workspace failures and emits a concrete recovery instruction", () => {
-    expect(classifyAgentFailure("Workspace path must point inside the workspace.")).toBe("workspace");
-    expect(recoveryInstructionFor("Workspace path must point inside the workspace.")).toContain("listing the workspace root");
+    expect(classifyAgentFailure("Workspace path does not exist.")).toBe("workspace");
+    expect(recoveryInstructionFor("Workspace path does not exist.")).toContain("absolute path");
   });
 });

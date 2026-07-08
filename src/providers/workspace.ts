@@ -2,10 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "./minimax";
 
 export function getSelectedWorkspaceDir(): string | undefined {
-  // Workspace selection is now a runtime concern. In packaged builds the
-  // backend resolves Zeus' installed/resource home and skills directory; in
-  // Full mode it may also authorize absolute filesystem paths. The composer
-  // no longer owns a per-session workspace folder.
+  // Workspace selection is now only a convenience anchor for relative paths.
+  // The Rust backend currently runs in unrestricted filesystem mode, so
+  // absolute paths and parent traversal are accepted by every access mode.
   return undefined;
 }
 
