@@ -39,7 +39,7 @@ Each task below produces self-contained changes that compile and test independen
 **Files:**
 - Modify: `src-tauri/tauri.conf.json:13-22`
 
-- [ ] **Step 1: Edit tauri.conf.json**
+- [x] **Step 1: Edit tauri.conf.json**
 
 Open `src-tauri/tauri.conf.json` and add `"fullscreen": true` to the window block. The block currently reads:
 
@@ -72,12 +72,12 @@ Add `"fullscreen": true` as a new line right after `"title": "Zeus",`. Result:
     ],
 ```
 
-- [ ] **Step 2: Verify JSON is valid**
+- [x] **Step 2: Verify JSON is valid**
 
 Run: `cd ~/Projects/Zeus && node -e "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')); console.log('ok')"`
 Expected output: `ok`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src-tauri/tauri.conf.json && git commit -m "feat(window): launch Zeus in fullscreen on Windows"
@@ -92,7 +92,7 @@ cd ~/Projects/Zeus && git add src-tauri/tauri.conf.json && git commit -m "feat(w
 - Modify: `src-tauri/src/lib.rs:234`
 - Modify: `src-tauri/Cargo.toml`
 
-- [ ] **Step 1: Replace main.rs to add windows_subsystem attribute**
+- [x] **Step 1: Replace main.rs to add windows_subsystem attribute**
 
 Replace the entire content of `src-tauri/src/main.rs` (currently 3 lines) with:
 
@@ -104,7 +104,7 @@ fn main() {
 }
 ```
 
-- [ ] **Step 2: Add tracing dependency**
+- [x] **Step 2: Add tracing dependency**
 
 In `src-tauri/Cargo.toml`, find the `[dependencies]` section. Add this line at the end of the dependencies list (after `once_cell = "1"` or after the last entry):
 
@@ -112,7 +112,7 @@ In `src-tauri/Cargo.toml`, find the `[dependencies]` section. Add this line at t
 tracing = "0.1"
 ```
 
-- [ ] **Step 3: Replace eprintln! with tracing::warn! in lib.rs**
+- [x] **Step 3: Replace eprintln! with tracing::warn! in lib.rs**
 
 In `src-tauri/src/lib.rs`, find the line (line ~234):
 
@@ -126,12 +126,12 @@ Replace with:
             Err(error) => tracing::warn!(skill = %path.display(), "{error}", "Skipping invalid skill"),
 ```
 
-- [ ] **Step 4: Verify cargo check passes**
+- [x] **Step 4: Verify cargo check passes**
 
 Run: `cd ~/Projects/Zeus/src-tauri && cargo check 2>&1 | tail -30`
 Expected: ends with `Finished ...` and no `error[E...]` lines.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src-tauri/src/main.rs src-tauri/src/lib.rs src-tauri/Cargo.toml && git commit -m "feat(window): hide Windows console in release builds"
@@ -144,7 +144,7 @@ cd ~/Projects/Zeus && git add src-tauri/src/main.rs src-tauri/src/lib.rs src-tau
 **Files:**
 - Modify: `src/styles.css:440-465`
 
-- [ ] **Step 1: Replace the .chat-user layout in styles.css**
+- [x] **Step 1: Replace the .chat-user layout in styles.css**
 
 In `src/styles.css`, find the block starting at `.chat-zeus` (line ~440) and ending at `.chat-user .chat-heading time` (line ~464). The block currently reads:
 
@@ -201,12 +201,12 @@ Replace `.chat-user .chat-body` (lines 451-455) with:
 
 Leave the `.chat-user .chat-heading` and `.chat-user .chat-heading time` blocks unchanged (they handle heading alignment and are correct).
 
-- [ ] **Step 2: Run existing tests to verify no regression**
+- [x] **Step 2: Run existing tests to verify no regression**
 
 Run: `cd ~/Projects/Zeus && npx vitest run 2>&1 | tail -40`
 Expected: all tests pass, no failures.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/styles.css && git commit -m "fix(css): right-align user chat bubbles without RTL side effects"
@@ -219,7 +219,7 @@ cd ~/Projects/Zeus && git add src/styles.css && git commit -m "fix(css): right-a
 **Files:**
 - Modify: `src/App.tsx:1321`
 
-- [ ] **Step 1: Update the slash-menu hint copy**
+- [x] **Step 1: Update the slash-menu hint copy**
 
 In `src/App.tsx`, find line ~1321:
 
@@ -233,12 +233,12 @@ Replace with:
                   <p className="slash-hint">Up Down navigate, Enter or Tab pick, Esc close. Typing a space picks the command and starts its arguments.</p>
 ```
 
-- [ ] **Step 2: Verify tests pass**
+- [x] **Step 2: Verify tests pass**
 
 Run: `cd ~/Projects/Zeus && npx vitest run 2>&1 | tail -20`
 Expected: all tests pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "feat(slash): expand picker hint to explain space-picks-command behavior"
@@ -252,7 +252,7 @@ cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "feat(slash): expand 
 - Modify: `src/state/harness.ts`
 - Modify: `src/state/harness.test.ts`
 
-- [ ] **Step 1: Update harness.ts with extended state machine**
+- [x] **Step 1: Update harness.ts with extended state machine**
 
 Replace the entire current content of `src/state/harness.ts` with:
 
@@ -316,12 +316,12 @@ export function transitionHarnessProposal(
 }
 ```
 
-- [ ] **Step 2: Run existing harness tests to verify they still pass**
+- [x] **Step 2: Run existing harness tests to verify they still pass**
 
 Run: `cd ~/Projects/Zeus && npx vitest run src/state/harness.test.ts 2>&1 | tail -20`
 Expected: the existing single test (`records approval in the proposal and change history`) passes.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/state/harness.ts src/state/harness.test.ts && git commit -m "feat(harness): extend proposal status state machine with implementing/applied/failed"
@@ -335,7 +335,7 @@ cd ~/Projects/Zeus && git add src/state/harness.ts src/state/harness.test.ts && 
 - Create: `src/state/harness.notifications.ts`
 - Create: `src/state/harness.notifications.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `src/state/harness.notifications.test.ts` with the following content:
 
@@ -379,12 +379,12 @@ describe("countPendingProposals", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd ~/Projects/Zeus && npx vitest run src/state/harness.notifications.test.ts 2>&1 | tail -20`
 Expected: FAIL with "Cannot find module './harness.notifications'" or similar module-not-found error.
 
-- [ ] **Step 3: Implement countPendingProposals**
+- [x] **Step 3: Implement countPendingProposals**
 
 Create `src/state/harness.notifications.ts`:
 
@@ -411,12 +411,12 @@ export function countPendingProposals(
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd ~/Projects/Zeus && npx vitest run src/state/harness.notifications.test.ts 2>&1 | tail -20`
 Expected: 4 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/state/harness.notifications.ts src/state/harness.notifications.test.ts && git commit -m "feat(harness): add notification badge count helper"
@@ -430,7 +430,7 @@ cd ~/Projects/Zeus && git add src/state/harness.notifications.ts src/state/harne
 - Create: `src/components/AgentProgressBubble.tsx`
 - Create: `src/components/AgentProgressBubble.test.tsx`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `src/components/AgentProgressBubble.test.tsx`:
 
@@ -477,12 +477,12 @@ describe("AgentProgressBubble", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd ~/Projects/Zeus && npx vitest run src/components/AgentProgressBubble.test.tsx 2>&1 | tail -20`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement AgentProgressBubble**
+- [x] **Step 3: Implement AgentProgressBubble**
 
 Create `src/components/AgentProgressBubble.tsx`:
 
@@ -591,12 +591,12 @@ export function AgentProgressBubble({
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd ~/Projects/Zeus && npx vitest run src/components/AgentProgressBubble.test.tsx 2>&1 | tail -30`
 Expected: 5 tests pass.
 
-- [ ] **Step 5: Add minimal CSS**
+- [x] **Step 5: Add minimal CSS**
 
 In `src/styles.css`, append the following at the end of the file:
 
@@ -694,12 +694,12 @@ In `src/styles.css`, append the following at the end of the file:
 }
 ```
 
-- [ ] **Step 6: Run all tests again**
+- [x] **Step 6: Run all tests again**
 
 Run: `cd ~/Projects/Zeus && npx vitest run 2>&1 | tail -20`
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/components/AgentProgressBubble.tsx src/components/AgentProgressBubble.test.tsx src/styles.css && git commit -m "feat(agent): add AgentProgressBubble for per-step run rendering"
@@ -716,7 +716,7 @@ This is the largest task. Edits are additive and structured so a partial complet
 
 ### Step 8a: Update imports + state shape
 
-- [ ] **Step 1: Add new imports + state fields**
+- [x] **Step 1: Add new imports + state fields**
 
 In `src/App.tsx`, find the existing `import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";` (around line 34). Replace with:
 
@@ -754,12 +754,12 @@ Find the existing `function startNewSession() {` declaration (around line 386) a
   }
 ```
 
-- [ ] **Step 2: Run typecheck**
+- [x] **Step 2: Run typecheck**
 
 Run: `cd ~/Projects/Zeus && npx tsc --noEmit 2>&1 | tail -30`
 Expected: any errors refer only to the still-unused `applyProposal` / `discardProposal` calls, which we add next. If there are unrelated errors, fix those first.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "refactor(app): add agent progress state, extend startNewSession signature"
@@ -767,7 +767,7 @@ cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "refactor(app): add a
 
 ### Step 8b: Replace recordProposal with applyProposal + discardProposal
 
-- [ ] **Step 4: Replace recordProposal helper**
+- [x] **Step 4: Replace recordProposal helper**
 
 Find the existing `function recordProposal(...)` block (around line 324-328). Replace with:
 
@@ -825,7 +825,7 @@ Find the existing `function recordProposal(...)` block (around line 324-328). Re
   }
 ```
 
-- [ ] **Step 5: Replace the sidebar harness-card buttons**
+- [x] **Step 5: Replace the sidebar harness-card buttons**
 
 Find the existing sidebar `.harness-card` section (around line 1189-1203). It currently contains two blocks of `<div className="proposal-actions">`. Replace those two action blocks with:
 
@@ -838,7 +838,7 @@ Find the existing sidebar `.harness-card` section (around line 1189-1203). It cu
 
 (Replace both the primary and secondary button rows with a single row. Remove the "Edit", "Apply Once", "Roll Back" buttons.)
 
-- [ ] **Step 6: Replace the Harness Evolution view buttons**
+- [x] **Step 6: Replace the Harness Evolution view buttons**
 
 Find the `activeView === "Harness Evolution"` block in `App.tsx` (around line 1447-1477). Replace the entire `proposal-actions` row at the end:
 
@@ -907,17 +907,17 @@ Delete the `beginProposalEdit` and `saveProposalEdit` functions (around line 330
 - Remove the `saveProposalEdit` function (around line 335-349)
 - Remove `adoptProposedHarnessRule` references to `setProposalEditing(false);` and `setProposalDraft` (around line 508)
 
-- [ ] **Step 7: Run typecheck**
+- [x] **Step 7: Run typecheck**
 
 Run: `cd ~/Projects/Zeus && npx tsc --noEmit 2>&1 | tail -30`
 Expected: clean (no errors).
 
-- [ ] **Step 8: Run all tests**
+- [x] **Step 8: Run all tests**
 
 Run: `cd ~/Projects/Zeus && npx vitest run 2>&1 | tail -20`
 Expected: all tests pass.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "feat(harness): apply/discard flow with pre-send composer editing"
@@ -925,7 +925,7 @@ cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "feat(harness): apply
 
 ### Step 8c: Add notification badge to nav button
 
-- [ ] **Step 10: Add notification badge to nav list**
+- [x] **Step 10: Add notification badge to nav list**
 
 Find the `navItems.map(...)` block (around line 1142-1147):
 
@@ -988,12 +988,12 @@ Add CSS for `.nav-badge` and `.nav-label`. In `src/styles.css`, append:
 }
 ```
 
-- [ ] **Step 11: Run typecheck + tests**
+- [x] **Step 11: Run typecheck + tests**
 
 Run: `cd ~/Projects/Zeus && npx tsc --noEmit 2>&1 | tail -20 && npx vitest run 2>&1 | tail -15`
 Expected: both pass clean.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/App.tsx src/styles.css && git commit -m "feat(harness): render notification badge on Harness Evolution nav item"
@@ -1001,7 +1001,7 @@ cd ~/Projects/Zeus && git add src/App.tsx src/styles.css && git commit -m "feat(
 
 ### Step 8d: Render AgentProgressBubble in chat
 
-- [ ] **Step 13: Wire the agent progress bubble into chat rendering**
+- [x] **Step 13: Wire the agent progress bubble into chat rendering**
 
 Find the chat-rendering block (around line 1274-1299). It currently maps `chat` with a ternary on `entry.role === "user"`. Add a new branch for progress messages. Replace the existing block:
 
@@ -1064,7 +1064,7 @@ Then update the chat render to handle the new field. Replace the existing `chat.
 
 Replace the three `...` ellipses with the exact existing markup from the file (lines 1274-1299). Do not change that markup — just hoist it inside the new ternary.
 
-- [ ] **Step 14: Seed a progress bubble inside `runChatTurn` after `runAgentTask`**
+- [x] **Step 14: Seed a progress bubble inside `runChatTurn` after `runAgentTask`**
 
 In `App.tsx`, find the `runChatTurn` function (around line 773-878). Inside it, find the `try { const result = await runAgentTask(...); ... }` block (around line 824-833). Right before `appendZeusMessage(summarizeAgentRun(result));`, insert:
 
@@ -1115,7 +1115,7 @@ Also: after the final assistant reply is committed (around the line `setChat((en
 
 (`agentResult` is the local variable introduced at line ~822 in the current file, populated by the awaited `runAgentTask(...)` call.)
 
-- [ ] **Step 15: Extend SYSTEM_PROMPT with self-recovery + structured final reply**
+- [x] **Step 15: Extend SYSTEM_PROMPT with self-recovery + structured final reply**
 
 Find `const SYSTEM_PROMPT = ...` (around line 168). Append a clearly-marked block to the string. Find the end of the existing `SYSTEM_PROMPT` literal (the line ending with "...reply in plain text."). Replace that line with:
 
@@ -1142,12 +1142,12 @@ const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
   "- If pending items need a user decision, end the final reply with a **Decision needed** section that names the choice, options, and which option you recommend.";
 ```
 
-- [ ] **Step 16: Run typecheck + tests**
+- [x] **Step 16: Run typecheck + tests**
 
 Run: `cd ~/Projects/Zeus && npx tsc --noEmit 2>&1 | tail -20 && npx vitest run 2>&1 | tail -30`
 Expected: clean.
 
-- [ ] **Step 17: Commit**
+- [x] **Step 17: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "feat(agent): render per-step progress bubble and prompt self-recovery"
@@ -1155,7 +1155,7 @@ cd ~/Projects/Zeus && git add src/App.tsx && git commit -m "feat(agent): render 
 
 ### Step 8e: Add tests for apply flow
 
-- [ ] **Step 18: Add test for apply→implementing→applied transitions**
+- [x] **Step 18: Add test for apply→implementing→applied transitions**
 
 Open `src/state/harness.test.ts`. Add additional test cases to the existing `describe` block. The file currently has a single `it("records approval in the proposal and change history", ...)`. Append:
 
@@ -1211,12 +1211,12 @@ Open `src/state/harness.test.ts`. Add additional test cases to the existing `des
   });
 ```
 
-- [ ] **Step 19: Run the harness tests**
+- [x] **Step 19: Run the harness tests**
 
 Run: `cd ~/Projects/Zeus && npx vitest run src/state/harness.test.ts 2>&1 | tail -20`
 Expected: 4 tests pass.
 
-- [ ] **Step 20: Commit**
+- [x] **Step 20: Commit**
 
 ```bash
 cd ~/Projects/Zeus && git add src/state/harness.test.ts && git commit -m "test(harness): cover approved → applied | failed transitions with sessionId"
@@ -1228,27 +1228,27 @@ cd ~/Projects/Zeus && git add src/state/harness.test.ts && git commit -m "test(h
 
 **Files:** none (build only)
 
-- [ ] **Step 1: Run the full test suite**
+- [x] **Step 1: Run the full test suite**
 
 Run: `cd ~/Projects/Zeus && npx vitest run 2>&1 | tail -20`
 Expected: all tests pass.
 
-- [ ] **Step 2: Run the full typecheck**
+- [x] **Step 2: Run the full typecheck**
 
 Run: `cd ~/Projects/Zeus && npx tsc --noEmit 2>&1 | tail -20`
 Expected: clean.
 
-- [ ] **Step 3: Run the production build**
+- [x] **Step 3: Run the production build**
 
 Run: `cd ~/Projects/Zeus && npm run tauri:build 2>&1 | tail -30`
 Expected: ends with the two installer paths (MSI + NSIS) as before. The build should succeed because no schema-breaking changes were made.
 
-- [ ] **Step 4: Verify installer artifacts exist**
+- [x] **Step 4: Verify installer artifacts exist**
 
 Run: `ls -lh ~/Projects/Zeus/src-tauri/target/release/bundle/msi/Zeus_0.1.0_x64_en-US.msi ~/Projects/Zeus/src-tauri/target/release/bundle/nsis/Zeus_0.1.0_x64-setup.exe`
 Expected: both files listed with non-zero sizes.
 
-- [ ] **Step 5: Final commit (if any lingering changes)**
+- [x] **Step 5: Final commit (if any lingering changes)**
 
 ```bash
 cd ~/Projects/Zeus && git status --short
