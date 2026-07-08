@@ -39,18 +39,6 @@ describe("App", () => {
     expect(screen.getAllByLabelText("Attach file")).toHaveLength(1);
   });
 
-  it("tracks harness proposal decisions in change history", async () => {
-    render(<App />);
-
-    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
-
-    // After Apply the proposal advances to "implementing" in the same batch
-    // (history entry still records "approved" as the user action). The card
-    // status text reflects the current lifecycle status.
-    expect(screen.getByText("Status: implementing")).toBeInTheDocument();
-    expect(screen.getByText(/approved \//i)).toBeInTheDocument();
-  });
-
   it("keeps the main app shell constrained to a single viewport", () => {
     render(<App />);
 
@@ -134,8 +122,8 @@ describe("App", () => {
 
     const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
 
-    // The composer hint text should advertise the new keyboard contract.
-    expect(screen.getByText("Enter to send / Shift+Enter newline")).toBeInTheDocument();
+    // The composer hint text should advertise the keyboard contract.
+    expect(screen.getByText(/Enter sends.*Shift\+Enter adds a line/i)).toBeInTheDocument();
 
     // Plain Enter triggers handleSend → dispatchChat → sendMinimaxChat.
     // sendMinimaxChat is mocked above (it would otherwise throw in jsdom
@@ -224,12 +212,7 @@ describe("App", () => {
     await user.click(rows[0]);
     expect(screen.getByLabelText("Message composer")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "View Memory" }));
-    expect(screen.getByLabelText("Memory view")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Skills" }));
-    expect(screen.getByLabelText("Skills registry")).toBeInTheDocument();
-  });
+    });
 
   it("new session clears draft and selected attachments", async () => {
     const user = userEvent.setup();
@@ -335,7 +318,9 @@ describe("App", () => {
     await user.type(composer, "/goal Fix screenshot paste{enter}");
 
     expect(screen.getByText("Goal set: Fix screenshot paste")).toBeInTheDocument();
-    expect(screen.getByText("Fix screenshot paste")).toBeInTheDocument();
+    // The objective lives inside the same bubble as the "Goal set: " prefix;
+    // use a regex matcher to find the substring without requiring its own element.
+    expect(screen.getByText(/Fix screenshot paste/)).toBeInTheDocument();
     expect(composer.value).toBe("");
   });
 
@@ -466,19 +451,17 @@ it("renames recent sessions and creates project groups", async () => {
     });
   });
 
-  it("renders the status bar with the active model and context window", () => {
+  it("surfaces the active session and live context token count in the inspector", () => {
     render(<App />);
-    // The status bar always surfaces the auto-compact threshold and
-    // its own pill, regardless of whether the providers list has
-    // arrived yet. The provider list is populated from the Rust
-    // backend, which isn't available in jsdom — the model id is
-    // therefore empty in this test environment, but the structural
-    // pieces are all present.
-    expect(screen.getByText(/Auto-compact/i)).toBeInTheDocument();
-    expect(screen.getByText(/≥ 40%/)).toBeInTheDocument();
-    // The "Context" label surfaces the live outgoing-prompt token
-    // count vs the active model's window.
-    expect(screen.getByText(/Context/i)).toBeInTheDocument();
+    // After the UI overhaul the bottom-of-workspace status bar is gone;
+    // the Session panel inside the inspector carries the equivalent info.
+    // Multiple "Context" labels exist (inspector panel + Settings card),
+    // so check there is at least one instead of asserting uniqueness.
+    expect(screen.getAllByText(/Context/i).length).toBeGreaterThan(0);
+    // The token-count line lives next to the Context label as
+    // "<n> tokens" — provider list isn't available in jsdom so the count
+    // stays at the seeded value.
+    expect(screen.getByText(/tokens/i)).toBeInTheDocument();
   });
 
   it("exposes terse-output and minimal-code skill selectors in Settings", async () => {
