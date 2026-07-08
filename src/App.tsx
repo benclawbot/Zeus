@@ -160,68 +160,121 @@ interface AttachedFile {
 // (via SYSTEM_PROMPT) to emit exactly one block per turn, with one JSON step
 // per line. We extract the steps; the surrounding text stays in the chat
 // bubble so the user sees the model's commentary.
+// Sentinel that marks the end of a `createArtifact` raw-body block inside
+// a `tool` fence. The line up to (and not including) this marker is
+// appended verbatim to the file body. Mirrors `RAW_BODY_END_MARKER` in
+// providers/registry.ts.
+const RAW_BODY_END_MARKER = "<<<END";
+// Tool kinds whose body is collected verbatim until RAW_BODY_END_MARKER,
+// instead of being JSON-parsed on a single line. Matches registry.ts.
+const RAW_BODY_KINDS = new Set(["createArtifact"]);
+
 function parseToolBlock(text: string): AgentStepRequest[] | null {
   const match = text.match(/```tool\s*\n([\s\S]*?)\n```/);
   if (!match) return null;
+  const rawLines = match[1].split(/\r?\n/);
   const steps: AgentStepRequest[] = [];
-  for (const rawLine of match[1].split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
+  for (let i = 0; i < rawLines.length; ) {
+    const line = rawLines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) { i += 1; continue; }
     const space = line.indexOf(" ");
-    if (space < 0) continue;
+    if (space < 0) { i += 1; continue; }
     const kind = line.slice(0, space).trim();
-    const json = line.slice(space + 1).trim();
-    let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(json); } catch { continue; }
-    if (kind === "readFile" && typeof parsed.path === "string") {
-      steps.push({ kind: "readFile", path: parsed.path });
-    } else if (kind === "writeFile" && typeof parsed.path === "string" && typeof parsed.content === "string") {
-      steps.push({
-        kind: "writeFile",
-        path: parsed.path,
-        content: parsed.content,
-        create: parsed.create === true,
-        overwrite: parsed.overwrite === true,
-      });
-    } else if (kind === "editFile" && typeof parsed.path === "string" && typeof parsed.find === "string" && typeof parsed.replace === "string") {
-      steps.push({
-        kind: "editFile",
-        path: parsed.path,
-        find: parsed.find,
-        replace: parsed.replace,
-        replaceAll: parsed.replaceAll === true,
-      });
-    } else if (kind === "runCommand" && typeof parsed.program === "string" && Array.isArray(parsed.args)) {
-      steps.push({
-        kind: "runCommand",
-        program: parsed.program,
-        args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
-        cwd: typeof parsed.cwd === "string" ? parsed.cwd : undefined,
-        timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
-      });
-    } else if (kind === "listDir" && typeof parsed.path === "string") {
-      steps.push({
-        kind: "listDir",
-        path: parsed.path,
-        maxEntries: typeof parsed.maxEntries === "number" ? parsed.maxEntries : undefined,
-      });
-    } else if (kind === "loadProjectConfig") {
-      steps.push({ kind: "loadProjectConfig" });
-    } else if (kind === "gitOp" && Array.isArray(parsed.args)) {
-      steps.push({
-        kind: "gitOp",
-        args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
-        timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
-      });
-    } else if (kind === "runTest") {
-      steps.push({
-        kind: "runTest",
-        args: Array.isArray(parsed.args) ? parsed.args.filter((arg): arg is string => typeof arg === "string") : [],
-        timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
-      });
+    const rest = line.slice(space + 1).trim();
+    if (RAW_BODY_KINDS.has(kind)) {
+      // `createArtifact path=foo.html create=true overwrite=true`
+      // — header carries key=value tokens, body runs until `<<<END`.
+      const metadata: Record<string, string> = {};
+      for (const token of rest.split(/\s+/)) {
+        if (!token) continue;
+        const eq = token.indexOf("=");
+        if (eq === -1) continue;
+        metadata[token.slice(0, eq)] = token.slice(eq + 1);
+      }
+      const bodyLines: string[] = [];
+      let j = i + 1;
+      while (j < rawLines.length) {
+        const nextTrim = rawLines[j].trim();
+        if (nextTrim === RAW_BODY_END_MARKER) { j += 1; break; }
+        bodyLines.push(rawLines[j]);
+        j += 1;
+      }
+      i = j;
+      if (metadata.path) {
+        steps.push({
+          kind: "writeFile",
+          path: metadata.path,
+          content: bodyLines.join("\n"),
+          create: metadata.create !== "false",
+          overwrite: metadata.overwrite !== "false",
+        });
+      }
+      continue;
     }
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(rest); } catch { i += 1; continue; }
+    const step = parseSingleToolStep(kind, parsed);
+    if (step) steps.push(step);
+    i += 1;
   }
   return steps.length > 0 ? steps : null;
+}
+
+function parseSingleToolStep(kind: string, parsed: Record<string, unknown>): AgentStepRequest | null {
+  if (kind === "readFile" && typeof parsed.path === "string") {
+    return { kind: "readFile", path: parsed.path, maxBytes: typeof parsed.maxBytes === "number" ? parsed.maxBytes : undefined };
+  }
+  if (kind === "writeFile" && typeof parsed.path === "string" && typeof parsed.content === "string") {
+    return {
+      kind: "writeFile",
+      path: parsed.path,
+      content: parsed.content,
+      create: parsed.create === true,
+      overwrite: parsed.overwrite === true,
+    };
+  }
+  if (kind === "editFile" && typeof parsed.path === "string" && typeof parsed.find === "string" && typeof parsed.replace === "string") {
+    // Accept both `replaceAll` (canonical) and `replace_all` (snake_case
+    // variant some models emit); an explicit true is required to enable
+    // replace-all, otherwise we default to a single replacement.
+    const replaceAll = parsed.replaceAll === true || parsed.replace_all === true;
+    return { kind: "editFile", path: parsed.path, find: parsed.find, replace: parsed.replace, replaceAll };
+  }
+  if (kind === "runCommand" && typeof parsed.program === "string" && Array.isArray(parsed.args)) {
+    return {
+      kind: "runCommand",
+      program: parsed.program,
+      args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
+      cwd: typeof parsed.cwd === "string" ? parsed.cwd : undefined,
+      timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
+    };
+  }
+  if (kind === "listDir" && typeof parsed.path === "string") {
+    return {
+      kind: "listDir",
+      path: parsed.path,
+      maxEntries: typeof parsed.maxEntries === "number" ? parsed.maxEntries : undefined,
+    };
+  }
+  if (kind === "loadProjectConfig") {
+    return { kind: "loadProjectConfig" };
+  }
+  if (kind === "gitOp" && Array.isArray(parsed.args)) {
+    return {
+      kind: "gitOp",
+      args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
+      timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
+    };
+  }
+  if (kind === "runTest") {
+    return {
+      kind: "runTest",
+      args: Array.isArray(parsed.args) ? parsed.args.filter((arg): arg is string => typeof arg === "string") : [],
+      timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
+    };
+  }
+  return null;
 }
 
 interface GoalState {
@@ -247,26 +300,33 @@ const mergeCandidateRules = [
   { label: "Debugging and root-cause analysis", ids: ["5-why", "debugging-and-error-recovery"] },
 ];
 
-const SYSTEM_PROMPT = "You are Zeus, a concise local-first coding agent.\n" +
-  "When the user asks you to inspect or modify files in the workspace, or to run a shell command, emit a fenced `tool` block listing the steps you want to execute. Each step is one line in JSON.\n" +
-  "Example:\n" +
-  "```tool\n" +
-  "readFile {\"path\":\"src/foo.ts\"}\n" +
-  "runCommand {\"program\":\"npm\",\"args\":[\"test\"]}\n" +
-  "editFile {\"path\":\"src/foo.ts\",\"find\":\"old\",\"replace\":\"new\",\"replaceAll\":false}\n" +
-  "```\n" +
-  "Available step kinds: readFile, writeFile, editFile, runCommand, listDir, loadProjectConfig, gitOp, runTest.\n" +
-  "After the steps run, the workspace tool panel shows the diff/log; you will see the results in the next turn and can ask for more steps.\n" +
-  "Do not emit a tool block unless the user actually wants a workspace action. For pure chat or explanations, reply in plain text.\n" +
-  "\n" +
-  "# On failures and partial outcomes\n" +
-  "- If a tool step fails, attempt a corrected `tool` block that takes a different approach, or include a fallback in the next tool block, before emitting your final reply. Do not give up after one failure.\n" +
-  "- Only emit a final reply when you cannot proceed further on your own.\n" +
-  "- When you do emit a final reply (whether the run succeeded, partially succeeded, or fully failed), structure it as three sections:\n" +
-  "  - **What was done** — concrete actions and the result for each.\n" +
-  "  - **What's still pending** — open items, with the reason each is pending.\n" +
-  "  - **Why it's pending** — the failure or constraint that left it open.\n" +
-  "- If pending items need a user decision, end the final reply with a **Decision needed** section that names the choice, options, and which option you recommend.";
+const SYSTEM_PROMPT = [
+  "# Identity",
+  "You are Zeus, a local-first autonomous coding agent running inside the Zeus desktop app.",
+  "You live in the user's project, can read and edit files, run shell commands, run tests, and drive the workspace through structured tool calls.",
+  "Your single conversation with the user is one continuous chat — every reply goes to them, and every `tool` block you emit runs against their machine.",
+  "",
+  "# How to reply",
+  "- When the user asks a conversational question — about you, your capabilities, your setup, what just happened, anything that isn't a request to act — answer in plain text. Do not emit a `tool` block.",
+  "- When the user asks you to do something in the workspace (read/edit a file, run a command, run tests, search code, git operations, project config inspection), emit a fenced `tool` block listing the steps you want executed. Each step is one line of JSON.",
+  "- When a step fails, attempt a corrected `tool` block on the next turn before giving up. Don't loop on the same failing call — switch tools or stop and explain.",
+  "",
+  "# Tool call syntax",
+  "```tool",
+  "readFile {\"path\":\"src/foo.ts\"}",
+  "runCommand {\"program\":\"npm\",\"args\":[\"test\"]}",
+  "editFile {\"path\":\"src/foo.ts\",\"find\":\"old\",\"replace\":\"new\",\"replaceAll\":false}",
+  "```",
+  "Available step kinds: readFile, writeFile, editFile, runCommand, listDir, search, createArtifact, loadProjectConfig, gitOp, runTest.",
+  "After the steps run, you'll see the structured observation in the next turn and can either chain another tool block or write a plain-text summary.",
+  "",
+  "# Final reply structure",
+  "When you emit a final reply (whether the run succeeded, partially succeeded, or failed), structure it as three sections:",
+  "- **What was done** — concrete actions and the result for each.",
+  "- **What's still pending** — open items, with the reason each is pending.",
+  "- **Why it's pending** — the failure or constraint that left it open.",
+  "If pending items need a user decision, end the reply with a **Decision needed** section that names the choice, options, and which option you recommend.",
+].join("\n");
 const COMPACT_KEEP_LAST = 6;
 const MAX_TOOL_TURNS = 6;
 const PROJECT_NAME = "Zeus";
