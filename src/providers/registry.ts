@@ -25,9 +25,31 @@ export interface ProviderClient {
   chat: typeof sendMinimaxChat;
 }
 
+/**
+ * One part of a multimodal user message. Mirrors the OpenAI / Anthropic
+ * shapes (text + image_url). Provider adapters own the final wire format;
+ * this is the cross-provider shape the chat loop builds.
+ */
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
+export type ChatContent = string | ChatContentPart[];
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: ChatContent;
+}
+
+/** Pull the textual portion of a multimodal message. Returns "" if the
+ *  message only carries image parts; callers that need a string (token
+ *  estimator, lastUserMessage) can fall back on the joined text. */
+export function textFromContent(content: ChatContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
 }
 
 export interface ChatOptions {
@@ -163,7 +185,7 @@ export async function dispatchChat(options: ChatOptions): Promise<ChatResponse> 
 }
 
 function withWorkspaceToolPrompt(messages: ChatMessage[]): ChatMessage[] {
-  if (messages.some((message) => message.role === "system" && message.content.includes("# Zeus workspace tools"))) {
+  if (messages.some((message) => message.role === "system" && textFromContent(message.content).includes("# Zeus workspace tools"))) {
     return messages;
   }
   const systemIndex = messages.findIndex((message) => message.role === "system");
@@ -171,7 +193,7 @@ function withWorkspaceToolPrompt(messages: ChatMessage[]): ChatMessage[] {
     return [{ role: "system", content: WORKSPACE_TOOL_PROMPT }, ...messages];
   }
   return messages.map((message, index) => index === systemIndex
-    ? { ...message, content: `${message.content}\n\n${WORKSPACE_TOOL_PROMPT}` }
+    ? { ...message, content: `${textFromContent(message.content)}\n\n${WORKSPACE_TOOL_PROMPT}` }
     : message);
 }
 
@@ -443,7 +465,7 @@ function stringList(value: unknown[]): string[] {
 
 function lastUserMessage(messages: ChatMessage[]): string | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === "user") return messages[index].content;
+    if (messages[index].role === "user") return textFromContent(messages[index].content);
   }
   return undefined;
 }

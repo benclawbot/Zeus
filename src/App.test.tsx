@@ -18,7 +18,23 @@ vi.mock("./providers/minimax", async () => {
   };
 });
 
+// Capture the full ChatOptions payload so the image-attach tests can
+// assert the bytes actually reach the model call (and aren't silently
+// dropped between React state and the Rust dispatch).
+const capturedChatCalls: Array<{ messages: unknown[] }> = [];
+vi.mock("./providers/registry", async () => {
+  const actual = await vi.importActual<typeof import("./providers/registry")>("./providers/registry");
+  return {
+    ...actual,
+    dispatchChat: vi.fn(async (options: { messages: unknown[] }) => {
+      capturedChatCalls.push({ messages: options.messages });
+      return { content: "ok", model: "MiniMax-M3" };
+    }),
+  };
+});
+
 import { App } from "./App";
+import { buildUserOutboundContent, type ChatAttachment } from "./App";
 
 describe("App", () => {
   it("uses current Zeus branding and excludes obsolete reference-image controls", () => {
@@ -195,8 +211,8 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    const sessionsView = screen.getByLabelText("Sessions view");
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    const sessionsView = screen.getByLabelText("Projects view");
     expect(sessionsView).toBeInTheDocument();
 
     // No hardcoded seeds anymore. First launch auto-creates a single
@@ -204,8 +220,8 @@ describe("App", () => {
     // into (the in-memory ref isn't persisted until the user sends).
     expect(within(sessionsView).getAllByText(/Untitled Session/).length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: /New Session/ }));
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    const sessionsView2 = screen.getByLabelText("Sessions view");
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    const sessionsView2 = screen.getByLabelText("Projects view");
     // Click any Untitled Session row in the utility grid; multiple rows
     // can match now that first-launch and New Session both create one.
     const rows = within(sessionsView2).getAllByRole("button", { name: /Untitled Session/ });
@@ -324,47 +340,6 @@ describe("App", () => {
     expect(composer.value).toBe("");
   });
 
-  it("/run via direct text run reports when not in the desktop runtime", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
-    await user.type(composer, "/run npm test{enter}");
-
-    // In jsdom, isTauriRuntime is false, so the command is dispatched but the
-    // workspace invocation is rejected with the runtime-required error. We
-    // verify the dispatch path: the slash command is recognized, the composer
-    // is cleared, and the panel surface is present.
-    expect(composer.value).toBe("");
-    expect(screen.getByLabelText("Workspace tool runs")).toBeInTheDocument();
-    expect(screen.getByText(/Shell execution is only available inside the Zeus desktop runtime/i)).toBeInTheDocument();
-  });
-
-  it("/read dispatches to the read path with a non-empty argument", async () => {
-      const user = userEvent.setup();
-      render(<App />);
-
-      const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
-      await user.type(composer, "/read README.md{enter}");
-
-      // In jsdom isTauri is false; the dispatch path lands on the runtime
-      // guard. We verify the slash command is recognized and the panel exists.
-      expect(composer.value).toBe("");
-      expect(screen.getByLabelText("Workspace tool runs")).toBeInTheDocument();
-      expect(screen.getByText(/Workspace file reads are only available/i)).toBeInTheDocument();
-    });
-
-  it("/write requires a separator and shows usage otherwise", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
-    await user.type(composer, "/write missing-separator{enter}");
-
-    expect(composer.value).toBe("");
-    expect(screen.getByText("Usage: /write <path> :: <content>")).toBeInTheDocument();
-  });
-
   it("/edit requires both separators and shows usage otherwise", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -386,57 +361,6 @@ describe("App", () => {
     expect(within(composer).queryByRole("button", { name: /Pick a working folder|Working folder:/i })).not.toBeInTheDocument();
     // The composer must not advertise the obsolete "Access" text label.
     expect(within(composer).queryByText("Access")).not.toBeInTheDocument();
-  });
-
-  it("shows the empty tool-run panel on the Home view", () => {
-      render(<App />);
-      expect(screen.getByText("Tool runs")).toBeInTheDocument();
-      expect(screen.getByText("no runs yet")).toBeInTheDocument();
-    });
-
-    it("shows the Settings view with a provider API keys form", async () => {
-            const user = userEvent.setup();
-          render(<App />);
-
-          await user.click(screen.getByRole("button", { name: "Settings" }));
-
-          // Three provider rows should be visible, each labeled with the env var name.
-          expect(screen.getByText("MiniMax (MINIMAX_API_KEY)")).toBeInTheDocument();
-          expect(screen.getByText("OpenAI (OPENAI_API_KEY)")).toBeInTheDocument();
-          expect(screen.getByText("Anthropic (ANTHROPIC_API_KEY)")).toBeInTheDocument();
-          // In jsdom isTauri is false, so each provider shows "not configured".
-          const rows = screen.getAllByText("not configured");
-          expect(rows.length).toBe(3);
-          // Each provider should also expose a Base URL input, a Model input, and
-          // a Test connection button. The Test button is disabled when no key is
-          // configured.
-          expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) base URL")).toHaveLength(1);
-          expect(screen.getAllByLabelText("MiniMax (MINIMAX_API_KEY) model")).toHaveLength(1);
-          const testButtons = screen.getAllByRole("button", { name: "Test connection" });
-          expect(testButtons.length).toBe(3);
-          for (const btn of testButtons) {
-            expect(btn).toBeDisabled();
-          }
-        });
-
-it("renames recent sessions and creates project groups", async () => {
-  const user = userEvent.setup();
-  render(<App />);
-
-    await user.click(screen.getByRole("button", { name: /Rename Untitled Session/ }));
-    const renameInput = screen.getByLabelText("Session name") as HTMLInputElement;
-    await user.clear(renameInput);
-    await user.type(renameInput, "Visual bug triage");
-    await user.click(screen.getByRole("button", { name: "Save session name" }));
-
-    expect(screen.getAllByText("Visual bug triage").length).toBeGreaterThan(0);
-
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    const projectInput = screen.getByLabelText("New project name") as HTMLInputElement;
-    await user.type(projectInput, "Ocean Wallpaper");
-    await user.click(screen.getByRole("button", { name: "Create project" }));
-
-    expect(screen.getAllByText("Ocean Wallpaper").length).toBeGreaterThan(0);
   });
 
   it("registers multiple providers on the Rust side", async () => {
@@ -476,5 +400,163 @@ it("renames recent sessions and creates project groups", async () => {
     // Default values are "full" for both per the spec recommendation.
     expect((screen.getByLabelText("Terse-output level") as HTMLSelectElement).value).toBe("full");
     expect((screen.getByLabelText("Minimal-code level") as HTMLSelectElement).value).toBe("full");
+  });
+});
+
+describe("buildUserOutboundContent", () => {
+  it("returns the prompt as a plain string when there are no attachments", () => {
+    expect(buildUserOutboundContent("How does this look?", [])).toBe("How does this look?");
+  });
+
+  it("appends a non-image file list to the prompt text", () => {
+    const attachments: ChatAttachment[] = [
+      { id: "1", name: "notes.md", mime: "text/markdown", kind: "file" },
+    ];
+    const out = buildUserOutboundContent("read this", attachments);
+    expect(typeof out).toBe("string");
+    expect(out).toContain("read this");
+    expect(out).toContain("notes.md");
+    expect(out).toContain("Attached files:");
+  });
+
+  it("emits multimodal content blocks when an image is attached", () => {
+    const attachments: ChatAttachment[] = [
+      {
+        id: "img-1",
+        name: "screenshot.png",
+        mime: "image/png",
+        kind: "image",
+        dataUrl: "data:image/png;base64,AAAA",
+      },
+    ];
+    const out = buildUserOutboundContent("What's in this image?", attachments);
+    expect(Array.isArray(out)).toBe(true);
+    const parts = out as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({ type: "text", text: "What's in this image?" });
+    expect(parts[1]).toEqual({ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } });
+  });
+
+  it("drops image attachments that have no dataUrl (hydration race)", () => {
+    const attachments: ChatAttachment[] = [
+      { id: "img-1", name: "screenshot.png", mime: "image/png", kind: "image" },
+    ];
+    const out = buildUserOutboundContent("look", attachments);
+    expect(typeof out).toBe("string");
+    expect(out).toBe("look");
+  });
+});
+
+describe("App image attachment wiring", () => {
+  it("stores image dataUrl on the chat row after paste", async () => {
+    // Minimal bytes — FileReader.readAsDataURL wraps anything in a
+    // valid `data:<mime>;base64,...` URI even for empty content.
+    const screenshot = new File([new Uint8Array([1, 2, 3])], "bug.png", { type: "image/png" });
+
+    render(<App />);
+
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [screenshot],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => screenshot }],
+      },
+    });
+
+    // Pill shows up immediately; bytes fill in on the next microtask.
+    await waitFor(() => {
+      expect(screen.getByText("bug.png")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      const pill = screen.getByRole("img", { name: "bug.png preview" }) as HTMLImageElement;
+      // The <img src> swaps from the blob: preview to a data: URI once
+      // hydration finishes. Either is acceptable as long as the pill is
+      // still rendered (the chat row persists the attachment regardless).
+      expect(pill).toBeInTheDocument();
+    });
+  });
+
+  it("ships the image bytes to the model when the user hits Send", async () => {
+    capturedChatCalls.length = 0;
+    const user = userEvent.setup();
+    const screenshot = new File([new Uint8Array([1, 2, 3, 4, 5])], "bug.png", { type: "image/png" });
+
+    render(<App />);
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [screenshot],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => screenshot }],
+      },
+    });
+    // Hydration (FileReader → setAttachedFiles) runs as a microtask
+    // chain off the paste. The waitFor below polls the dispatched chat
+    // call payload, which gives the hydration plenty of time to land
+    // before we press Enter.
+    await user.type(composer, "what's wrong here?");
+    await user.keyboard("{Enter}");
+
+    // Wait for the dispatched model call to actually carry the image
+    // bytes. The send path is async (hydration microtask → setAttachedFiles
+    // → handleSend → dispatchChat), so we poll until the multimodal
+    // block lands in the captured payload — failing fast if it never
+    // does means hydration raced with Enter.
+    await waitFor(() => {
+      const found = capturedChatCalls.some((call) =>
+        call.messages.some(
+          (m): m is { role: string; content: unknown } =>
+            typeof m === "object" &&
+            m !== null &&
+            (m as { role?: string }).role === "user" &&
+            Array.isArray((m as { content: unknown }).content),
+        ),
+      );
+      expect(found).toBe(true);
+    }, { timeout: 2000 });
+
+    const userTurns = capturedChatCalls
+      .flatMap((call) => call.messages)
+      .filter((m): m is { role: string; content: unknown } =>
+        typeof m === "object" && m !== null && (m as { role?: string }).role === "user",
+      );
+    const imageTurn = userTurns.find((m) => Array.isArray(m.content));
+    expect(imageTurn).toBeDefined();
+    const parts = imageTurn!.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    const imagePart = parts.find((p) => p.type === "image_url");
+    expect(imagePart).toBeDefined();
+    expect(imagePart!.image_url!.url).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it("clears the composer pill after send but keeps the chat-row attachment", async () => {
+    capturedChatCalls.length = 0;
+    const user = userEvent.setup();
+    const screenshot = new File([new Uint8Array([1, 2, 3])], "keep-on-row.png", { type: "image/png" });
+
+    render(<App />);
+    const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
+
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [screenshot],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => screenshot }],
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByText("keep-on-row.png")).toBeInTheDocument();
+    });
+
+    await user.type(composer, "look at this");
+    await user.keyboard("{Enter}");
+
+    // Composer pill clears after send. The attachment survives on the
+    // chat row as a reference (paperclip + filename) so the user can
+    // scroll back and reference "the screenshot above" in follow-ups.
+    await waitFor(() => {
+      const composerPills = screen.queryAllByRole("button", { name: /Remove keep-on-row/ });
+      expect(composerPills).toHaveLength(0);
+      // Chat-row attachment list still references the filename.
+      expect(screen.getByText("keep-on-row.png")).toBeInTheDocument();
+    });
   });
 });

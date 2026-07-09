@@ -162,13 +162,13 @@ describe("withWorkspaceToolPrompt", () => {
     const out = withWorkspaceToolPrompt(initial);
     expect(out).toHaveLength(2);
     expect(out[0].content).toContain("Already injected.");
-    expect(out[0].content.match(/# Zeus workspace tools/g)).toHaveLength(1);
+    expect(String(out[0].content).match(/# Zeus workspace tools/g)).toHaveLength(1);
   });
 
   it("includes the 'fix the call before re-emitting' hint", () => {
     const initial: ChatMessage[] = [{ role: "user", content: "go" }];
     const out = withWorkspaceToolPrompt(initial);
-    const lowered = out[0].content.toLowerCase();
+    const lowered = String(out[0].content).toLowerCase();
     expect(lowered).toContain("failed [code]: message");
     expect(lowered).toContain("do not retry the same tool block");
   });

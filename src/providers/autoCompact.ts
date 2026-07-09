@@ -22,7 +22,11 @@
  */
 
 import { lookupContextWindow } from "./contextWindow";
-import { estimateTokensForMessages, type ProviderMessageLike } from "./tokenEstimator";
+import {
+  estimateTokensForMessages,
+  type ProviderMessageLike,
+  type ProviderMessageLikeMultimodal,
+} from "./tokenEstimator";
 
 /** Default trigger threshold. Overridable for tests / power users. */
 export const DEFAULT_COMPACT_TRIGGER_RATIO = 0.4;
@@ -46,7 +50,7 @@ export interface AutoCompactDecision {
  * compaction; this module only reports *what to do*.
  */
 export function decideAutoCompact(
-  messages: ReadonlyArray<ProviderMessageLike>,
+  messages: ReadonlyArray<ProviderMessageLike | ProviderMessageLikeMultimodal>,
   modelId: string | null | undefined,
   providerId: string | null | undefined,
   threshold: number = DEFAULT_COMPACT_TRIGGER_RATIO,

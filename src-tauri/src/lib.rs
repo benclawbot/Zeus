@@ -32,8 +32,8 @@ use persistence::{
     SaveSessionRequest,
 };
 use providers::{
-    build_skill_system_message, dispatch_chat, find_provider, list_provider_info, ChatMessage,
-    ChatRequest, ChatResponse, ProviderInfo,
+    build_skill_system_message, dispatch_chat, find_provider, list_provider_info, message_text,
+    ChatMessage, ChatRequest, ChatResponse, ProviderInfo,
 };
 use workspace::{
     apply_workspace_edit as apply_workspace_edit_impl,
@@ -323,7 +323,7 @@ fn request_context(request: &ChatRequest) -> String {
         .rev()
         .filter(|message| message.role == "user")
         .take(3)
-        .map(|message| message.content.as_str())
+        .map(|message| message_text(&message.content))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -864,7 +864,7 @@ async fn test_provider(
         provider: provider_id.clone(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: "Respond with the single word OK and nothing else.".to_string(),
+            content: serde_json::Value::String("Respond with the single word OK and nothing else.".to_string()),
         }],
         skill_id: None,
         options: serde_json::json!({
@@ -1036,8 +1036,8 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
         let prior = iterations.last();
         let user_content = render_ralph_user_prompt(&request.objective, index, prior, request.verifier.as_ref());
         let messages = vec![
-            ChatMessage { role: "system".to_string(), content: base_system.clone() },
-            ChatMessage { role: "user".to_string(), content: user_content },
+            ChatMessage { role: "system".to_string(), content: serde_json::Value::String(base_system.clone()) },
+            ChatMessage { role: "user".to_string(), content: serde_json::Value::String(user_content) },
         ];
         let chat_request = ChatRequest {
             provider: request.provider.clone(),
@@ -1286,6 +1286,15 @@ fn upsert_session(
     persistence::upsert_session(&conn, &id, &label).map_err(|e| format!("upsert_session: {e}"))
 }
 
+/// Remove a session row from the database. Returns true if a row was
+/// deleted, false if the id was unknown. Surfaced through the recent
+/// sessions delete icon in the sidebar.
+#[tauri::command]
+fn delete_session(state: tauri::State<'_, AppState>, id: String) -> Result<bool, String> {
+    let conn = state.db.lock();
+    persistence::delete_session(&conn, &id).map_err(|e| format!("delete_session: {e}"))
+}
+
 /// Persist a full session — chat transcript + compact anchor. Frontend
 /// calls this after every assistant reply and on every /compact so the
 /// state survives a relaunch.
@@ -1508,6 +1517,7 @@ pub fn run() {
             set_access_mode,
             upsert_session,
             save_session,
+            delete_session,
             list_sessions_full,
             list_skills,
             load_skill,

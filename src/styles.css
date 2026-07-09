@@ -715,6 +715,7 @@ kbd {
   gap: 14px;
   min-height: 0;
   padding: 22px;
+  overflow-y: auto;
 }
 
 .utility-grid {

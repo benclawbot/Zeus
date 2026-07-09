@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ChatContent } from "./registry";
 
 export interface MinimaxChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: ChatContent;
 }
 
 export interface MinimaxChatOptions {

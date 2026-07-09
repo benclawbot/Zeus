@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  Trash2,
   User,
   Wrench,
   X,
@@ -30,7 +31,7 @@ import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
 import { generatePlanSteps } from "./providers/planner";
 import type { RuntimePlan, RuntimePlanStep } from "./agentRuntimeDeepLoop";
-import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
+import { deleteSession, listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import { countPendingProposals } from "./state/harness.notifications";
@@ -57,7 +58,9 @@ import {
   type TestRunResult,
   type ProjectConfigSnapshot,
 } from "./providers/workspace";
-import { ToolRunPanel, type ToolRunEntry } from "./components/ToolRunPanel";
+// ToolRunPanel removed — the bottom-of-workspace panel was redundant
+// with the per-turn Tool Run badge and the agent progress bubble.
+// Workspace actions still surface their results inline.
 import { PlanProgressPanel } from "./components/PlanProgressPanel";
 import { MarkdownView } from "./components/MarkdownView";
 import { StatusBar } from "./components/StatusBar";
@@ -86,9 +89,23 @@ import { estimateTokensForMessages } from "./providers/tokenEstimator";
 import "./styles.css";
 
 type AccessMode = "Full" | "Local" | "Review" | "Locked";
-type AppView = "Home" | "Sessions" | "Skills" | "Memory" | "Harness Evolution" | "Settings";
+type AppView = "Home" | "Projects" | "Skills" | "Memory" | "Harness Evolution" | "Settings";
 
 type ChatRole = "user" | "zeus";
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  kind: "file" | "image";
+  /**
+   * Base64 data URI (`data:<mime>;base64,...`). Always populated for image
+   * attachments so the bytes can travel through to the model and the
+   * session row. For non-image files this is left undefined — the model
+   * only ever needs the filename.
+   */
+  dataUrl?: string;
+}
 
 interface ChatMessage {
   id: number;
@@ -101,6 +118,25 @@ interface ChatMessage {
     steps: AgentProgressStep[];
     completed: number;
     partial: boolean;
+  };
+  /**
+   * Files attached to this turn. Persisted with the chat row so the user
+   * can scroll back and reference the screenshot in a follow-up question.
+   * The composer pill clears after send; the attachments live on the chat
+   * row, not in the composer.
+   */
+  attachments?: ChatAttachment[];
+  /**
+   * Token accounting for an assistant turn. Populated when the provider
+   * returns usage info (OpenAI-compatible endpoints usually do). The
+   * right-side Session panel reads the latest entry to render the
+   * in/out/cached counter. Optional — older rows and providers that
+   * don't expose usage simply leave it undefined.
+   */
+  tokens?: {
+    in: number;
+    out: number;
+    cached?: number;
   };
 }
 
@@ -146,6 +182,10 @@ interface AttachedFile {
   type: string;
   kind: "file" | "image";
   previewUrl?: string;
+  /** Base64 data URI, set asynchronously right after the file is selected
+   *  or pasted. Required for image attachments so we can ship the bytes
+   *  to the model on send. For non-image files we skip the read. */
+  dataUrl?: string;
 }
 
 // Parse a fenced `tool` block from the model's response. The model is told
@@ -277,7 +317,7 @@ interface GoalState {
 
 const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
   { label: "Home", icon: Home },
-  { label: "Sessions", icon: Archive },
+  { label: "Projects", icon: Archive },
   { label: "Settings", icon: Settings },
 ];
 
@@ -351,6 +391,54 @@ function fileToAttachment(file: File): AttachedFile {
 }
 
 /**
+ * Read a `File` into a base64 data URI so it can travel through to the
+ * model and persist on the chat row. Images are required to ship as
+ * data URIs (OpenAI multimodal / Anthropic image blocks both want a URL
+ * or base64 payload); non-image files skip the read because the model
+ * only ever needs the filename. Falls back to undefined on read error so
+ * the UI doesn't get stuck waiting on a broken blob.
+ */
+function readFileDataUrl(file: File): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    if (typeof FileReader === "undefined") {
+      resolve(undefined);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      resolve(typeof result === "string" ? result : undefined);
+    };
+    reader.onerror = () => resolve(undefined);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Walk the file list, attach synchronously first (so the preview pill
+ * shows up immediately), then asynchronously read base64 into each
+ * image attachment. Non-image files are returned without a dataUrl.
+ * Returns attachments keyed by their existing id so the async update
+ * can map back into the `attachedFiles` state without regenerating ids.
+ */
+async function hydrateAttachmentBytes(
+  files: FileList | File[] | null,
+  initial: AttachedFile[],
+): Promise<AttachedFile[]> {
+  if (!files) return initial;
+  const sourceArray = Array.from(files);
+  return Promise.all(
+    initial.map(async (attachment, index) => {
+      if (attachment.kind !== "image") return attachment;
+      const source = sourceArray[index];
+      if (!source) return attachment;
+      const dataUrl = await readFileDataUrl(source);
+      return dataUrl ? { ...attachment, dataUrl } : attachment;
+    }),
+  );
+}
+
+/**
  * Release every Blob URL we created for image previews. Called when an
  * attachment is removed, when the chat sends and clears the attachment
  * list, and on window unload. Without this the preview URLs are leaked
@@ -368,6 +456,56 @@ function revokeAttachmentUrls(attachments: AttachedFile[]): void {
 
 function attachmentPrompt(attachments: AttachedFile[]): string {
   return attachments.map((file) => `- ${file.name} (${file.type || "unknown type"}, ${file.kind})`).join("\n");
+}
+
+/**
+ * One part of a multimodal user message. Mirrors the OpenAI / Anthropic
+ * shapes (text + image_url). The provider adapter is responsible for
+ * translating this to whatever wire format the active model expects.
+ */
+export type UserOutboundPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
+export type UserOutboundContent = string | UserOutboundPart[];
+
+/**
+ * The shape of a chat message we send to the model: a string for
+ * text-only turns and an array of parts when an image is attached.
+ * Persisted `ChatMessage` rows still store `text` + `attachments`; this
+ * type is the wire view, built fresh on each send.
+ */
+export interface ChatRequestMessage {
+  role: "system" | "user" | "assistant";
+  content: UserOutboundContent;
+}
+
+/**
+ * Build the outbound content for a user message. Image attachments become
+ * inline `image_url` blocks (base64 data URI). Non-image files keep the
+ * filename list in the text prompt — the model can always pull bytes
+ * via the `readFile` tool if it needs them. Returns a plain string when
+ * there's nothing to attach, which keeps the auto-compaction token
+ * estimator cheap for the common case.
+ */
+export function buildUserOutboundContent(
+  prompt: string,
+  attachments: ChatAttachment[],
+): UserOutboundContent {
+  const images = attachments.filter((a) => a.kind === "image" && typeof a.dataUrl === "string");
+  if (images.length === 0) {
+    const fileNames = attachments
+      .filter((a) => a.kind === "file")
+      .map((a) => `- ${a.name} (${a.mime || "unknown type"})`)
+      .join("\n");
+    if (!fileNames) return prompt;
+    return `${prompt}\n\nAttached files:\n${fileNames}`;
+  }
+  const parts: UserOutboundPart[] = [{ type: "text", text: prompt }];
+  for (const image of images) {
+    parts.push({ type: "image_url", image_url: { url: image.dataUrl! } });
+  }
+  return parts;
 }
 
 export function App() {
@@ -454,11 +592,6 @@ export function App() {
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
   const provider = activeProviderId;
-  // Tool execution results live in the chat as zeus bubbles (so they persist
-  // with the session) AND in a parallel ToolRunEntry[] feed so the workspace
-  // panel can render diffs, policy decisions, and step logs without
-  // re-parsing chat text. Newest entries first.
-  const [toolRuns, setToolRuns] = useState<ToolRunEntry[]>([]);
   // Provider API key state. The Rust side holds the actual values; the
   // frontend only tracks whether each provider is configured (for the
   // Settings panel + to know if chat is likely to fail) plus draft
@@ -581,7 +714,18 @@ export function App() {
   // Live projected token count for the next outgoing prompt. Recomputed
   // whenever the chat, the compact anchor, the typed message, or the
   // active provider/model changes. Drives the status bar's percentage.
-  const livePromptTokens = useMemo(() => {
+  // Token usage recorded on the most recent assistant turn (in/out/cached).
+// Driven by what the provider's `usage` payload returned; rendered in the
+// right-side Session panel as the live cost-of-this-conversation summary.
+const latestTurnTokens = useMemo(() => {
+  for (let index = chat.length - 1; index >= 0; index -= 1) {
+    const entry = chat[index];
+    if (entry.role !== "user" && entry.tokens) return entry.tokens;
+  }
+  return null;
+}, [chat]);
+
+const livePromptTokens = useMemo(() => {
     const providerOverrides = (() => {
       switch (activeProviderId) {
         case "openai":
@@ -781,9 +925,22 @@ export function App() {
 
   function handleFileSelection(files: FileList | File[] | null) {
     if (!files) return;
-    const next = Array.from(files).map(fileToAttachment);
-    setAttachedFiles((current) => [...current, ...next]);
+    const initial = Array.from(files).map(fileToAttachment);
+    setAttachedFiles((current) => [...current, ...initial]);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    // Kick off the async base64 hydration so the bytes are ready by the
+    // time the user hits Send. The pill renders from `attachedFiles` so
+    // it appears instantly; `dataUrl` fills in a moment later.
+    void hydrateAttachmentBytes(files, initial).then((hydrated) => {
+      if (hydrated.length === 0) return;
+      const byId = new Map(hydrated.map((entry) => [entry.id, entry] as const));
+      setAttachedFiles((current) =>
+        current.map((entry) => {
+          const next = byId.get(entry.id);
+          return next ? { ...entry, ...(next.dataUrl ? { dataUrl: next.dataUrl } : {}) } : entry;
+        }),
+      );
+    });
   }
 
   function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -808,6 +965,39 @@ export function App() {
     });
   }
 
+  function removeSession(session: SessionRef) {
+    // Drop the row from the local mirror and from SQLite. If we're
+    // deleting the active session, hand the active pointer to the most
+    // recent remaining row so the chat surface never collapses onto a
+    // deleted id. The default project catches any orphaned activeSession
+    // fallbacks so the sidebar keeps rendering.
+    setRecentSessions((current) => {
+      const next = current.filter((entry) => entry.id !== session.id);
+      if (activeSession?.id === session.id) {
+        const fallback = next[0] ?? null;
+        if (fallback) {
+          setActiveSession(fallback);
+          setChat([]);
+          setCompactFromId(null);
+        } else {
+          // No sessions left — synthesize a fresh default so the UI
+          // has something to anchor to.
+          const fresh: SessionRef = { id: newSessionId(), label: "Untitled Session", projectId: DEFAULT_PROJECT.id, projectName: DEFAULT_PROJECT.name };
+          setActiveSession(fresh);
+          setChat([]);
+          setCompactFromId(null);
+          setRecentSessions((rows) => [fresh, ...rows]);
+        }
+      }
+      return next;
+    });
+    if (editingSessionId === session.id) {
+      setEditingSessionId(null);
+      setEditingSessionName("");
+    }
+    deleteSession(session.id).catch((err) => console.warn("deleteSession failed", err));
+  }
+
   function createProject() {
     const name = projectNameDraft.trim();
     if (!name) return;
@@ -825,6 +1015,37 @@ export function App() {
     setProjectNameDraft("");
   }
 
+  function deleteProject(projectId: string) {
+    // The default project is the always-on fallback; refuse to delete it
+    // so the sidebar always has a valid active project anchor.
+    if (projectId === DEFAULT_PROJECT.id) return;
+    // Re-home any sessions that lived in this project onto the default
+    // project so nothing is silently orphaned. Delete the session rows
+    // from SQLite too — the user asked for the project gone.
+    const orphaned = recentSessions.filter((session) => session.projectId === projectId);
+    for (const session of orphaned) {
+      deleteSession(session.id).catch((err) => console.warn("deleteSession failed", err));
+    }
+    setRecentSessions((current) =>
+      current.map((session) =>
+        session.projectId === projectId
+          ? { ...session, projectId: DEFAULT_PROJECT.id, projectName: DEFAULT_PROJECT.name }
+          : session,
+      ),
+    );
+    setProjects((current) => current.filter((project) => project.id !== projectId));
+    if (activeProjectId === projectId) {
+      setActiveProjectId(DEFAULT_PROJECT.id);
+    }
+    if (activeSession && activeSession.projectId === projectId) {
+      setActiveSession({
+        ...activeSession,
+        projectId: DEFAULT_PROJECT.id,
+        projectName: DEFAULT_PROJECT.name,
+      });
+    }
+  }
+
   function appendZeusMessage(text: string) {
     let nextChat: ChatMessage[] = [];
     setChat((entries) => {
@@ -834,9 +1055,6 @@ export function App() {
     setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
   }
 
-  function recordToolRun(entry: ToolRunEntry) {
-    setToolRuns((entries) => [entry, ...entries].slice(0, 50));
-  }
 
   function adoptProposedHarnessRule(rule: string) {
     // When the agent run auto-generates a harness rule, replace the current
@@ -925,12 +1143,10 @@ export function App() {
       setRunState("running");
       try {
         const result = await loadProjectConfig();
-        recordToolRun({ kind: "read", at: new Date().toISOString(), read: { path: result.path, content: JSON.stringify(result.config, null, 2), bytesRead: JSON.stringify(result.config).length, truncated: false }, path: result.path });
         appendZeusMessage(`project config (${result.path}):\n\n\`\`\`json\n${JSON.stringify(result.config, null, 2).slice(0, 4000)}\n\`\`\``);
         setRunState("idle");
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        recordToolRun({ kind: "read", at: new Date().toISOString(), error: message, path: "(project config)" });
         appendZeusMessage(`config failed: ${message}`);
         setRunState("error");
       } finally {
@@ -956,12 +1172,10 @@ export function App() {
     setRunState("running");
     try {
       const result = await runShellCommand({ program, args });
-      recordToolRun({ kind: "shell", at: new Date().toISOString(), shell: result });
       appendZeusMessage(summarizeRun(result));
       setRunState(result.exitCode === 0 ? "idle" : "error");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "shell", at: new Date().toISOString(), error: message });
       appendZeusMessage(`Shell failed: ${message}`);
       setRunState("error");
     } finally {
@@ -977,12 +1191,10 @@ export function App() {
     setRunState("running");
     try {
       const result = await readWorkspaceFile(path);
-      recordToolRun({ kind: "read", at: new Date().toISOString(), read: result, path });
       appendZeusMessage(summarizeRead(result));
       setRunState("idle");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "read", at: new Date().toISOString(), error: message, path });
       appendZeusMessage(`Read failed: ${message}`);
       setRunState("error");
     } finally {
@@ -1003,12 +1215,10 @@ export function App() {
     setRunState("running");
     try {
       const result = await writeWorkspaceFile({ path, content, create: true, overwrite: true });
-      recordToolRun({ kind: "write", at: new Date().toISOString(), write: result, path });
       appendZeusMessage(summarizeWrite(result));
       setRunState("idle");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "write", at: new Date().toISOString(), error: message, path });
       appendZeusMessage(`Write failed: ${message}`);
       setRunState("error");
     } finally {
@@ -1033,12 +1243,10 @@ export function App() {
     setRunState("running");
     try {
       const result = await applyWorkspaceEdit({ path, find, replace, replaceAll: false });
-      recordToolRun({ kind: "edit", at: new Date().toISOString(), edit: result, path });
       appendZeusMessage(summarizeEdit(result));
       setRunState("idle");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "edit", at: new Date().toISOString(), error: message, path });
       appendZeusMessage(`Edit failed: ${message}`);
       setRunState("error");
     } finally {
@@ -1066,12 +1274,10 @@ export function App() {
     setRunState("running");
     try {
       const result = await listWorkspaceDir(path);
-      recordToolRun({ kind: "list", at: new Date().toISOString(), list: result, path });
       appendZeusMessage(summarizeList(result));
       setRunState("idle");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "list", at: new Date().toISOString(), error: message, path });
       appendZeusMessage(`ls failed: ${message}`);
       setRunState("error");
     } finally {
@@ -1096,12 +1302,10 @@ export function App() {
     setRunState("running");
     try {
       const result = await runProjectTest(extraArgs);
-      recordToolRun({ kind: "test", at: new Date().toISOString(), test: result });
       appendZeusMessage(summarizeTest(result));
       setRunState(result.exitCode === 0 ? "idle" : "error");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "test", at: new Date().toISOString(), error: message });
       appendZeusMessage(`test failed: ${message}`);
       setRunState("error");
     } finally {
@@ -1129,12 +1333,10 @@ export function App() {
       // enforces the access-mode gate independently.
       const isMutating = !["status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "ls-tree"].includes(args[0] ?? "");
       const result = await runGitOperation(args, undefined, undefined);
-      recordToolRun({ kind: "git", at: new Date().toISOString(), git: result, approved: isMutating });
       appendZeusMessage(summarizeGit(result));
       setRunState(result.exitCode === 0 ? "idle" : "error");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      recordToolRun({ kind: "git", at: new Date().toISOString(), error: message });
       appendZeusMessage(`git failed: ${message}`);
       setRunState("error");
     } finally {
@@ -1236,7 +1438,26 @@ export function App() {
     if (prompt === "/config" || prompt.startsWith("/config ")) { setMessage(""); void handleConfigCommand(prompt); return; }
 
     const skillForTurn = activeSkillId;
-    const userMessage: ChatMessage = { id: nextMessageId(), role: "user", text: prompt, skillId: skillForTurn ?? undefined };
+    // Snapshot the attachments so the chat row stores them and the model
+    // call ships the image bytes in the same tick. Without this snapshot
+    // the async base64 hydration can finish after Send clears the pill,
+    // leaving us with attachments that have no `dataUrl` to send.
+    const attachmentSnapshot = attachedFiles
+      .filter((file) => file.kind === "image" && typeof file.dataUrl === "string")
+      .map<ChatAttachment>((file) => ({
+        id: file.id,
+        name: file.name,
+        mime: file.type,
+        kind: "image",
+        dataUrl: file.dataUrl!,
+      }));
+    const userMessage: ChatMessage = {
+      id: nextMessageId(),
+      role: "user",
+      text: prompt,
+      skillId: skillForTurn ?? undefined,
+      ...(attachmentSnapshot.length > 0 ? { attachments: attachmentSnapshot } : {}),
+    };
     const thinkingMessage: ChatMessage = { id: nextMessageId(), role: "zeus", text: "", thinking: true };
     // Build the snapshot synchronously so it reflects the new user turn
     // (the closure-captured `chat` is from before `setChat` ran and would
@@ -1282,8 +1503,11 @@ export function App() {
     // exactly what the user saw, even if a concurrent setter updates chat
     // while the await is in flight.
     const contextMessages = buildContextMessages(historySnapshot, compactFromId);
-    const attachmentsText = attachmentPrompt(attachedFiles);
-    const promptWithAttachments = attachmentsText ? `${prompt}\n\nAttached files:\n${attachmentsText}` : prompt;
+    // Build the outbound content for the user message. Image attachments
+    // travel as multimodal blocks so the model can actually see them;
+    // non-image file names are appended to the text prompt so the model
+    // at least knows they exist (and can ask for bytes via `readFile`).
+    const userOutboundContent = buildUserOutboundContent(prompt, attachmentSnapshot);
 
     // Project-aware context. When we have a cached config snapshot, prepend
     // a one-line description of the workspace so the model can answer
@@ -1306,10 +1530,10 @@ export function App() {
     })();
     const providerModel = activeModelId;
     const triggerRatio = DEFAULT_COMPACT_TRIGGER_RATIO;
-    const projectedMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+    const projectedMessages: ChatRequestMessage[] = [
       { role: "system", content: SYSTEM_PROMPT + projectHint },
       ...contextMessages,
-      { role: "user", content: promptWithAttachments },
+      { role: "user", content: userOutboundContent },
     ];
     const decision = decideAutoCompact(projectedMessages, providerModel, activeProviderId, triggerRatio);
     if (decision.shouldCompact) {
@@ -1332,7 +1556,7 @@ export function App() {
       projectedMessages.push(
         { role: "system", content: SYSTEM_PROMPT + projectHint },
         ...freshContext,
-        { role: "user", content: promptWithAttachments },
+        { role: "user", content: userOutboundContent },
       );
     }
     // Build the final system prompt by appending the active terse and
@@ -1345,10 +1569,10 @@ export function App() {
     // Seed messages: system prompt + compact context + the user's prompt.
     // The recursive runChatTurn appends the model's last reply and any tool
     // results, so subsequent iterations see the full picture.
-    const seedMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+    const seedMessages: ChatRequestMessage[] = [
       { role: "system", content: augmentedSystem },
       ...buildContextMessages([...chat, userMessage, thinkingMessage] as UiChatBubble[], compactFromId),
-      { role: "user", content: promptWithAttachments },
+      { role: "user", content: userOutboundContent },
     ];
 
     await runChatTurn(seedMessages, thinkingMessage.id, controller.signal, 0, prompt);
@@ -1364,7 +1588,7 @@ export function App() {
   // updated history so it can either chain another tool call or produce
   // a final answer. Bounded by MAX_TOOL_TURNS to prevent runaway loops.
   async function runChatTurn(
-    seedMessages: { role: "system" | "user" | "assistant"; content: string }[],
+    seedMessages: ChatRequestMessage[],
     thinkingBubbleId: number,
     signal: AbortSignal,
     depth: number,
@@ -1408,10 +1632,19 @@ export function App() {
       // returns {input_tokens, output_tokens}; MiniMax mirrors OpenAI).
       // The cost estimate uses a conservative blended rate so the totals
       // are directionally useful without being a billing source of truth.
-      const usage = response.usage as { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number; total_tokens?: number } | undefined;
+      const usage = response.usage as {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+      } | undefined;
+      let turnTokens: { in: number; out: number; cached?: number } | undefined;
       if (usage) {
         const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
         const completion = usage.completion_tokens ?? usage.output_tokens ?? 0;
+        const cached = usage.prompt_tokens_details?.cached_tokens;
         if (prompt > 0 || completion > 0) {
           const cost = (prompt * 0.000_000_3) + (completion * 0.000_001_2);
           setTokenTotals((current) => ({
@@ -1419,12 +1652,17 @@ export function App() {
             completion: current.completion + completion,
             costUsd: current.costUsd + cost,
           }));
+          turnTokens = { in: prompt, out: completion, ...(cached !== undefined ? { cached } : {}) };
         }
       }
       const clean = stripThinkingTags(response.content);
       let nextChat: ChatMessage[] = [];
       setChat((entries) => {
-        nextChat = entries.map((entry) => entry.id === thinkingBubbleId ? { ...entry, text: clean, thinking: false } : entry);
+        nextChat = entries.map((entry) =>
+          entry.id === thinkingBubbleId
+            ? { ...entry, text: clean, thinking: false, ...(turnTokens ? { tokens: turnTokens } : {}) }
+            : entry,
+        );
         return nextChat;
       });
       setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
@@ -1457,7 +1695,6 @@ export function App() {
           stopOnError: false,
         });
         agentResult = result;
-        recordToolRun({ kind: "agent", at: new Date().toISOString(), agent: result });
         // Build the per-step progress bubble from the agent's log.
         const stepsForBubble: AgentProgressStep[] = result.logs.map((entry) => {
           const mapped = mapStepResult(entry.result);
@@ -1482,7 +1719,6 @@ export function App() {
         if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
       } catch (err) {
         agentError = err instanceof Error ? err.message : String(err);
-        recordToolRun({ kind: "agent", at: new Date().toISOString(), error: agentError });
         appendZeusMessage(`Agent run failed: ${agentError}`);
       }
 
@@ -1507,7 +1743,7 @@ export function App() {
       const terseBlockRec = getTerseOutputInstructions(terseLevel);
       const minimalBlockRec = getMinimalCodeInstructions(minimalLevel);
       const augmentedSystemRec = [SYSTEM_PROMPT, terseBlockRec, minimalBlockRec].filter((s) => s && s.trim().length > 0).join("\n\n");
-      const nextMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+      const nextMessages: ChatRequestMessage[] = [
         { role: "system", content: augmentedSystemRec },
         ...nextContextMessages,
       ];
@@ -1914,6 +2150,14 @@ useEffect(() => {
                     >
                       <Pencil size={13} />
                     </button>
+                    <button
+                      aria-label={`Delete ${session.label}`}
+                      className="recent-delete"
+                      type="button"
+                      onClick={() => removeSession(session)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </>
                 )}
               </div>
@@ -2013,6 +2257,16 @@ useEffect(() => {
                       {/* User messages stay as pre-wrapped text — they're
                           raw keyboard input, not markdown. */}
                       <p className="chat-md-para">{entry.text}</p>
+                      {entry.attachments && entry.attachments.length > 0 ? (
+                        <ul className="chat-attachments" aria-label="Attached files">
+                          {entry.attachments.map((attachment) => (
+                            <li key={attachment.id}>
+                              <Paperclip size={12} aria-hidden="true" />
+                              <span>{attachment.name}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </div>
                   </article>
                 ) : (
@@ -2118,7 +2372,6 @@ useEffect(() => {
               </div>
             </section>
 
-            <ToolRunPanel entries={toolRuns} />
 
             <StatusBar
               modelId={(providerKeysStatus as unknown as Record<string, string | null>)[`${activeProviderId}Model`] || providers.find((p) => p.id === activeProviderId)?.defaultModel || ""}
@@ -2132,9 +2385,9 @@ useEffect(() => {
           <section className="utility-view" aria-label={`${activeView} view`}>
             <div className="skills-header">
               <div><p className="section-label">{activeView}</p><h2>{activeView === "Harness Evolution" ? proposal.title : activeView}</h2></div>
-              <span>{activeView === "Sessions" ? (activeSession?.label ?? "none") : "state-backed"}</span>
+              <span>{activeView === "Projects" ? (activeSession?.label ?? "none") : "state-backed"}</span>
             </div>
-            {activeView === "Sessions" && (
+            {activeView === "Projects" && (
               <div className="sessions-manager">
                 <div className="project-create">
                   <input
@@ -2148,9 +2401,21 @@ useEffect(() => {
                 </div>
                 <div className="project-tabs" aria-label="Projects">
                   {projects.map((project) => (
-                    <button className={project.id === activeProjectId ? "selected" : ""} key={project.id} type="button" onClick={() => setActiveProjectId(project.id)}>
-                      {project.name}
-                    </button>
+                    <div className={project.id === activeProjectId ? "project-tab selected" : "project-tab"} key={project.id}>
+                      <button className="project-tab-label" type="button" onClick={() => setActiveProjectId(project.id)}>
+                        {project.name}
+                      </button>
+                      {project.id !== DEFAULT_PROJECT.id ? (
+                        <button
+                          aria-label={`Delete project ${project.name}`}
+                          className="project-tab-delete"
+                          type="button"
+                          onClick={() => deleteProject(project.id)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      ) : null}
+                    </div>
                   ))}
                 </div>
                 <div className="utility-grid">
@@ -2235,17 +2500,6 @@ useEffect(() => {
             )}
             {activeView === "Settings" && (
               <div className="utility-card settings-card">
-                <p className="section-label">Access mode</p>
-                <p>Active mode: <strong>{accessMode}</strong></p>
-                <p className="skills-muted">{accessSummary}</p>
-                <p className="skills-muted">Change the mode from the listbox in the composer.</p>
-
-                <p className="section-label">Token efficiency</p>
-                <p className="skills-muted">
-                  Six-spec token-efficiency toolkit. Settings here apply to every chat call. The status bar at the
-                  bottom of the workspace always shows the live percentage of the active model's context window in use
-                  and the auto-compaction threshold (40% by default).
-                </p>
                 <div className="token-efficiency-row">
                   <label className="token-efficiency-field">
                     <span>Terse-output skill (Spec 04)</span>
@@ -2274,12 +2528,6 @@ useEffect(() => {
                     </select>
                   </label>
                 </div>
-                <p className="skills-muted">
-                  Spec 01 (shell output compressor) and Spec 06 (code graph index) are always on.
-                  Spec 02 (context compression pipeline) and Spec 03 (MCP sandbox + session memory) are wired but
-                  operate in library mode — no UI to toggle. To see real-time compression savings, run
-                  <code> /run git status</code> from the composer.
-                </p>
 
                 <p className="section-label">Provider API keys</p>
                 <p className="skills-muted">Keys are stored in the app data folder and never leave your machine. The frontend never sees the raw value — only whether a key is configured.</p>
@@ -2398,11 +2646,11 @@ useEffect(() => {
             <h2>Session</h2>
             <span>{runState === "running" ? "running" : `${chat.length} messages`}</span>
           </div>
+          <p className="skills-muted">Last turn tokens</p>
           <dl>
-            <div><dt>Provider</dt><dd>{activeProviderLabel}{providerKeysStatus.minimax ? "" : activeProviderId === "minimax" ? " · key missing" : ""}</dd></div>
-            <div><dt>Access</dt><dd>{accessMode}</dd></div>
-            {projectConfig ? <div><dt>Folder</dt><dd><code>{projectConfig.path}</code></dd></div> : null}
-            <div><dt>Context</dt><dd>{livePromptTokens.toLocaleString()} tokens</dd></div>
+            <div><dt>In</dt><dd>{latestTurnTokens ? latestTurnTokens.in.toLocaleString() : "—"}</dd></div>
+            <div><dt>Out</dt><dd>{latestTurnTokens ? latestTurnTokens.out.toLocaleString() : "—"}</dd></div>
+            <div><dt>Cached</dt><dd>{latestTurnTokens?.cached !== undefined ? latestTurnTokens.cached.toLocaleString() : "—"}</dd></div>
           </dl>
           <button type="button" onClick={() => setActiveView("Settings")}>Open settings</button>
         </section>

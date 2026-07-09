@@ -105,16 +105,55 @@ export interface ProviderMessageLike {
 }
 
 /**
- * Estimate tokens for an array of provider messages. Adds a flat 4-token
- * per-message overhead (the model's role / boundary markers).
+ * One part of a multimodal message content array. Mirrors the OpenAI /
+ * Anthropic shapes (text + image_url). Kept loose on purpose — provider
+ * adapters own the final wire format; this is just the shape the chat
+ * loop builds so image bytes can travel to the model.
  */
-export function estimateTokensForMessages(messages: ReadonlyArray<ProviderMessageLike>): number {
+export type OutboundContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
+export type OutboundContent = string | OutboundContentPart[];
+
+export interface ProviderMessageLikeMultimodal {
+  role: string;
+  content: OutboundContent;
+}
+
+/**
+ * Estimate tokens for an array of provider messages. Adds a flat 4-token
+ * per-message overhead (the model's role / boundary markers). Accepts
+ * either plain-string content or the multimodal `OutboundContent` shape
+ * (string | part[]). For arrays, text parts count their text and image
+ * parts count a flat per-image allowance so the estimator doesn't
+ * under-report when a user pastes screenshots.
+ */
+export function estimateTokensForMessages(
+  messages: ReadonlyArray<ProviderMessageLike | ProviderMessageLikeMultimodal>,
+): number {
   if (!messages || messages.length === 0) return 0;
   let total = 0;
   for (const msg of messages) {
-    total += estimateTokensForString(msg.content) + 4;
+    total += estimateTokensForContent(msg.content) + 4;
   }
   return total;
+}
+
+function estimateTokensForContent(content: OutboundContent): number {
+  if (typeof content === "string") return estimateTokensForString(content);
+  let tokens = 0;
+  for (const part of content) {
+    if (part.type === "text") {
+      tokens += estimateTokensForString(part.text);
+    } else if (part.type === "image_url") {
+      // Rough per-image cost (covers Anthropic/OpenAI low-detail band).
+      // High-detail is closer to 1500+ but conservative here is fine
+      // because the trigger threshold is 40% of window.
+      tokens += 85;
+    }
+  }
+  return tokens;
 }
 
 /**

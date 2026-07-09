@@ -15,7 +15,7 @@ use std::pin::Pin;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{ChatMessage, ChatProvider, ChatResponse, ProviderError};
+use super::{message_text, ChatMessage, ChatProvider, ChatResponse, ProviderError};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_MODEL: &str = "claude-3-5-sonnet-latest";
@@ -68,13 +68,17 @@ impl ChatProvider for AnthropicProvider {
             })?;
 
             // Split out the system prompt — Anthropic's API requires it as
-            // a top-level field, not as a message in the array.
-            let (system, user_assistant): (Vec<&str>, Vec<&ChatMessage>) =
+            // a top-level field, not as a message in the array. We strip
+            // the textual portion of multimodal messages here so the
+            // joined system string stays a plain `String`; the per-message
+            // content is passed through as-is so image blocks (or future
+            // Anthropic-native types) survive intact.
+            let (system, user_assistant): (Vec<String>, Vec<&ChatMessage>) =
                 messages
                     .iter()
                     .fold((Vec::new(), Vec::new()), |(mut sys, mut rest), msg| {
                         if msg.role == "system" {
-                            sys.push(&msg.content);
+                            sys.push(message_text(&msg.content));
                         } else {
                             rest.push(msg);
                         }
@@ -86,6 +90,9 @@ impl ChatProvider for AnthropicProvider {
                 .map(|msg| {
                     json!({
                         "role": msg.role,
+                        // Pass content as-is. If the frontend sent a
+                        // string we render as a string; if it sent the
+                        // multimodal array we render as an array.
                         "content": msg.content,
                     })
                 })

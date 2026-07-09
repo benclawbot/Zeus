@@ -41,7 +41,7 @@ pub fn build_skill_system_message(skill_id: &str, raw: &str) -> Option<ChatMessa
     );
     Some(ChatMessage {
         role: "system".to_string(),
-        content: prompt,
+        content: serde_json::Value::String(prompt),
     })
 }
 
@@ -71,9 +71,9 @@ mod skill_message_tests {
         let raw = "---\nname: debugging-and-error-recovery\ndescription: root-cause\n---\n\nAlways reproduce first.\n";
         let msg = build_skill_system_message("debugging-and-error-recovery", raw).unwrap();
         assert_eq!(msg.role, "system");
-        assert!(msg.content.contains("debugging-and-error-recovery"));
-        assert!(msg.content.contains("Always reproduce first."));
-        assert!(msg.content.contains("<skill"));
+        assert!(message_text(&msg.content).contains("debugging-and-error-recovery"));
+        assert!(message_text(&msg.content).contains("Always reproduce first."));
+        assert!(message_text(&msg.content).contains("<skill"));
     }
 
     #[test]
@@ -92,7 +92,7 @@ mod skill_message_tests {
     fn uses_id_as_name_when_frontmatter_omits_it() {
         let raw = "---\ndescription: only a description\n---\n\nbody\n";
         let msg = build_skill_system_message("fallback-id", raw).unwrap();
-        assert!(msg.content.contains("fallback-id"));
+        assert!(message_text(&msg.content).contains("fallback-id"));
     }
 }
 
@@ -119,10 +119,41 @@ pub struct ChatRequest {
 /// One chat message in the universal OpenAI-compatible shape used by every
 /// provider we ship. Providers that don't accept this exact role set map it
 /// to their native shape inside their [`ChatProvider::send`] impl.
+///
+/// `content` is `serde_json::Value` (not a plain `String`) so the frontend
+/// can ship multimodal payloads — `[{type:"text",text:"..."},
+/// {type:"image_url",image_url:{url:"data:..."}}]` — without each provider
+/// having to re-define the wire shape. Providers serialize the value as-is
+/// for OpenAI-compatible endpoints (MiniMax), or translate it to their
+/// native blocks for Anthropic. Untagged content keeps backward compat
+/// with the old `content: "string"` shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: serde_json::Value,
+}
+
+/// Pull the textual portion of a multimodal message back into a `String`.
+/// Used by providers (and tests) that still need a flat string — e.g.
+/// Anthropic's prompt assembly, the build_skill_system_message tests.
+pub fn message_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("type").and_then(|t| t.as_str()).and_then(|t| {
+                    if t == "text" {
+                        part.get("text").and_then(|v| v.as_str()).map(str::to_string)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// Generic chat response. Every provider returns the same shape so the

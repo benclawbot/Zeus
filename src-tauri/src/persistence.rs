@@ -455,6 +455,13 @@ pub fn upsert_session(conn: &Connection, id: &str, label: &str) -> rusqlite::Res
     Ok(())
 }
 
+/// Remove a session row by id. Returns true if a row was deleted, false
+/// if the id didn't exist. Used by the recent-sessions delete icon.
+pub fn delete_session(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let affected = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+    Ok(affected > 0)
+}
+
 // --- helpers ---------------------------------------------------------
 
 fn read_proposal(conn: &Connection, id: &str) -> rusqlite::Result<PersistedProposal> {

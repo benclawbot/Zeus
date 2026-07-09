@@ -63,3 +63,16 @@ export function newSessionId(): string {
   }
   return `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
+
+/**
+ * Remove a session from the database. Returns true if a row was deleted.
+ * No-op in non-Tauri contexts (browser preview, jsdom tests) so the
+ * delete icon stays usable in those environments.
+ */
+export async function deleteSession(id: string): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return true;
+  }
+  const removed = await invoke<boolean>("delete_session", { id });
+  return removed;
+}

@@ -227,11 +227,32 @@ mod tests {
     fn build_payload_includes_model_messages_and_thinking() {
         let messages = vec![ChatMessage {
             role: "user".to_string(),
-            content: "hi".to_string(),
+            content: serde_json::Value::String("hi".to_string()),
         }];
         let payload = build_payload("MiniMax-M3", &messages);
         assert_eq!(payload["model"], "MiniMax-M3");
         assert_eq!(payload["messages"][0]["content"], "hi");
         assert_eq!(payload["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn build_payload_passes_multimodal_content_through() {
+        // OpenAI-compatible providers (including MiniMax) accept the
+        // `image_url` content block shape. The provider serializes it
+        // as-is so the frontend's base64 data URI flows straight to
+        // the model without translation.
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: serde_json::json!([
+                { "type": "text", "text": "What's in this image?" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+            ]),
+        }];
+        let payload = build_payload("MiniMax-M3", &messages);
+        let content = &payload["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "What's in this image?");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 }
