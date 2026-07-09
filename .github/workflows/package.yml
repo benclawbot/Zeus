@@ -15,10 +15,13 @@ jobs:
         include:
           - platform: macos-latest
             args: ""
+            exe_suffix: ""
           - platform: ubuntu-22.04
             args: ""
+            exe_suffix: ""
           - platform: windows-latest
             args: ""
+            exe_suffix: ".exe"
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +58,18 @@ jobs:
         working-directory: src-tauri
         timeout-minutes: 30
         run: |
+          # Tauri's `externalBin: binaries/ddgs` makes config-load fail
+          # when the sidecar file is missing — even though we made the
+          # sidecar opt-in via ZEUS_BUNDLE_DDGS. Create an empty stub
+          # for the current target so config validation passes. The
+          # real sidecar (if any) is built and copied in by the
+          # `sidecar:build` script when ZEUS_BUNDLE_DDGS=1; the stub
+          # is never invoked at build time and only matters at
+          # runtime, where webSearch's fallback chain (pip ddgs →
+          # SearXNG → raw DDG) handles a missing/broken sidecar.
+          target=$(rustc -vV | sed -n 's|host: ||p')
+          mkdir -p binaries
+          touch "binaries/ddgs-${target}${{ matrix.exe_suffix }}"
           cargo fetch
           cargo build --tests --locked
 
