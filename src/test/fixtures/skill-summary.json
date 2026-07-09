@@ -1,0 +1,11 @@
+[
+  {
+    "id": "tools/grep",
+    "name": "Grep",
+    "description": "Fast ripgrep-based search across the workspace.",
+    "hasReferences": false,
+    "hasScripts": true,
+    "hasAssets": false,
+    "hasAgentsMetadata": false
+  }
+]

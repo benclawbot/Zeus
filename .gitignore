@@ -11,3 +11,6 @@ src-tauri/target/
 zeus-*-fit.png
 zeus-main-screen.png
 zeus_visual_specs.zip
+
+# Local Windows Sandbox scratch config — host-specific, do not commit.
+zeus-sandbox.wsb

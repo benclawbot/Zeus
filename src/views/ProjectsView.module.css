@@ -1,0 +1,48 @@
+/* ProjectsView — view-scoped styles. Migrated from styles.css where
+   the rules were exclusive to the projects manager surface. */
+
+.sessionsManager {
+  display: grid;
+  gap: 12px;
+  max-width: 760px;
+}
+
+.projectCreate {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 8px;
+}
+
+.projectCreate button,
+.projectTabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 7px 10px;
+}
+
+.projectTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.projectTabs button.selected {
+  border-color: #d8d0ff;
+  color: var(--purple);
+  background: var(--purple-soft);
+}
+
+.projectGroup {
+  display: grid;
+  gap: 8px;
+}
+
+.projectGroup h3 {
+  margin: 8px 0 0;
+  font-size: 0.9rem;
+}

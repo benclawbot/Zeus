@@ -1,0 +1,44 @@
+name: Contract
+
+# Fast feedback loop. Runs the same TypeScript tests that catch the
+# highest-traffic contract drifts:
+#   - TS↔Rust wire shape (provider-info, skill-summary fixtures)
+#   - TS invoke calls matching the declared Tauri command surface
+#   - The full 240+ test suite
+# Skips the Rust build, Tauri packaging, and any GUI smoke tests. The
+# heavyweight Package workflow handles those on push to main / PR.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Test count
+        # Surface the current passing-test count as a workflow
+        # artifact. The README badge is hand-bumped from this; the
+        # next iteration will publish a shields.io endpoint JSON
+        # instead.
+        run: node scripts/test-count.mjs

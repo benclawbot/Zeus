@@ -123,12 +123,12 @@ describe("App", () => {
   it("labels the user bubble as 'Me' (not 'You')", () => {
     render(<App />);
     // We render no messages yet, but we want to assert the label is wired.
-    // The component uses a literal "Me" string for the user bubble heading.
-    // Check that "Me" is one of the labels we expect to show up after a send.
+    // The HomeView uses a literal "Me" string for the user bubble heading.
     // Since we cannot drive Tauri here (no real sendMinimaxChat), this test
     // asserts the source file contains the literal — a coarse contract that
-    // catches regressions from a future re-label.
-    const source = readFileSync(resolve("src/App.tsx"), "utf8");
+    // catches regressions from a future re-label. Lives in HomeView now
+    // (extracted from App.tsx).
+    const source = readFileSync(resolve("src/views/HomeView.tsx"), "utf8");
     expect(source).toContain(">Me<");
   });
 

@@ -5,8 +5,26 @@
 #
 # Output: src-tauri/binaries/ddgs-x86_64-pc-windows-msvc.exe
 # (Tauri looks up sidecars by their build target triple suffix.)
+#
+# OPT-IN: this script does nothing unless ZEUS_BUNDLE_DDGS=1 is set.
+# The ddgs sidecar is not part of the default Zeus install — it ships
+# ~50 MB of Python + dependencies, and most users get a working
+# webSearch either by installing ddgs via `pip install ddgs` (auto-
+# detected at runtime) or by pointing ZEUS_SEARXNG_URL at a self-hosted
+# SearXNG. The bundling is for environments where neither is feasible.
+# When opted in, the binary is picked up by Tauri's `externalBin` and
+# shipped with the desktop installer.
 
 set -euo pipefail
+
+if [ "${ZEUS_BUNDLE_DDGS:-0}" != "1" ]; then
+  echo "ddgs sidecar build is opt-in. Set ZEUS_BUNDLE_DDGS=1 to enable."
+  echo "  ZEUS_BUNDLE_DDGS=1 npm run sidecar:build"
+  echo "Without the sidecar, webSearch falls back to a pip-installed ddgs"
+  echo "(if on PATH) or SearXNG (if ZEUS_SEARXNG_URL is set), then the"
+  echo "raw DuckDuckGo HTML scrape (likely bot-challenged on consumer IPs)."
+  exit 0
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

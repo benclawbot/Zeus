@@ -258,6 +258,35 @@ kbd {
   background: #fff;
 }
 
+/* Ghost icon-only buttons. Strip the default <button> chrome (grey
+   background, outset border) so just the icon shows. Faint hover state
+   mirrors .recent-rename for consistency. */
+.recent-delete,
+.project-tab-delete {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.recent-delete:hover,
+.project-tab-delete:hover {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.recent-delete:focus-visible,
+.project-tab-delete:focus-visible {
+  outline: 2px solid var(--line);
+  outline-offset: 1px;
+}
+
 .recent-edit {
   display: grid;
   grid-template-columns: 1fr 30px;

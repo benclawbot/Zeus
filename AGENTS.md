@@ -88,3 +88,10 @@ inject guidance into model calls; it is not the agent's own skill set.
 - `bash scripts/check-tauri-capabilities.sh` passes
 - `git status` shows only the files you intended to change
 - The change is explained in the diff (no "fix stuff" commits)
+
+## Pre-commit hook
+
+`.githooks/pre-commit` runs typecheck + vitest (changed files when supported)
++ the tauri-capability check when `src-tauri/` is touched. Enable once per
+clone: `git config core.hooksPath .githooks`. The hook is opt-in so it never
+breaks fresh clones, sandboxed agents, or one-off commits.

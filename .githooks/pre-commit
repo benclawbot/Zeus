@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Zeus pre-commit gate. Symlink or set core.hooksPath to enable:
+#   git config core.hooksPath .githooks
+# Runs only on staged files; skips cleanly if nothing relevant is staged.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# 1. Typecheck (cheap; full project)
+echo "→ typecheck"
+npm run --silent typecheck
+
+# 2. Tests (vitest run --changed only — fastest path that still proves green)
+echo "→ tests (changed files)"
+# Fall back to full run if --changed unsupported in this vitest version.
+if ! npm test -- --changed HEAD 2>/dev/null; then
+  echo "  --changed unsupported, running full suite"
+  npm test
+fi
+
+# 3. Tauri capability check (only when src-tauri changes)
+if git diff --cached --name-only | grep -q '^src-tauri/'; then
+  echo "→ tauri capabilities"
+  if command -v bash >/dev/null && [ -f scripts/check-tauri-capabilities.sh ]; then
+    bash scripts/check-tauri-capabilities.sh
+  fi
+fi
+
+echo "✓ pre-commit OK"

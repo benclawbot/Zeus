@@ -7,6 +7,13 @@
     Python + ddgs + curl-cffi. Output is named to satisfy Tauri's
     sidecar convention: src-tauri/binaries/ddgs-<target-triple>.exe.
 
+    OPT-IN: this script does nothing unless ZEUS_BUNDLE_DDGS=1 is set.
+    The ddgs sidecar is not part of the default Zeus install — it ships
+    ~50 MB of Python + dependencies. Most users get a working webSearch
+    either by installing ddgs via `pip install ddgs` (auto-detected at
+    runtime) or by pointing ZEUS_SEARXNG_URL at a self-hosted SearXNG.
+    The bundling is for environments where neither is feasible.
+
 .PARAMETER TargetTriple
     Tauri target triple. Defaults to x86_64-pc-windows-msvc.
 #>
@@ -15,6 +22,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($env:ZEUS_BUNDLE_DDGS -ne "1") {
+    Write-Host "ddgs sidecar build is opt-in. Set ZEUS_BUNDLE_DDGS=1 to enable."
+    Write-Host "  `$env:ZEUS_BUNDLE_DDGS=1; npm run sidecar:build:win"
+    Write-Host "Without the sidecar, webSearch falls back to a pip-installed ddgs"
+    Write-Host "(if on PATH) or SearXNG (if ZEUS_SEARXNG_URL is set), then the"
+    Write-Host "raw DuckDuckGo HTML scrape (likely bot-challenged on consumer IPs)."
+    exit 0
+}
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir

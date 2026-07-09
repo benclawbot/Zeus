@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { isSubstantiveObjective, generatePlanSteps } from "./planner";
+import { isSubstantiveObjective, generatePlanSteps, summarizeSessionTitle } from "./planner";
 import * as registry from "./registry";
 
 vi.mock("./registry", async () => {
@@ -122,5 +122,61 @@ describe("planner.generatePlanSteps", () => {
       baseUrl: "https://api.example.com/v1",
       temperature: 0.2,
     }));
+  });
+});
+
+describe("plan step clamping", () => {
+  it("tightens verbose steps down to 2-5 words and 40 chars", async () => {
+    vi.mocked(registry.dispatchChat).mockResolvedValue({
+      // Empirically, models produce prose-length bullets. The post-
+      // processor should clamp these into tight labels.
+      content: JSON.stringify([
+        "Read package.json to confirm dependencies and peer ranges",
+        "Add SettingsPanel.tsx under src/components with sidebar wiring",
+        "Run npx tsc --noEmit and npx vitest run before committing the changes",
+      ]),
+      model: "test-model",
+    });
+    const steps = await generatePlanSteps(
+      "Add a complex feature with many substeps to validate the flow",
+      { provider: "minimax" },
+    );
+    expect(steps).not.toBeNull();
+    for (const step of steps!) {
+      const words = step.split(" ").filter(Boolean);
+      expect(words.length).toBeLessThanOrEqual(5);
+      expect(step.length).toBeLessThanOrEqual(40);
+      expect(step).not.toMatch(/[.;:!?]$/);
+    }
+  });
+});
+
+describe("summarizeSessionTitle", () => {
+  it("returns a clamped title from the LLM", async () => {
+    vi.mocked(registry.dispatchChat).mockResolvedValue({
+      content: '"Fix the paste-image bytes bug in the chat composer"',
+      model: "test-model",
+    });
+    const title = await summarizeSessionTitle("fix paste-image bytes bug in chat composer", {
+      provider: "minimax",
+    });
+    // The 4-word clamp drops the trailing "bug" to fit the rule.
+    expect(title).toBe("Fix the paste-image bytes");
+    expect(title!.split(" ").length).toBeLessThanOrEqual(4);
+  });
+
+  it("falls back to a clamped slice of the prompt when the LLM errors", async () => {
+    vi.mocked(registry.dispatchChat).mockRejectedValue(new Error("network"));
+    const title = await summarizeSessionTitle("Refactor auth middleware to use jwt", {
+      provider: "minimax",
+    });
+    expect(title).not.toBeNull();
+    expect(title!.length).toBeLessThanOrEqual(40);
+    expect(title!.split(" ").length).toBeLessThanOrEqual(4);
+  });
+
+  it("returns null for empty / very short prompts", async () => {
+    expect(await summarizeSessionTitle("hi", { provider: "minimax" })).toBeNull();
+    expect(await summarizeSessionTitle("", { provider: "minimax" })).toBeNull();
   });
 });

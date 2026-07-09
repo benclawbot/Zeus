@@ -5,13 +5,26 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/build-passing-2ea44f?style=flat-square" alt="build: passing" />
-  <img src="https://img.shields.io/badge/tests-200%2B%20passing-2ea44f?style=flat-square" alt="tests: passing" />
+  <a href="../../actions/workflows/package.yml"><img src="../../actions/workflows/package.yml/badge.svg" alt="CI: Package Zeus" /></a>
+  <a href="../../actions/workflows/contract.yml"><img src="../../actions/workflows/contract.yml/badge.svg" alt="CI: Contract" /></a>
+  <img src="https://img.shields.io/badge/tests-250%20passing-2ea44f?style=flat-square" alt="tests: 250 passing" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT" />
-  <img src="https://img.shields.io/badge/release-v1.0.0-0e1f3a?style=flat-square" alt="release: v1.0.0" />
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python: 3.11+" />
+  <img src="https://img.shields.io/badge/release-v0.1.0-0e1f3a?style=flat-square" alt="release: v0.1.0" />
   <img src="https://img.shields.io/badge/platform-cross--platform-5cb6ff?style=flat-square" alt="platform: cross-platform" />
 </p>
+
+<!--
+Badge maintenance:
+- The first two badges (CI workflows) are live — they reflect the
+  status of `.github/workflows/package.yml` and `contract.yml` on the
+  default branch. They render as broken images until the repo is
+  pushed to GitHub, at which point shields.io picks them up.
+- The `tests-240 passing` badge is hand-maintained. Run
+  `node scripts/test-count.mjs` to read the current count; bump the
+  number in this block when it changes. (Ponytail: a real CI step
+  could publish a shields.io endpoint JSON instead; this is the
+  smallest working badge for now.)
+-->
 
 > Zeus is a next-generation coding agent harness that helps you build better software, faster. It combines intelligent automation, self-improvement, and robust guardrails to deliver a reliable and continuously evolving development partner.
 

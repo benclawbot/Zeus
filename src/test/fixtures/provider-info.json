@@ -1,0 +1,12 @@
+[
+  {
+    "id": "minimax",
+    "displayName": "MiniMax",
+    "defaultModel": "MiniMax-M3"
+  },
+  {
+    "id": "openai",
+    "displayName": "OpenAI",
+    "defaultModel": "gpt-4o-mini"
+  }
+]

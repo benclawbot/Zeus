@@ -3,24 +3,17 @@ import {
   Bot,
   ChevronDown,
   Clock3,
-  FileText,
   FolderPlus,
   Home,
-  Image as ImageIcon,
   MemoryStick,
   MessageSquare,
-  Paperclip,
   Pencil,
   Save,
-  Send,
   Settings,
   ShieldCheck,
   Sparkles,
-  Square,
   Trash2,
-  User,
   Wrench,
-  X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -29,13 +22,13 @@ import { isTauriRuntime } from "./providers/minimax";
 import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
-import { generatePlanSteps } from "./providers/planner";
+import { generatePlanSteps, summarizeSessionTitle } from "./providers/planner";
 import type { RuntimePlan, RuntimePlanStep } from "./agentRuntimeDeepLoop";
 import { deleteSession, listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import { countPendingProposals } from "./state/harness.notifications";
-import { AgentProgressBubble, mapStepResult, type AgentProgressStep } from "./components/AgentProgressBubble";
+import { mapStepResult, type AgentProgressStep } from "./components/AgentProgressBubble";
 import {
   runShellCommand,
   readWorkspaceFile,
@@ -61,10 +54,13 @@ import {
 // ToolRunPanel removed — the bottom-of-workspace panel was redundant
 // with the per-turn Tool Run badge and the agent progress bubble.
 // Workspace actions still surface their results inline.
-import { PlanProgressPanel } from "./components/PlanProgressPanel";
-import { MarkdownView } from "./components/MarkdownView";
-import { StatusBar } from "./components/StatusBar";
-import { WorkingFolderButton } from "./WorkingFolderButton";
+import { SettingsView } from "./views/SettingsView";
+import { SkillsView } from "./views/SkillsView";
+import { InspectorPanel } from "./views/InspectorPanel";
+import { MemoryView } from "./views/MemoryView";
+import { HarnessEvolutionView } from "./views/HarnessEvolutionView";
+import { ProjectsView, type ProjectRef } from "./views/ProjectsView";
+import { HomeView } from "./views/HomeView";
 import { compressShellOutput } from "./providers/shellCompressor";
 import {
   DEFAULT_TERSE_LEVEL,
@@ -92,6 +88,10 @@ type AccessMode = "Full" | "Local" | "Review" | "Locked";
 type AppView = "Home" | "Projects" | "Skills" | "Memory" | "Harness Evolution" | "Settings";
 
 type ChatRole = "user" | "zeus";
+
+// Exported so view components can type their prop interfaces without
+// duplicating these shapes.
+export type { AccessMode, AppView, ChatRole };
 
 export interface ChatAttachment {
   id: string;
@@ -139,6 +139,7 @@ interface ChatMessage {
     cached?: number;
   };
 }
+export type { ChatMessage };
 
 interface SessionRef {
   id: string;
@@ -150,6 +151,7 @@ interface SessionRef {
    *  that pre-date this field keep working. */
   lastSeenAt?: string;
 }
+export type { SessionRef };
 
 /** Render an ISO timestamp as a short relative string for the sidebar.
  *  Falls back to "just now" when the timestamp is missing or unparseable. */
@@ -171,11 +173,8 @@ function relativeTimeLabel(iso: string | undefined, now = Date.now()): string {
   return `${years}y ago`;
 }
 
-interface ProjectRef {
-  id: string;
-  name: string;
-}
-
+// ProjectRef is owned by ProjectsView (see ./views/ProjectsView). The
+// orchestrator imports it from there so both sides share the same shape.
 interface AttachedFile {
   id: string;
   name: string;
@@ -187,6 +186,7 @@ interface AttachedFile {
    *  to the model on send. For non-image files we skip the read. */
   dataUrl?: string;
 }
+export type { AttachedFile };
 
 // Parse a fenced `tool` block from the model's response. The model is told
 // (via SYSTEM_PROMPT) to emit exactly one block per turn, with one JSON step
@@ -319,14 +319,6 @@ const navItems: Array<{ label: AppView; icon: LucideIcon }> = [
   { label: "Home", icon: Home },
   { label: "Projects", icon: Archive },
   { label: "Settings", icon: Settings },
-];
-
-const mergeCandidateRules = [
-  { label: "Frontend and mobile stacks", ids: ["frontend-dev", "fullstack-dev", "android-native-dev", "react-native-dev", "flutter-dev"] },
-  { label: "Document and office generators", ids: ["minimax-docx", "minimax-pdf", "minimax-xlsx", "pptx-generator"] },
-  { label: "Planning and todo helpers", ids: ["planf3", "planning-and-task-breakdown", "write-todos", "todo-update"] },
-  { label: "Self-improvement loops", ids: ["self-improve", "self-optimization-loop", "skill-evolution"] },
-  { label: "Debugging and root-cause analysis", ids: ["5-why", "debugging-and-error-recovery"] },
 ];
 
 const SYSTEM_PROMPT = [
@@ -682,13 +674,6 @@ export function App() {
     if (accessMode === "Review") return "Writes, shell, git and network require review first.";
     return "Read-only mode. Shell, writes and network are disabled.";
   }, [accessMode]);
-
-  const mergeCandidates = useMemo(() => {
-    const available = new Set(skills.map((skill) => skill.id));
-    return mergeCandidateRules
-      .map((rule) => ({ label: rule.label, ids: rule.ids.filter((id) => available.has(id)) }))
-      .filter((rule) => rule.ids.length > 1);
-  }, [skills]);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? DEFAULT_PROJECT,
@@ -1496,6 +1481,26 @@ const livePromptTokens = useMemo(() => {
       });
     }
 
+    // Auto-title the session from the user's first prompt so the
+    // sidebar stops showing "Untitled Session" for every new chat.
+    // Only fires when the session still has the default label — once
+    // titled (auto or manual) we leave it alone.
+    if (activeSession && activeSession.label === "Untitled Session") {
+      const overrides = getActiveProviderOverrides();
+      const sessionToRename = activeSession;
+      void summarizeSessionTitle(prompt, {
+        provider: activeProviderId,
+        ...(overrides.model ? { model: overrides.model } : {}),
+        ...(overrides.baseUrl ? { baseUrl: overrides.baseUrl } : {}),
+      }).then((title) => {
+        if (!title) return;
+        // Guard against a stale closure: the user may have renamed or
+        // switched sessions while the LLM probe was in flight.
+        if (activeSessionRef.current?.id !== sessionToRename.id) return;
+        renameSession(sessionToRename, title);
+      });
+    }
+
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -2171,216 +2176,47 @@ useEffect(() => {
 
       <section className="workspace" aria-label="Task execution">
         {activeView === "Skills" ? (
-          <section className="skills-view" aria-label="Skills registry">
-            <div className="skills-header">
-              <div><p className="section-label">Local Skills</p><h2>Lazy-loaded registry</h2></div>
-              <span>{skillsStatus === "ready" ? `${skills.length} found` : skillsStatus}</span>
-            </div>
-            {skillsStatus === "error" ? (
-              <p className="skills-error">{skillsError}</p>
-            ) : (
-              <div className="skills-layout">
-                <div className="skills-list" aria-label="Available skills">
-                  {skillsStatus === "loading" ? (
-                    <p className="skills-muted">Scanning skill frontmatter...</p>
-                  ) : (
-                    skills.map((skill) => (
-                      <button className={skill.id === selectedSkillId ? "skill-row selected" : "skill-row"} key={skill.id} type="button" onClick={() => setSelectedSkillId(skill.id)}>
-                        <span><strong>{skill.name}</strong><em>{skill.id}</em></span>
-                        <small>{[skill.hasReferences ? "references" : null, skill.hasScripts ? "scripts" : null, skill.hasAssets ? "assets" : null, skill.hasAgentsMetadata ? "metadata" : null].filter(Boolean).join(" / ") || "single file"}</small>
-                      </button>
-                    ))
-                  )}
-                </div>
-                <div className="skill-detail" aria-live="polite">
-                  {!selectedSkillId ? (
-                    <div className="skill-placeholder"><h3>Select a skill</h3><p>Only metadata is loaded so far. Pick a skill to read its full instructions.</p></div>
-                  ) : skillDetailStatus === "loading" ? (
-                    <p className="skills-muted">Loading {selectedSkillId}...</p>
-                  ) : skillDetailStatus === "error" ? (
-                    <p className="skills-error">{skillsError}</p>
-                  ) : skillDetail ? (
-                    <>
-                      <div className="skill-detail-heading">
-                        <div><h3>{skillDetail.summary.name}</h3><p>{skillDetail.summary.description || "No description in frontmatter."}</p></div>
-                        <span>{skillDetail.body.length.toLocaleString()} chars</span>
-                      </div>
-                      <pre>{skillDetail.body}</pre>
-                    </>
-                  ) : (
-                    <div className="skill-placeholder"><h3>Ready</h3><p>Skill bodies remain unloaded until you choose one.</p></div>
-                  )}
-                </div>
-              </div>
-            )}
-            <section className="merge-panel" aria-label="Potential skill merges">
-              <div className="skills-header compact">
-                <div><p className="section-label">Audit</p><h2>Potential overlap</h2></div>
-                <span>{mergeCandidates.length} groups</span>
-              </div>
-              {mergeCandidates.length === 0 ? (
-                <p className="skills-muted">Load the registry to see overlap candidates.</p>
-              ) : (
-                mergeCandidates.map((group) => (
-                  <p key={group.label}><strong>{group.label}</strong><span>{group.ids.join(" / ")}</span></p>
-                ))
-              )}
-            </section>
-          </section>
+          <SkillsView
+            skills={skills}
+            skillsStatus={skillsStatus}
+            skillsError={skillsError}
+            selectedSkillId={selectedSkillId}
+            setSelectedSkillId={setSelectedSkillId}
+            skillDetail={skillDetail}
+            skillDetailStatus={skillDetailStatus}
+          />
         ) : activeView === "Home" ? (
-          <>
-            <div className="workspace-header">
-              <span className="session-pill" aria-label="Current session">{activeSession?.label ?? "Untitled Session"}</span>
-              {activeSkillId ? <span className="session-pill skill">skill: {activeSkillId}</span> : null}
-            </div>
-            <div className="conversation" aria-label="Conversation" ref={conversationRef}>
-              {chat.map((entry) => {
-                if (entry.agentProgress) {
-                  return (
-                    <AgentProgressBubble
-                      key={entry.id}
-                      steps={entry.agentProgress.steps}
-                      completed={entry.agentProgress.completed}
-                      total={entry.agentProgress.steps.length}
-                      partial={entry.agentProgress.partial}
-                    />
-                  );
-                }
-                return entry.role === "user" ? (
-                  <article key={entry.id} className="chat-bubble chat-user">
-                    <div className="chat-avatar" aria-hidden="true"><User size={16} /></div>
-                    <div className="chat-body">
-                      <div className="chat-heading"><strong>Me</strong><time>just now</time></div>
-                      {entry.skillId ? (
-                        <p className="chat-skill-chip" aria-label={`Active skill ${entry.skillId}`}>skill: {entry.skillId}</p>
-                      ) : null}
-                      {/* User messages stay as pre-wrapped text — they're
-                          raw keyboard input, not markdown. */}
-                      <p className="chat-md-para">{entry.text}</p>
-                      {entry.attachments && entry.attachments.length > 0 ? (
-                        <ul className="chat-attachments" aria-label="Attached files">
-                          {entry.attachments.map((attachment) => (
-                            <li key={attachment.id}>
-                              <Paperclip size={12} aria-hidden="true" />
-                              <span>{attachment.name}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </div>
-                  </article>
-                ) : (
-                  <article key={entry.id} className="chat-bubble chat-zeus">
-                    <div className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></div>
-                    <div className="chat-body">
-                      <div className="chat-heading"><strong>Zeus</strong><time>just now</time></div>
-                      {entry.thinking ? (
-                        <p className="thinking" aria-live="polite">Thinking<span className="thinking-dots" aria-hidden="true"><span /><span /><span /></span></p>
-                      ) : (
-                        <MarkdownView markdown={entry.text} />
-                      )}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-
-            <section className="composer" aria-label="Message composer">
-              {slash.visible ? (
-                <div className="slash-menu" role="listbox" aria-label="Slash commands">
-                  {slash.items.length === 0 ? (
-                    <p className="slash-empty">No matches for /{slash.query}</p>
-                  ) : (
-                    slash.items.map((item, index) => {
-                      const isActive = index === slash.activeIndex;
-                      const label = item.kind === "skill" ? `/${item.id}` : item.label;
-                      const description = item.kind === "skill" ? (item.description || `Skill: ${item.name}`) : item.description;
-                      return (
-                        <button aria-selected={isActive} className={isActive ? "slash-row active" : "slash-row"} key={`${item.kind}-${item.kind === "skill" ? item.id : (item as { id: string }).id}`} onClick={() => applySlashPick(item)} onMouseEnter={() => slash.setActiveIndex(index)} type="button">
-                          <span className="slash-row-label">{label}</span>
-                          <span className="slash-row-desc">{description}</span>
-                          {item.kind === "skill" ? <span className="slash-row-kind">skill</span> : null}
-                        </button>
-                      );
-                    })
-                  )}
-                  <p className="slash-hint">Up Down navigate, Enter or Tab pick, Esc close. Typing a space picks the command and starts its arguments.</p>
-                </div>
-              ) : null}
-
-              {activeSkillId ? (
-                <div className="composer-skill-chip" aria-label={`Active skill ${activeSkillId}`}>
-                  skill: {activeSkillId}
-                  <button aria-label="Remove active skill" onClick={detachSkill} type="button"><X size={12} /></button>
-                </div>
-              ) : null}
-
-              <textarea aria-label="Message Zeus" onChange={(event) => { setMessage(event.target.value); resizeComposer(); }} onKeyDown={handleComposerKeyDown} onPaste={handleComposerPaste} placeholder="Ask Zeus to inspect, edit, test, or explain this project..." ref={composerRef} rows={1} value={message} />
-              <div className="composer-bottom">
-                <div className="composer-tools">
-                  <input aria-label="Choose files" className="file-input" multiple onChange={(event) => handleFileSelection(event.target.files)} ref={fileInputRef} type="file" />
-                  <button aria-label="Attach file" type="button" onClick={() => fileInputRef.current?.click()}><Paperclip size={16} /></button>
-                  <label className="composer-access">
-                    <select
-                      aria-label="Access mode"
-                      className="composer-access-select"
-                      onChange={(event) => {
-                        const next = event.target.value as AccessMode;
-                        setAccessMode(next);
-                        persistAccess(next);
-                      }}
-                      value={accessMode}
-                    >
-                      {(["Full", "Local", "Review", "Locked"] as AccessMode[]).map((mode) => (
-                        <option key={mode} value={mode}>{mode}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <WorkingFolderButton />
-                  {attachedFiles.map((file) => (
-                    <span className={file.kind === "image" ? "attached-chip image" : "attached-chip"} key={file.id}>
-                      {file.kind === "image" && file.previewUrl ? (
-                        <img alt={`${file.name} preview`} src={file.previewUrl} />
-                      ) : file.kind === "image" ? (
-                        <ImageIcon size={14} />
-                      ) : (
-                        <FileText size={14} />
-                      )}
-                      {file.name}
-                      <button aria-label={`Remove ${file.name}`} type="button" onClick={() => {
-                          const removed = attachedFiles.find((item) => item.id === file.id);
-                          if (removed) revokeAttachmentUrls([removed]);
-                          setAttachedFiles((current) => current.filter((item) => item.id !== file.id));
-                        }}><X size={13} /></button>
-                    </span>
-                  ))}
-                </div>
-                <div className="send-cluster">
-                  <span>{
-                    slash.visible
-                      ? (runState === "running" ? "Slash picker open - run in progress, Esc to close" : "Up Down navigate - Enter to pick")
-                      : runState === "running"
-                        ? "Generating... press the stop button to cancel"
-                        : "Enter sends · Shift+Enter adds a line"
-                  }</span>
-                  {runState === "running" ? (
-                    <button aria-label="Stop run" className="stop-button" onClick={stopRun} type="button"><Square size={14} /></button>
-                  ) : (
-                    <button aria-label="Send message" className="send-button" onClick={() => void handleSend()} type="button"><Send size={17} /></button>
-                  )}
-                </div>
-              </div>
-            </section>
-
-
-            <StatusBar
-              modelId={(providerKeysStatus as unknown as Record<string, string | null>)[`${activeProviderId}Model`] || providers.find((p) => p.id === activeProviderId)?.defaultModel || ""}
-              providerId={activeProviderId}
-              promptTokens={livePromptTokens}
-              triggerRatio={DEFAULT_COMPACT_TRIGGER_RATIO}
-              onOpenSettings={() => setActiveView("Settings")}
-            />
-          </>
+          <HomeView
+            chat={chat}
+            conversationRef={conversationRef}
+            message={message}
+            setMessage={setMessage}
+            composerRef={composerRef}
+            resizeComposer={resizeComposer}
+            handleComposerKeyDown={handleComposerKeyDown}
+            handleComposerPaste={handleComposerPaste}
+            fileInputRef={fileInputRef}
+            attachedFiles={attachedFiles}
+            handleFileSelection={handleFileSelection}
+            revokeAttachmentUrls={revokeAttachmentUrls}
+            setAttachedFiles={setAttachedFiles}
+            slash={slash}
+            applySlashPick={applySlashPick}
+            activeSkillId={activeSkillId}
+            detachSkill={detachSkill}
+            accessMode={accessMode}
+            setAccessMode={setAccessMode}
+            persistAccess={persistAccess}
+            runState={runState}
+            handleSend={handleSend}
+            stopRun={stopRun}
+            activeSession={activeSession}
+            activeProviderId={activeProviderId}
+            providers={providers}
+            providerKeysStatus={providerKeysStatus}
+            livePromptTokens={livePromptTokens}
+            onOpenSettings={() => setActiveView("Settings")}
+          />
         ) : (
           <section className="utility-view" aria-label={`${activeView} view`}>
             <div className="skills-header">
@@ -2388,273 +2224,76 @@ useEffect(() => {
               <span>{activeView === "Projects" ? (activeSession?.label ?? "none") : "state-backed"}</span>
             </div>
             {activeView === "Projects" && (
-              <div className="sessions-manager">
-                <div className="project-create">
-                  <input
-                    aria-label="New project name"
-                    onChange={(event) => setProjectNameDraft(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === "Enter") createProject(); }}
-                    placeholder="New project name"
-                    value={projectNameDraft}
-                  />
-                  <button type="button" onClick={createProject}><FolderPlus size={15} />Create project</button>
-                </div>
-                <div className="project-tabs" aria-label="Projects">
-                  {projects.map((project) => (
-                    <div className={project.id === activeProjectId ? "project-tab selected" : "project-tab"} key={project.id}>
-                      <button className="project-tab-label" type="button" onClick={() => setActiveProjectId(project.id)}>
-                        {project.name}
-                      </button>
-                      {project.id !== DEFAULT_PROJECT.id ? (
-                        <button
-                          aria-label={`Delete project ${project.name}`}
-                          className="project-tab-delete"
-                          type="button"
-                          onClick={() => deleteProject(project.id)}
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-                <div className="utility-grid">
-                  {projectSessionGroups.map((group) => (
-                    <section className="project-group" key={group.id} aria-label={`${group.name} sessions`}>
-                      <h3>{group.name}</h3>
-                      {group.sessions.length === 0 ? (
-                        <p className="skills-muted">No sessions in this project yet. New Session will add one here.</p>
-                      ) : (
-                        group.sessions.map((session, index) => (
-                          <button className={session.id === activeSession?.id ? "utility-row selected" : "utility-row"} key={session.id} type="button" onClick={() => selectSession(session)}>
-                            <strong>{session.label}</strong><span>{relativeTimeLabel(session.lastSeenAt)}</span>
-                          </button>
-                        ))
-                      )}
-                    </section>
-                  ))}
-                </div>
-              </div>
+              <ProjectsView
+                projects={projects}
+                activeProjectId={activeProjectId}
+                defaultProjectId={DEFAULT_PROJECT.id}
+                projectNameDraft={projectNameDraft}
+                onProjectNameDraftChange={setProjectNameDraft}
+                onCreateProject={createProject}
+                onSelectProject={setActiveProjectId}
+                onDeleteProject={deleteProject}
+                projectSessionGroups={projectSessionGroups}
+                activeSession={activeSession}
+                onSelectSession={selectSession}
+                formatRelativeTime={relativeTimeLabel}
+              />
             )}
             {activeView === "Memory" && (
-              <div className="utility-card">
-                <p className="skills-muted">Memory Snapshot shows the current local state Zeus should carry into the next turn: project, session, goal, provider, access mode, compact window, and active skill.</p>
-                <dl>
-                  <div><dt>Project</dt><dd>{PROJECT_NAME}</dd></div>
-                  <div><dt>Session Project</dt><dd>{activeSession?.projectName ?? "none"}</dd></div>
-                  <div><dt>Current Session</dt><dd>{activeSession ? `${activeSession.label} (${chat.length} turn(s))` : "none"}</dd></div>
-                  <div><dt>Goal</dt><dd>{activeGoal?.objective ?? "none"}</dd></div>
-                  <div><dt>Provider</dt><dd>{activeProviderLabel}</dd></div>
-                  <div><dt>Access</dt><dd>{accessMode}</dd></div>
-                  <div><dt>Skills</dt><dd>{skillsStatus === "ready" ? `${skills.length} indexed locally` : (skillsStatus === "loading" ? "loading..." : skillsStatus === "error" ? "discovery failed" : "open Skills to index")}</dd></div>
-                  <div><dt>Active Skill</dt><dd>{activeSkillId ?? "none"}</dd></div>
-                  <div><dt>Context Anchor</dt><dd>{compactFromId === null ? "full visible session" : `messages from #${compactFromId}`}</dd></div>
-                </dl>
-                <p className="skills-muted">{accessSummary}</p>
-              </div>
+              <MemoryView
+                projectName={PROJECT_NAME}
+                activeSession={activeSession}
+                messageCount={chat.length}
+                activeGoal={activeGoal}
+                activeProviderLabel={activeProviderLabel}
+                accessMode={accessMode}
+                accessSummary={accessSummary}
+                skillsCount={skills.length}
+                skillsStatus={skillsStatus}
+                activeSkillId={activeSkillId}
+                compactFromId={compactFromId}
+              />
             )}
             {activeView === "Harness Evolution" && (
-              <div className="utility-card">
-                <p>{proposal.summary}</p>
-                <p className="proposal-body">{proposal.body}</p>
-                {(proposal.status === "ready" || proposal.status === "edited") ? (
-                  <div className="proposal-actions">
-                    <button type="button" onClick={applyProposal}>Apply</button>
-                    <button type="button" onClick={discardProposal}>Discard</button>
-                  </div>
-                ) : proposal.status === "implementing" || proposal.status === "applied" || proposal.status === "failed" ? (
-                  <p className="proposal-status-linked">
-                    {proposal.status === "implementing" ? "Implementing session is active in Home. Edit the composer and send to start the agent run." : proposal.status === "applied" ? "Approved improvement was applied via the implementing session. No further actions on this proposal." : "Approved improvement did not complete. Review the implementing session for partial results."}
-                  </p>
-                ) : null}
-                <p className="proposal-status">Status: {proposal.status}</p>
-                {(() => {
-                  const linked = history.find((entry) => entry.sessionId && entry.proposalId === proposal.id);
-                  if (!linked?.sessionId) return null;
-                  const sessionRef = recentSessions.find((s) => s.id === linked.sessionId);
-                  return (
-                    <p className="proposal-linked-session">
-                      Implementing session:{" "}
-                      {sessionRef ? (
-                        <button
-                          className="link-button"
-                          type="button"
-                          onClick={() => selectSession(sessionRef)}
-                        >
-                          {sessionRef.label}
-                        </button>
-                      ) : (
-                        <span className="skills-muted">session no longer in recent list</span>
-                      )}
-                    </p>
-                  );
-                })()}
-                {history.length === 0 ? (
-                  <p className="skills-muted">No harness changes applied in this session.</p>
-                ) : (
-                  history.map((entry) => (
-                    <p key={`${entry.proposalId}-${entry.at}`}>{entry.action} / {new Date(entry.at).toLocaleTimeString()}</p>
-                  ))
-                )}
-              </div>
+              <HarnessEvolutionView
+                proposal={proposal}
+                history={history}
+                recentSessions={recentSessions}
+                onApply={applyProposal}
+                onDiscard={discardProposal}
+                onSelectSession={selectSession}
+              />
             )}
             {activeView === "Settings" && (
-              <div className="utility-card settings-card">
-                <div className="token-efficiency-row">
-                  <label className="token-efficiency-field">
-                    <span>Terse-output skill (Spec 04)</span>
-                    <select
-                      aria-label="Terse-output level"
-                      onChange={(event) => setTerseLevel(event.target.value as TerseLevel)}
-                      value={terseLevel}
-                    >
-                      <option value="off">off — baseline verbosity</option>
-                      <option value="lite">lite — drop preamble only</option>
-                      <option value="full">full — default terse mode</option>
-                      <option value="ultra">ultra — minimum grammatical form</option>
-                    </select>
-                  </label>
-                  <label className="token-efficiency-field">
-                    <span>Minimal-code skill (Spec 05)</span>
-                    <select
-                      aria-label="Minimal-code level"
-                      onChange={(event) => setMinimalLevel(event.target.value as MinimalLevel)}
-                      value={minimalLevel}
-                    >
-                      <option value="off">off</option>
-                      <option value="lite">lite — ladder steps 1–3</option>
-                      <option value="full">full — full ladder + audit comments</option>
-                      <option value="strict">strict — full + deviation justification</option>
-                    </select>
-                  </label>
-                </div>
-
-                <p className="section-label">Provider API keys</p>
-                <p className="skills-muted">Keys are stored in the app data folder and never leave your machine. The frontend never sees the raw value — only whether a key is configured.</p>
-                {([
-                  { id: "minimax" as const, label: "MiniMax (MINIMAX_API_KEY)", help: "Default provider. Get a key from https://www.minimax.io/platform/user-center/basic-information/interface-key.", defaultBaseUrl: "https://api.minimax.io/v1", defaultModel: "MiniMax-M3" },
-                  { id: "openai" as const, label: "OpenAI (OPENAI_API_KEY)", help: "Set if you want to route through OpenAI's API.", defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
-                  { id: "anthropic" as const, label: "Anthropic (ANTHROPIC_API_KEY)", help: "Set if you want to route through Anthropic's API.", defaultBaseUrl: "https://api.anthropic.com/v1", defaultModel: "claude-3-5-sonnet-latest" },
-                ]).map((row) => {
-                  const savedBaseUrl = (providerKeysStatus as unknown as Record<string, string | null>)[`${row.id}BaseUrl`] ?? null;
-                  const savedModel = (providerKeysStatus as unknown as Record<string, string | null>)[`${row.id}Model`] ?? null;
-                  const draftBaseUrl = providerKeyDrafts[`${row.id}BaseUrl` as keyof typeof providerKeyDrafts] ?? "";
-                  const draftModel = providerKeyDrafts[`${row.id}Model` as keyof typeof providerKeyDrafts] ?? "";
-                  return (
-                  <form
-                    key={row.id}
-                    aria-label={row.label}
-                    className="provider-key-row"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const value = providerKeyDrafts[row.id];
-                      if (value.trim()) {
-                        void handleSaveProviderKey(row.id, value);
-                      }
-                      // Always save baseUrl / model too — empty draft means "use default".
-                      void handleSaveProviderOverrides(row.id, draftBaseUrl, draftModel);
-                    }}
-                  >
-                    <div className="provider-key-meta">
-                      <strong>{row.label}</strong>
-                      <span className={providerKeysStatus[row.id] ? "provider-key-status ok" : "provider-key-status missing"}>
-                        {providerKeysStatus[row.id] ? "configured" : "not configured"}
-                      </span>
-                    </div>
-                    <p className="skills-muted">{row.help}</p>
-                    <div className="provider-key-input-row">
-                      <input
-                        aria-label={`${row.label} value`}
-                        onChange={(event) => setProviderKeyDrafts((current) => ({ ...current, [row.id]: event.target.value }))}
-                        placeholder={providerKeysStatus[row.id] ? "•••••••• (leave blank to keep current)" : "paste your key here"}
-                        type="password"
-                        value={providerKeyDrafts[row.id]}
-                      />
-                      <button type="submit" disabled={!providerKeyDrafts[row.id].trim() && !draftBaseUrl.trim() && !draftModel.trim()}>Save</button>
-                      {providerKeysStatus[row.id] ? (
-                        <button type="button" onClick={() => void handleClearProviderKey(row.id)}>Clear</button>
-                      ) : null}
-                      <button
-                        type="button"
-                        disabled={!providerKeysStatus[row.id] || testResults[row.id]?.status === "running"}
-                        onClick={() => void handleTestProvider(row.id)}
-                      >
-                        {testResults[row.id]?.status === "running" ? "Testing…" : "Test connection"}
-                      </button>
-                    </div>
-                    <div className="provider-key-input-row">
-                      <label className="provider-key-field-label">
-                        <span>Base URL</span>
-                        <input
-                          aria-label={`${row.label} base URL`}
-                          onChange={(event) => setProviderKeyDrafts((current) => ({ ...current, [`${row.id}BaseUrl`]: event.target.value }))}
-                          placeholder={`Default: ${row.defaultBaseUrl}`}
-                          value={draftBaseUrl}
-                        />
-                      </label>
-                      <label className="provider-key-field-label">
-                        <span>Model</span>
-                        <input
-                          aria-label={`${row.label} model`}
-                          onChange={(event) => setProviderKeyDrafts((current) => ({ ...current, [`${row.id}Model`]: event.target.value }))}
-                          placeholder={`Default: ${row.defaultModel}`}
-                          value={draftModel}
-                        />
-                      </label>
-                    </div>
-                    {testResults[row.id] ? (() => {
-                      const test = testResults[row.id]!;
-                      return (
-                        <div className={test.status === "ok" ? "provider-test-result ok" : test.status === "error" ? "provider-test-result error" : "provider-test-result running"}>
-                          {test.status === "running" ? "Testing…" : (
-                            <>
-                              <strong>{test.status === "ok" ? "OK" : "Failed"}</strong>
-                              <span>{test.message}</span>
-                              {test.baseUrl ? <small>base: {test.baseUrl}</small> : null}
-                              {test.model ? <small>model: {test.model}</small> : null}
-                              {test.preview ? <pre className="provider-test-preview">{test.preview}</pre> : null}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })() : null}
-                    {savedBaseUrl || savedModel ? (
-                      <p className="skills-muted">
-                        Currently using: {savedBaseUrl ?? row.defaultBaseUrl}
-                        {savedModel ? ` · model: ${savedModel}` : ` · model: ${row.defaultModel} (default)`}
-                      </p>
-                    ) : null}
-                  </form>
-                  );
-                })}
-              </div>
+              <SettingsView
+                terseLevel={terseLevel}
+                setTerseLevel={setTerseLevel}
+                minimalLevel={minimalLevel}
+                setMinimalLevel={setMinimalLevel}
+                providerKeysStatus={providerKeysStatus}
+                providerKeyDrafts={providerKeyDrafts}
+                setProviderKeyDrafts={setProviderKeyDrafts}
+                testResults={testResults}
+                handleSaveProviderKey={handleSaveProviderKey}
+                handleClearProviderKey={handleClearProviderKey}
+                handleTestProvider={handleTestProvider}
+                handleSaveProviderOverrides={handleSaveProviderOverrides}
+              />
             )}
           </section>
         )}
       </section>
 
-      <aside className="inspector" aria-label="Run details">
-        <PlanProgressPanel
-          latestUserObjective={latestUserObjective}
-          lastAgentRun={lastAgentRun}
-          lastToolFailed={lastToolFailed}
-          runtimePlan={runtimePlan}
-        />
-
-        <section className="panel session-panel">
-          <div className="panel-heading">
-            <h2>Session</h2>
-            <span>{runState === "running" ? "running" : `${chat.length} messages`}</span>
-          </div>
-          <p className="skills-muted">Last turn tokens</p>
-          <dl>
-            <div><dt>In</dt><dd>{latestTurnTokens ? latestTurnTokens.in.toLocaleString() : "—"}</dd></div>
-            <div><dt>Out</dt><dd>{latestTurnTokens ? latestTurnTokens.out.toLocaleString() : "—"}</dd></div>
-            <div><dt>Cached</dt><dd>{latestTurnTokens?.cached !== undefined ? latestTurnTokens.cached.toLocaleString() : "—"}</dd></div>
-          </dl>
-          <button type="button" onClick={() => setActiveView("Settings")}>Open settings</button>
-        </section>
-      </aside>
+      <InspectorPanel
+        latestUserObjective={latestUserObjective}
+        lastAgentRun={lastAgentRun}
+        lastToolFailed={lastToolFailed}
+        runtimePlan={runtimePlan}
+        latestTurnTokens={latestTurnTokens}
+        runState={runState}
+        messageCount={chat.length}
+        onOpenSettings={() => setActiveView("Settings")}
+      />
     </main>
   );
 }

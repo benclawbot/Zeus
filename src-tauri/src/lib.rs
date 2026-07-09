@@ -1319,7 +1319,26 @@ fn list_sessions_full(state: tauri::State<'_, AppState>) -> Result<Vec<Persisted
 #[tauri::command]
 fn list_skills(app: tauri::AppHandle) -> Result<Vec<SkillSummary>, String> {
     let root = resolve_skills_dir(&app)?;
-    list_skills_from_dir(&root)
+    let mut skills = list_skills_from_dir(&root)?;
+    // ZEUS_BUNDLED_SKILLS: comma-separated allowlist of skill IDs that
+    // should always appear in the catalog. When set, anything not on
+    // the list is hidden from the picker — those skills still load on
+    // demand via `load_skill(id)` (the user can `/slash` pick them
+    // directly by id even if they don't show in the list). Useful for
+    // trimming a large skills dir down to a starter set without
+    // deleting skills from disk.
+    if let Ok(raw) = std::env::var("ZEUS_BUNDLED_SKILLS") {
+        let allow: HashSet<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        if !allow.is_empty() {
+            skills.retain(|s| allow.contains(&s.id));
+        }
+    }
+    Ok(skills)
 }
 
 #[tauri::command]
