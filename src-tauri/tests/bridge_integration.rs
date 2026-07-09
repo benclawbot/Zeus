@@ -13,14 +13,16 @@
 //! Skip the TS list only for commands intentionally hidden from the
 //! frontend (none today).
 
-#[path = "../src/lib.rs"]
-mod lib;
-
-use lib::*;
-
 /// Every Tauri command name registered in src-tauri/src/lib.rs (and the
 /// `agent_runtime_commands` submodule). Keep in sync with the TS
 /// `DECLARED_COMMANDS` array in src/providers/bridge.test.ts.
+///
+/// This test only reads source as text — it does not compile the
+/// library. Pulling the full `mod lib;` in here would force
+/// `agent_runtime` and friends to resolve as siblings of the test
+/// rather than children of `lib`, breaking the `mod` declarations in
+/// lib.rs at compile time. The text-scan approach is enough for the
+/// contract we want to lock.
 const DECLARED_COMMANDS: &[&str] = &[
     "send_chat",
     "test_provider",
