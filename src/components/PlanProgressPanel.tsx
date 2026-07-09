@@ -25,6 +25,13 @@ interface PlanProgressPanelProps {
   lastAgentRun?: AgentRunSummary | null;
   /** True when the last tool/agent invocation failed and we're in recovery. */
   lastToolFailed?: boolean;
+  /**
+   * LLM-generated plan for the latest objective. When set, the panel
+   * surfaces these specific steps instead of the generic 5-step
+   * boilerplate from `derivePlanFromObjective`. Falls back to the
+   * heuristic plan when null (planning was skipped or failed).
+   */
+  runtimePlan?: RuntimePlan | null;
 }
 
 function statusGlyph(status: PlanStatus, index: number): string {
@@ -52,20 +59,36 @@ function buildPlan(
   latestUserObjective: string,
   lastAgentRun: AgentRunSummary | null | undefined,
   lastToolFailed: boolean | undefined,
+  runtimePlan: RuntimePlan | null | undefined,
 ): RuntimePlan | null {
   const objective = latestUserObjective.trim();
   if (!objective) return null;
-  const plan = derivePlanFromObjective(objective);
-  const updated = updatePlanFromObservations(plan, observationsFromAgentRun(lastAgentRun));
+  // Prefer the LLM-generated plan when available — it carries task-
+  // specific steps that match this objective. Fall back to the heuristic
+  // 5-step boilerplate when the planner was skipped (short chat,
+  // provider error, etc.).
+  const basePlan = runtimePlan && runtimePlan.steps.length > 0
+    ? { ...runtimePlan, objective: runtimePlan.objective || objective }
+    : derivePlanFromObjective(objective);
+  const updated = updatePlanFromObservations(basePlan, observationsFromAgentRun(lastAgentRun));
   if (lastToolFailed) {
-    return {
-      ...updated,
-      steps: updated.steps.map((step) =>
-        step.id === "recover"
-          ? { ...step, status: "in_progress", detail: "Latest tool/action output failed; recovery remains active." }
-          : step,
-      ),
-    };
+    // Heuristic plan: a "recover" step is always present, target it.
+    // LLM plan: promote the last in-progress or todo step into recovery.
+    const heuristicRecover = updated.steps.find((step) => step.id === "recover");
+    const fallbackTarget = heuristicRecover
+      ?? updated.steps.find((step) => step.status === "in_progress")
+      ?? updated.steps.find((step) => step.status === "todo")
+      ?? updated.steps[updated.steps.length - 1];
+    if (fallbackTarget) {
+      return {
+        ...updated,
+        steps: updated.steps.map((step) =>
+          step.id === fallbackTarget.id
+            ? { ...step, status: "in_progress", detail: "Latest tool/action output failed; recovery remains active." }
+            : step,
+        ),
+      };
+    }
   }
   return updated;
 }
@@ -74,8 +97,9 @@ export function PlanProgressPanel({
   latestUserObjective,
   lastAgentRun,
   lastToolFailed,
+  runtimePlan,
 }: PlanProgressPanelProps): ReactNode {
-  const plan = buildPlan(latestUserObjective, lastAgentRun, lastToolFailed);
+  const plan = buildPlan(latestUserObjective, lastAgentRun, lastToolFailed, runtimePlan);
   const total = plan?.steps.length ?? 0;
   const completed = plan?.steps.filter((step) => step.status === "done").length ?? 0;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;

@@ -28,6 +28,8 @@ import { isTauriRuntime } from "./providers/minimax";
 import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
+import { generatePlanSteps } from "./providers/planner";
+import type { RuntimePlan, RuntimePlanStep } from "./agentRuntimeDeepLoop";
 import { listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
@@ -410,6 +412,7 @@ export function App() {
     } catch { return []; }
   });
   const [agentProgress, setAgentProgress] = useState<{ steps: AgentProgressStep[]; completed: number; partial: boolean } | null>(null);
+  const [runtimePlan, setRuntimePlan] = useState<RuntimePlan | null>(null);
   const [proposalDraftBody, setProposalDraftBody] = useState<string | null>(null);
   const notificationCount = countPendingProposals(proposal, activeView === "Harness Evolution");
   const [message, setMessage] = useState("");
@@ -730,6 +733,7 @@ export function App() {
     setChat([]);
     setCompactFromId(null);
     setMessage("");
+    setRuntimePlan(null);
     // Release any blob preview URLs pinned to the previous session's
     // attachments before we drop the references on the floor.
     setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
@@ -1243,6 +1247,33 @@ export function App() {
     setMessage("");
     setRunState("running");
     requestAnimationFrame(() => { if (composerRef.current) composerRef.current.style.height = "24px"; });
+
+    // Codex-style planning: ask the active provider for a 3-7 step plan
+    // for this objective. Result lands in `runtimePlan`, which
+    // PlanProgressPanel reads to surface task-specific steps instead of
+    // the generic 5-step boilerplate. Fire-and-forget — the agent loop
+    // doesn't wait for the plan; the panel shows the heuristic fallback
+    // until the LLM response arrives.
+    setRuntimePlan(null);
+    {
+      const overrides = getActiveProviderOverrides();
+      void generatePlanSteps(prompt, {
+        provider: activeProviderId,
+        ...(overrides.model ? { model: overrides.model } : {}),
+        ...(overrides.baseUrl ? { baseUrl: overrides.baseUrl } : {}),
+      }).then((steps) => {
+        if (!steps) return;
+        setRuntimePlan({
+          objective: prompt.trim(),
+          status: "in_progress",
+          steps: steps.map<RuntimePlanStep>((label, index) => ({
+            id: `plan-${index}`,
+            label,
+            status: "todo",
+          })),
+        });
+      });
+    }
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -2359,6 +2390,7 @@ useEffect(() => {
           latestUserObjective={latestUserObjective}
           lastAgentRun={lastAgentRun}
           lastToolFailed={lastToolFailed}
+          runtimePlan={runtimePlan}
         />
 
         <section className="panel session-panel">

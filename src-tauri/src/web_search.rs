@@ -26,6 +26,8 @@
 
 use std::process::Stdio;
 use std::time::Duration;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -211,12 +213,24 @@ async fn ddgs_search(query: &str, limit: usize) -> Result<WebSearchResult, Strin
          As a last resort, install `pip install ddgs` and set ZEUS_DDGS_BIN to its binary."
             .to_string()
     })?;
-    let output = std::process::Command::new(&bin)
-        .args(["text", "-q", query, "-m", &limit.max(1).to_string()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("spawn ddgs: {e}"))?;
+    let output = {
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.args(["text", "-q", query, "-m", &limit.max(1).to_string()]);
+        // CREATE_NO_WINDOW — without this, every webSearch briefly pops a
+        // console window on Windows (the sidecar is a CLI exe) and triggers
+        // UAC / SmartScreen prompts on first run. 0x08000000 is the official
+        // flag value from WinBase.h. `creation_flags` is a Windows-only
+        // method, so we gate it with #[cfg] rather than cfg!.
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x08000000);
+        }
+        cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("spawn ddgs: {e}"))?
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!(

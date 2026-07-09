@@ -55,6 +55,31 @@ export function updatePlanFromObservations(plan: RuntimePlan, observations: Tool
     const failed = observations.filter((item) => !item.ok).map((item) => `${item.label}: ${item.message}`).join("; ");
     mark("recover", "in_progress", failed.slice(0, 240));
   }
+
+  // For LLM-generated plans (ids are `plan-<n>`, not the heuristic
+  // `inspect/act/verify/recover`), advance steps by observation count:
+  // the first N observations mark the first N plan steps as done; the
+  // N+1th becomes in_progress when there's any failed observation; the
+  // rest stay todo. This gives the user a live tick animation without
+  // requiring us to match fuzzy tool labels to plan text.
+  const isLlmPlan = next.length > 0 && next.every((step) => /^plan-\d+$/.test(step.id));
+  if (isLlmPlan && observations.length > 0) {
+    const okCount = observations.filter((item) => item.ok).length;
+    const failedIdx = observations.findIndex((item) => !item.ok);
+    next.forEach((step, index) => {
+      if (index < okCount) {
+        step.status = "done";
+      } else if (index === okCount && failedIdx >= 0) {
+        step.status = "in_progress";
+        const failed = observations[failedIdx];
+        step.detail = `${failed.label}: ${failed.message}`.slice(0, 240);
+      } else if (index === okCount && anyOk) {
+        step.status = "in_progress";
+      } else {
+        step.status = "todo";
+      }
+    });
+  }
   return {
     ...plan,
     status: anyFailed ? "in_progress" : anyOk ? "in_progress" : plan.status,
