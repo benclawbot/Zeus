@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "sidecar:build": "bash scripts/build-ddgs-sidecar.sh",
+    "sidecar:build:win": "powershell -ExecutionPolicy Bypass -File scripts/build-ddgs-sidecar.ps1",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "browser:smoke": "node scripts/browser-smoke.mjs",

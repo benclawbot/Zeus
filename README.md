@@ -66,7 +66,7 @@ One tool, eight actions: `status`, `open`, `snapshot`, `click`, `type`, `screens
 <td width="33%" valign="top">
 
 ### 🔭 Autonomous Web Search
-`webSearch` hits DuckDuckGo's HTML endpoint by default and returns ranked title + URL + snippet hits — no API key required. When DuckDuckGo's anomaly detector blocks this IP, switch to a self-hosted SearXNG instance via `ZEUS_SEARCH_PROVIDER=searxng` + `ZEUS_SEARXNG_URL=<base>`. The model can emit `webSearch {"query":"..."}` from any chat turn to pull external context for research, doc lookups, or competitive analysis without leaving the composer.
+`webSearch` returns ranked title + URL + snippet hits — no API key required. The installer ships a self-contained `ddgs` sidecar next to `zeus.exe` (Python + ddgs + curl-cffi bundled into one binary), which uses a real-browser TLS fingerprint to bypass DuckDuckGo's anomaly detector. End users don't need Python or `pip install` — the sidecar is bundled. Power users can point `ZEUS_DDGS_BIN` at a custom build, or fall back to a self-hosted SearXNG instance via `ZEUS_SEARCH_PROVIDER=searxng` + `ZEUS_SEARXNG_URL=<base>`. When the auto-detected provider errors out at runtime, Zeus retries the next provider (`ddgs → searxng → duckduckgo`) so a single transient failure doesn't break the agent loop. The model can emit `webSearch {"query":"..."}` from any chat turn to pull external context for research, doc lookups, or competitive analysis without leaving the composer.
 
 </td>
 <td width="33%" valign="top">

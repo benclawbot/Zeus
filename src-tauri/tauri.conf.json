@@ -40,6 +40,9 @@
     "resources": {
       "../skills/": "skills"
     },
+    "externalBin": [
+      "binaries/ddgs"
+    ],
     "shortDescription": "Local-first coding agent",
     "longDescription": "Zeus is a local-first coding agent with visible harness evolution and MiniMax M3 provider support."
   }

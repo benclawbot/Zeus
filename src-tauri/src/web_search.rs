@@ -1,13 +1,15 @@
 //! Web search tool. Three backends, auto-detected:
 //!
-//! - `ddgs` (preferred) — shells out to the `ddgs` Python CLI, which
-//!   uses `curl-cffi` to mimic a real browser's TLS fingerprint and
-//!   bypass DDG's anomaly detector. No API key, works from consumer
-//!   IPs. Install with `pip install ddgs` and have the binary on PATH,
-//!   or set `ZEUS_DDGS_BIN` to an explicit path.
+//! - `ddgs` (preferred) — Tauri sidecar binary (`ddgs-<target>.exe`)
+//!   shipped inside the Zeus installer. Self-contained: bundles
+//!   Python + `ddgs` + `curl-cffi` so end users don't need to pip-
+//!   install anything. Resolves via `ZEUS_DDGS_BIN` → next to the main
+//!   exe → PATH. The sidecar uses `curl-cffi` to mimic a real browser's
+//!   TLS fingerprint and bypass DDG's anomaly detector. No API key,
+//!   works from consumer IPs.
 //! - `searxng` — `GET {ZEUS_SEARXNG_URL}/search?q=...&format=json`.
 //!   Bring-your-own self-hosted instance with JSON output enabled.
-//! - `duckduckgo` (fallback) — raw HTML scrape against
+//! - `duckduckgo` (last-resort fallback) — raw HTML scrape against
 //!   `https://html.duckduckgo.com/html/`. Frequently CAPTCHA'd from
 //!   consumer IPs. When DDG serves its anomaly challenge page, we
 //!   surface it as an explicit error rather than the misleading "0
@@ -15,6 +17,12 @@
 //!
 //! Override the auto-detected choice with
 //! `ZEUS_SEARCH_PROVIDER=ddgs|searxng|duckduckgo`.
+//!
+//! Auto-fallback: when the auto-detected provider errors out at
+//! runtime (e.g., the ddgs sidecar is missing on a source build),
+//! `web_search` retries the next provider in `ddgs → searxng → duckduckgo`
+//! order so a single transient failure doesn't break the agent loop.
+//! An explicit `ZEUS_SEARCH_PROVIDER` always wins (no fallback).
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -63,6 +71,14 @@ fn select_provider(name: Option<&str>) -> &'static str {
     "duckduckgo"
 }
 
+/// All the filenames ddgs could ship as across platforms and packaging
+/// styles. Tauri sidecars are normally `<name><.exe on Windows>`, but
+/// the user can also install ddgs via `pip` / `uv` which lands it as a
+/// Python script wrapper.
+fn ddgs_candidate_names() -> &'static [&'static str] {
+    if cfg!(windows) { &["ddgs.exe", "ddgs", "ddgs.bat", "ddgs.cmd"] } else { &["ddgs"] }
+}
+
 /// Returns an error if the body looks like DDG's bot challenge page.
 fn check_ddg_challenge(body: &str) -> Result<(), String> {
     if DDG_CHALLENGE_MARKERS.iter().any(|marker| body.contains(marker)) {
@@ -108,7 +124,8 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
     validate_query(&request.query)?;
     let query = request.query.trim().to_string();
     let limit = request.max_results.unwrap_or(MAX_HITS).clamp(1, MAX_HITS);
-    let provider = select_provider(std::env::var("ZEUS_SEARCH_PROVIDER").ok().as_deref());
+    let explicit = std::env::var("ZEUS_SEARCH_PROVIDER").ok();
+    let provider = select_provider(explicit.as_deref());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -116,12 +133,41 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
-    match provider {
-        "duckduckgo" => duckduckgo_search(&client, &query, limit).await,
-        "ddgs" => ddgs_search(&query, limit).await,
-        "searxng" => searxng_search(&client, &query, limit).await,
-        _ => unreachable!("select_provider returns one of these three"),
+    // Build the chain in auto-detect order; explicit picks win and skip fallback.
+    let order: &[&str] = if explicit.is_some() {
+        &[provider]
+    } else {
+        // Auto-detect order: ddgs (if resolvable) → searxng (if configured) → duckduckgo.
+        // select_provider already returned the first resolvable one; the rest follow the same
+        // preference so the chain below matches what the user would expect.
+        match provider {
+            "ddgs" => &["ddgs", "searxng", "duckduckgo"],
+            "searxng" => &["searxng", "duckduckgo"],
+            _ => &["duckduckgo"],
+        }
+    };
+
+    let mut last_err = String::new();
+    for candidate in order {
+        let result = match *candidate {
+            "ddgs" => ddgs_search(&query, limit).await,
+            "searxng" => searxng_search(&client, &query, limit).await,
+            "duckduckgo" => duckduckgo_search(&client, &query, limit).await,
+            other => Err(format!("unknown search provider: {other}")),
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                // On the explicit branch there's no point retrying — bubble.
+                if explicit.is_some() {
+                    return Err(err);
+                }
+                eprintln!("web_search: {candidate} failed: {err}; trying next provider");
+                last_err = err;
+            }
+        }
     }
+    Err(format!("all search providers failed; last error: {last_err}"))
 }
 
 async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) -> Result<WebSearchResult, String> {
@@ -147,31 +193,26 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) 
     Ok(WebSearchResult { provider: "duckduckgo", query: query.to_string(), hits, message })
 }
 
-/// ddgs CLI backend. Shells out to the `ddgs` Python CLI which uses
-/// `curl-cffi` to mimic a real browser's TLS fingerprint, bypassing
-/// DDG's anomaly detector. The CLI is a separate process so Zeus
-/// doesn't need a Python interpreter embedded or the `ddgs` package
-/// importable from Rust — only the `ddgs` binary on PATH (or pointed
-/// at via `ZEUS_DDGS_BIN`).
+/// ddgs sidecar backend. Zeus ships a self-contained `ddgs` exe as a
+/// Tauri sidecar (built by `scripts/build-ddgs-sidecar.sh` — bundles
+/// Python + ddgs + curl-cffi into one binary so end users don't have
+/// to pip-install anything). The sidecar lives next to `zeus.exe` in
+/// the install dir; we also fall back to PATH / `ZEUS_DDGS_BIN` so a
+/// power user can swap in their own build.
+///
+/// Why the wrapper instead of the upstream `ddgs` CLI: ddgs 9.x ships
+/// with a broken `-o json` stdout path (writes nothing). The wrapper
+/// calls the `DDGS().text()` API directly and emits a stable JSON
+/// array on stdout so the parser below stays simple.
 async fn ddgs_search(query: &str, limit: usize) -> Result<WebSearchResult, String> {
     let bin = resolve_ddgs_bin().ok_or_else(|| {
-        "ddgs CLI not found on PATH and ZEUS_DDGS_BIN is not set. \
-         Install it with `pip install ddgs` (a Python package), then either \
-         add its bin directory to PATH or set ZEUS_DDGS_BIN to the ddgs \
-         executable."
+        "ddgs sidecar not found. The installer should have placed it next to zeus.exe; \
+         if you ran from source, run `bash scripts/build-ddgs-sidecar.sh` first. \
+         As a last resort, install `pip install ddgs` and set ZEUS_DDGS_BIN to its binary."
             .to_string()
     })?;
     let output = std::process::Command::new(&bin)
-        .args([
-            "text",
-            "-q",
-            query,
-            "-m",
-            &limit.max(1).to_string(),
-            "-o",
-            "json",
-            "-nc",
-        ])
+        .args(["text", "-q", query, "-m", &limit.max(1).to_string()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -193,8 +234,13 @@ async fn ddgs_search(query: &str, limit: usize) -> Result<WebSearchResult, Strin
     Ok(WebSearchResult { provider: "ddgs", query: query.to_string(), hits, message })
 }
 
-/// Locate the ddgs CLI. Honors `ZEUS_DDGS_BIN` if set; otherwise
-/// resolves via PATH (`which ddgs`).
+/// Locate the ddgs sidecar. Resolution order:
+///
+/// 1. `ZEUS_DDGS_BIN` env var (explicit override)
+/// 2. `<dir of current_exe>/ddgs[.exe]` — Tauri places sidecars next to the main exe
+/// 3. `ddgs` on PATH (portable across Windows + Unix)
+///
+/// Returns the first hit that's actually a file.
 fn resolve_ddgs_bin() -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("ZEUS_DDGS_BIN") {
         let p = std::path::PathBuf::from(path);
@@ -202,8 +248,19 @@ fn resolve_ddgs_bin() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    // Look up ddgs on PATH. std::env::var("PATH") + walking each entry
-    // is portable to Windows + Unix. .exe suffix on Windows.
+    // Bundled sidecar lives next to zeus.exe. current_exe() resolves the
+    // real path on Windows even when launched via a symlink.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ddgs_candidate_names() {
+                let candidate = dir.join(&name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    // Last-resort PATH walk. Useful when developing from `cargo run`.
     let path = std::env::var_os("PATH")?;
     let extensions: &[&str] = if cfg!(windows) { &["", ".exe", ".bat", ".cmd"] } else { &[""] };
     for dir in std::env::split_paths(&path) {
