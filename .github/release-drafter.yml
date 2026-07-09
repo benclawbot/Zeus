@@ -1,0 +1,57 @@
+# Release-drafter config. The matching workflow
+# (.github/workflows/release-drafter.yml) runs on every push to
+# `main` and refreshes the draft release's title, tag, and body
+# from the merged PRs since the last release.
+#
+# To use: cut a release with `gh release create v0.2.0 --draft`.
+# Future pushes to main will keep the draft's notes in sync. Edit
+# the draft's "Save" button to publish when ready.
+#
+# PRs are bucketed by the labels applied at merge time. The
+# default labels are conventional-commits-friendly; tweak to match
+# whatever scheme the project settles on.
+
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+version-resolver:
+  major:
+    labels: ["breaking"]
+  minor:
+    labels: ["feature", "enhancement"]
+  patch:
+    labels: ["bug", "fix", "chore", "refactor", "docs", "ci", "test"]
+  default: minor
+
+categories:
+  - title: "🚨 Breaking Changes"
+    labels: ["breaking"]
+  - title: "🚀 Features"
+    labels: ["feature", "enhancement"]
+  - title: "🐛 Bug Fixes"
+    labels: ["bug", "fix"]
+  - title: "🧪 Tests"
+    labels: ["test"]
+  - title: "🧰 Maintenance"
+    labels: ["chore", "refactor", "docs", "ci", "build"]
+  - title: "📦 Other"
+    labels: ["*"]
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+exclude-labels: ["skip-changelog"]
+
+# Reuse the existing release body header so the published notes
+# don't lose the "Installers" / "What's in this release" framing
+# the v0.1.0 cut established. Release-drafter injects the
+# changelog under `$CHANGES`.
+template: |
+  ## Installers
+
+  - **Windows MSI** — system-wide Windows Installer bundle.
+  - **Windows NSIS** — per-user installer, no admin required.
+
+  > The ddgs search sidecar is **not** bundled by default. To
+  > bundle it, set `ZEUS_BUNDLE_DDGS=1` before `npm run tauri:build`.
+
+  ## What's changed
+
+  $CHANGES

@@ -1,0 +1,27 @@
+name: Release Drafter
+
+# Keeps the next draft release's notes in sync with the merged PRs
+# since the last release. Triggered on every push to main so the
+# draft is always current. To publish: open the draft on GitHub,
+# edit if needed, and click "Publish release".
+#
+# First run requires an open draft. The simplest path:
+#   gh release create v0.2.0 --draft --title "v0.2.0 (draft)"
+#   # push to main → release-drafter fills in the body
+#   # open the draft on GitHub, edit, publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  update_release_draft:
+    permissions:
+      contents: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
