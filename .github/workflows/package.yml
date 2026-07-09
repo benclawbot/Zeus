@@ -68,3 +68,22 @@ jobs:
       - name: Package desktop app
         timeout-minutes: 60
         run: npm run tauri:build -- ${{ matrix.args }}
+
+      - name: Upload installers
+        # Ship the MSI / NSIS bundles (and the raw zeus.exe + ddgs
+        # sidecar) as workflow artifacts so they're downloadable from
+        # the Actions run without cutting a release. A release just
+        # promotes the same files to a versioned URL. Skipped for
+        # PRs (artifacts are public anyway; keeps the artifact list
+        # clean for forks).
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeus-installers-${{ matrix.platform }}
+          path: |
+            src-tauri/target/release/zeus.exe
+            src-tauri/target/release/ddgs.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 30
