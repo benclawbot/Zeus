@@ -1018,6 +1018,21 @@ fn parse_native_tool_calls(content: &str) -> Result<Vec<engine::AgentEngineToolC
     Ok(calls)
 }
 
+fn strip_native_tool_blocks(content: &str) -> String {
+    let mut remaining = content;
+    let mut out = String::new();
+    while let Some(start) = remaining.find("```tool") {
+        out.push_str(&remaining[..start]);
+        let after_start = &remaining[start + "```tool".len()..];
+        match after_start.find("```") {
+            Some(end) => remaining = &after_start[end + "```".len()..],
+            None => return out.trim().to_string(),
+        }
+    }
+    out.push_str(remaining);
+    out.trim().to_string()
+}
+
 #[tauri::command]
 async fn agent_runtime_execute_turn(
     app: tauri::AppHandle,
@@ -1114,7 +1129,7 @@ async fn agent_runtime_execute_turn(
     Ok(NativeAgentTurnResult {
         content: format!(
             "{}\n\nStopped after {max_turns} native tool turns.",
-            response.content
+            strip_native_tool_blocks(&response.content)
         ),
         model: response.model,
         usage: response.usage,
@@ -2130,6 +2145,14 @@ mod native_agent_turn_tests {
     #[test]
     fn rejects_native_tool_calls_without_json_arguments() {
         assert!(parse_native_tool_calls("```tool\nreadFile\n```").is_err());
+    }
+
+    #[test]
+    fn strips_native_tool_blocks_from_a_bounded_final_response() {
+        assert_eq!(
+            strip_native_tool_blocks("before\n```tool\nreadFile {\"path\":\"x\"}\n```\nafter"),
+            "before\n\nafter"
+        );
     }
 }
 
