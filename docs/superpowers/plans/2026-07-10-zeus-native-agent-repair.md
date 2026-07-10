@@ -86,8 +86,11 @@ Expected: FAIL because the current text-only contract cannot resolve module-qual
 - [ ] **Step 3: Add monotonic collision-safe ID allocation and accurate registration discovery**
 
 ```rust
+static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+
 fn new_runtime_id(prefix: &str) -> String {
-    format!("{prefix}-{}-{}", Utc::now().timestamp_nanos_opt().unwrap_or_default(), rand_suffix())
+    let sequence = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{}-{sequence}", Utc::now().timestamp_nanos_opt().unwrap_or_default())
 }
 
 if memory.id.trim().is_empty() {
