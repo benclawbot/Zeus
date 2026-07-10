@@ -426,9 +426,9 @@ fn run_tool(
                     workspace_dir: workspace_dir(&call.args, batch),
                     args,
                     timeout_ms: u64_arg(&call.args, "timeoutMs"),
-                    approved: bool_arg(&call.args, "approved", false),
-                    approval_id: string_arg(&call.args, "approvalId"),
-                    approval_session_id: string_arg(&call.args, "approvalSessionId"),
+                    approved: batch.approved,
+                    approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
                 },
                 access_mode,
             )?;

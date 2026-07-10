@@ -1048,6 +1048,14 @@ async fn agent_runtime_execute_turn(
         .try_state::<AgentRuntimeService>()
         .map(|service| service.inner().clone())
         .ok_or_else(|| "AgentRuntimeService was not managed by the Tauri app.".to_string())?;
+    runtime.open_session(
+        request.session_id.clone(),
+        request
+            .workspace_dir
+            .clone()
+            .unwrap_or_else(|| "desktop".to_string()),
+        request.objective.chars().take(120).collect(),
+    )?;
     let mut messages = inject_skill(
         &app,
         &ChatRequest {

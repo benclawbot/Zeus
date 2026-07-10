@@ -25,6 +25,7 @@ import { describe, expect, it } from "vitest";
 const DECLARED_COMMANDS = [
   // lib.rs (top-level Tauri commands)
   "send_chat",
+  "agent_runtime_execute_turn",
   "test_provider",
   "get_provider_keys",
   "set_provider_keys",

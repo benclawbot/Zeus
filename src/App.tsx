@@ -188,17 +188,7 @@ interface AttachedFile {
 }
 export type { AttachedFile };
 
-// Parse a fenced `tool` block from the model's response. The model is told
-// (via SYSTEM_PROMPT) to emit exactly one block per turn, with one JSON step
-// per line. We extract the steps; the surrounding text stays in the chat
-// bubble so the user sees the model's commentary.
-// Sentinel that marks the end of a `createArtifact` raw-body block inside
-// a `tool` fence. The line up to (and not including) this marker is
-// appended verbatim to the file body. Mirrors `RAW_BODY_END_MARKER` in
-// providers/registry.ts.
 const RAW_BODY_END_MARKER = "<<<END";
-// Tool kinds whose body is collected verbatim until RAW_BODY_END_MARKER,
-// instead of being JSON-parsed on a single line. Matches registry.ts.
 const RAW_BODY_KINDS = new Set(["createArtifact"]);
 
 function parseToolBlock(text: string): AgentStepRequest[] | null {
@@ -1675,7 +1665,14 @@ const livePromptTokens = useMemo(() => {
       setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
 
-      // No tool block: the model gave a final answer. Done.
+      // The Rust runtime already completed the bounded observe-and-replan
+      // cycle before returning this response. The browser must never run a
+      // second tool loop or act as a compatibility fallback.
+      return;
+
+      /*
+      // Legacy frontend loop retained below only until it is physically
+      // removed in this cutover; it is unreachable.
       const steps = parseToolBlock(clean);
       if (!steps || steps.length === 0) return;
 
@@ -1771,6 +1768,7 @@ const livePromptTokens = useMemo(() => {
       }
 
       await runChatTurn(nextMessages, nextThinkingId, signal, depth + 1, originalPrompt);
+      */
     } catch (error) {
       if (signal.aborted) return;
       if (signal.aborted) return;
