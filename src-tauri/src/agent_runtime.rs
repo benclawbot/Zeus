@@ -22,6 +22,8 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+const MAX_TOOL_OBSERVATION_BYTES: usize = 16 * 1024;
+
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 
 fn next_runtime_id(prefix: &str) -> String {
@@ -30,6 +32,19 @@ fn next_runtime_id(prefix: &str) -> String {
         "{prefix}-{}-{sequence}",
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+fn bounded_redacted_observation(value: &str) -> String {
+    let (redacted, _) = crate::policy::redact_secrets(value);
+    if redacted.len() <= MAX_TOOL_OBSERVATION_BYTES {
+        return redacted;
+    }
+    const MARKER: &str = "\n[truncated]";
+    let mut end = MAX_TOOL_OBSERVATION_BYTES - MARKER.len();
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &redacted[..end], MARKER)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -575,7 +590,8 @@ impl AgentRuntimeService {
         Ok(plan)
     }
 
-    pub fn record_tool_run(&self, run: ToolRunRecord) -> Result<ToolRunRecord, String> {
+    pub fn record_tool_run(&self, mut run: ToolRunRecord) -> Result<ToolRunRecord, String> {
+        run.observation = bounded_redacted_observation(&run.observation);
         let mut state = self.state.lock();
         if let Some(session) = state.sessions.get_mut(&run.session_id) {
             for file in &run.files_touched {
@@ -1161,6 +1177,41 @@ mod tests {
                 .unwrap(),
             ApprovalCheck::AlreadyConsumed
         );
+    }
+
+    #[test]
+    fn tool_observations_are_redacted_and_bounded_before_persistence() {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_observation_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        svc.open_session("s".into(), "p".into(), "test".into())
+            .unwrap();
+        let run = svc
+            .record_tool_run(ToolRunRecord {
+                id: "tool-1".into(),
+                session_id: "s".into(),
+                tool: "shell".into(),
+                label: "test".into(),
+                ok: true,
+                risk_class: RiskClass::Shell,
+                files_touched: vec![],
+                observation: format!(
+                    "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123\n{}",
+                    "x".repeat(32 * 1024)
+                ),
+                created_at: now(),
+            })
+            .unwrap();
+
+        assert!(run.observation.contains("[REDACTED:github-token]"));
+        assert!(run.observation.len() <= MAX_TOOL_OBSERVATION_BYTES);
     }
 
     #[test]
