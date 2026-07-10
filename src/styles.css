@@ -881,7 +881,7 @@ kbd {
   height: 24px;
   min-height: 24px;
   max-height: 160px;
-  resize: vertical;
+  resize: none;
   border: 0;
   outline: none;
   color: var(--text);
@@ -910,42 +910,6 @@ kbd {
   height: 30px;
   border-color: var(--line);
   border-radius: 6px;
-}
-
-.composer-access {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 8px 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #f8f9fc;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.composer-access-label {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.7rem;
-  color: var(--muted);
-}
-
-.composer-access-select {
-  border: 0;
-  background: transparent;
-  font: inherit;
-  color: var(--text);
-  padding: 2px 0;
-  cursor: pointer;
-  outline: none;
-}
-
-.composer-access-select:focus-visible {
-  outline: 2px solid var(--purple);
-  outline-offset: 1px;
-  border-radius: 3px;
 }
 
 .attached-chip {
@@ -2534,11 +2498,6 @@ textarea:focus-visible {
 }
 .composer-bottom {
   margin-top: 8px;
-}
-.composer-access {
-  height: 32px;
-  border-radius: 999px;
-  background: #f4f4f2;
 }
 .composer-tools button,
 .send-button,

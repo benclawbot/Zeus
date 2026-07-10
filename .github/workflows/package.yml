@@ -56,6 +56,7 @@ jobs:
         # dependency graph once with a generous timeout so subsequent
         # steps reuse the warm cache.
         working-directory: src-tauri
+        shell: bash
         timeout-minutes: 30
         run: |
           # Tauri's `externalBin: binaries/ddgs` makes config-load fail

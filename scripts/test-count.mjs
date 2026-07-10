@@ -19,7 +19,8 @@ if (result.status !== 0) {
   process.exit(1);
 }
 
-const match = result.stdout.match(/Tests\s+(\d+)\s+passed/);
+const output = `${result.stdout}\n${result.stderr}`.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+const match = output.match(/Tests\s+(\d+)\s+passed/);
 if (!match) {
   console.error("Could not parse test count from vitest output.");
   process.exit(1);

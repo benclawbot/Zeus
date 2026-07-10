@@ -75,6 +75,8 @@ describe("App", () => {
 
     expect(input).toHaveAttribute("rows", "1");
     expect(css).toContain(".composer textarea {\n  width: 100%;\n  height: 24px;\n  min-height: 24px;\n  max-height: 160px");
+    expect(css).toContain("  resize: none;");
+    expect(css).not.toContain(".composer-access");
   });
 
   it("shows a Thinking placeholder instead of `` reasoning when a reply arrives", async () => {
