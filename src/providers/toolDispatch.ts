@@ -1,4 +1,6 @@
 import { runAgentTask, searchWorkspaceCode, type AgentRunResult, type AgentRunStepLog, type AgentStepRequest } from "./workspace";
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "./minimax";
 import type { ChatMessage, ChatOptions, ChatResponse } from "./chatTypes";
 import { textFromContent } from "./chatTypes";
 import { extractToolBlocks, parseToolBlocks, type ParsedToolStep, type SearchStep } from "./toolBlockParser";
@@ -51,6 +53,22 @@ const WORKSPACE_TOOL_PROMPT = [
  * keeps emitting the same tool block.
  */
 export async function dispatchChat(options: ChatOptions): Promise<ChatResponse> {
+  if (isTauriRuntime()) {
+    return invoke<ChatResponse>("agent_runtime_execute_turn", {
+      request: {
+        sessionId: options.sessionId ?? "desktop-chat",
+        objective: options.objective ?? lastUserMessage(options.messages) ?? "workspace task",
+        provider: options.provider,
+        messages: withWorkspaceToolPrompt(options.messages),
+        skillId: options.skillId,
+        options: {
+          ...(options.model ? { model: options.model } : {}),
+          ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+          ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+        },
+      },
+    });
+  }
   const provider = findProvider(options.provider);
   if (!provider) {
     throw new Error(`Unknown provider: ${options.provider}`);

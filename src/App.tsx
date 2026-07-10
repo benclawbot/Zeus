@@ -1616,6 +1616,8 @@ const livePromptTokens = useMemo(() => {
           provider,
           skillId: skillForTurn ?? undefined,
           messages: seedMessages,
+          sessionId: activeSession?.id,
+          objective: originalPrompt,
           ...(providerOverrides.model ? { model: providerOverrides.model } : {}),
           ...(providerOverrides.baseUrl ? { baseUrl: providerOverrides.baseUrl } : {}),
         });

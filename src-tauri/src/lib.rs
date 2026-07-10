@@ -25,7 +25,7 @@ mod validation;
 mod web_search;
 mod workspace;
 
-use agent_runtime::{AgentRuntimeService, ApprovalCheck};
+use agent_runtime::{AgentRuntimeService, ApprovalCheck, RiskClass, ToolRunRecord};
 use persistence::{
     list_sessions as db_list_sessions, open_and_init, save_session as db_save_session,
     EditProposalRequest, PersistedProposal, PersistedSession, PersistedState, RecordActionRequest,
@@ -963,6 +963,166 @@ async fn send_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatRe
         .map_err(String::from)
 }
 
+const NATIVE_AGENT_MAX_TURNS: usize = 12;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAgentTurnRequest {
+    session_id: String,
+    objective: String,
+    provider: String,
+    messages: Vec<ChatMessage>,
+    skill_id: Option<String>,
+    #[serde(default)]
+    options: serde_json::Value,
+    workspace_dir: Option<String>,
+    approval_id: Option<String>,
+    approval_session_id: Option<String>,
+    max_turns: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAgentTurnResult {
+    content: String,
+    model: String,
+    usage: Option<serde_json::Value>,
+    turns: usize,
+    tool_results: Vec<engine::AgentEngineToolBatchResult>,
+}
+
+fn parse_native_tool_calls(content: &str) -> Result<Vec<engine::AgentEngineToolCall>, String> {
+    let mut calls = Vec::new();
+    for fenced in content.split("```tool").skip(1) {
+        let body = fenced.split("```").next().unwrap_or_default();
+        for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Some((name, raw_args)) = line.split_once(char::is_whitespace) else {
+                return Err(format!(
+                    "Native tool call '{line}' is missing its JSON arguments."
+                ));
+            };
+            let args: serde_json::Value = serde_json::from_str(raw_args.trim())
+                .map_err(|error| format!("Parse native tool call '{name}': {error}"))?;
+            if !args.is_object() {
+                return Err(format!(
+                    "Native tool call '{name}' arguments must be a JSON object."
+                ));
+            }
+            calls.push(engine::AgentEngineToolCall {
+                id: None,
+                name: name.to_string(),
+                args,
+            });
+        }
+    }
+    Ok(calls)
+}
+
+#[tauri::command]
+async fn agent_runtime_execute_turn(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: NativeAgentTurnRequest,
+) -> Result<NativeAgentTurnResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
+    let runtime = app
+        .try_state::<AgentRuntimeService>()
+        .map(|service| service.inner().clone())
+        .ok_or_else(|| "AgentRuntimeService was not managed by the Tauri app.".to_string())?;
+    let mut messages = inject_skill(
+        &app,
+        &ChatRequest {
+            provider: request.provider.clone(),
+            messages: request.messages,
+            skill_id: request.skill_id.clone(),
+            options: request.options.clone(),
+        },
+    )?;
+    let max_turns = request
+        .max_turns
+        .unwrap_or(NATIVE_AGENT_MAX_TURNS)
+        .clamp(1, NATIVE_AGENT_MAX_TURNS);
+    let mut tool_results = Vec::new();
+    let mut last_response: Option<ChatResponse> = None;
+    for turn in 0..max_turns {
+        let response = dispatch_chat(
+            &ChatRequest {
+                provider: request.provider.clone(),
+                messages: messages.clone(),
+                skill_id: None,
+                options: request.options.clone(),
+            },
+            None,
+        )
+        .await
+        .map_err(String::from)?;
+        let calls = parse_native_tool_calls(&response.content)?;
+        if calls.is_empty() {
+            return Ok(NativeAgentTurnResult {
+                content: response.content,
+                model: response.model,
+                usage: response.usage,
+                turns: turn + 1,
+                tool_results,
+            });
+        }
+        let access_mode = {
+            let conn = state.db.lock();
+            current_access_mode(&conn)?
+        };
+        let batch = engine::execute_tool_batch(
+            engine::AgentEngineToolBatchRequest {
+                objective: request.objective.clone(),
+                workspace_dir: request.workspace_dir.clone(),
+                calls,
+                approved: request.approval_id.is_some(),
+                approval_id: request.approval_id.clone(),
+                approval_session_id: request.approval_session_id.clone(),
+                stop_on_error: false,
+            },
+            access_mode.as_deref(),
+        );
+        for item in &batch.results {
+            let _ = runtime.record_tool_run(ToolRunRecord {
+                id: format!("turn-{turn}-{}", item.id),
+                session_id: request.session_id.clone(),
+                tool: item.name.clone(),
+                label: item.name.clone(),
+                ok: item.ok,
+                risk_class: RiskClass::ReadOnly,
+                files_touched: Vec::new(),
+                observation: format!("{}\n{}", item.content, item.details),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+        let observation = serde_json::to_string(&batch)
+            .map_err(|error| format!("serialize tool observation: {error}"))?;
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: serde_json::Value::String(response.content.clone()),
+        });
+        messages.push(ChatMessage { role: "user".into(), content: serde_json::Value::String(format!("Native tool observation:\n{observation}\nRespond with another tool block only if more work is required; otherwise give the final answer.")) });
+        tool_results.push(batch);
+        last_response = Some(response);
+    }
+    let response = last_response
+        .ok_or_else(|| "Native agent did not receive a provider response.".to_string())?;
+    Ok(NativeAgentTurnResult {
+        content: format!(
+            "{}\n\nStopped after {max_turns} native tool turns.",
+            response.content
+        ),
+        model: response.model,
+        usage: response.usage,
+        turns: max_turns,
+        tool_results,
+    })
+}
+
 /// Default completion marker for the Ralph loop. Matches the canonical
 /// Geoffrey Huntley / Anthropic plugin token; the model is instructed to
 /// only emit this when the task is genuinely done.
@@ -1671,6 +1831,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             send_chat,
+            agent_runtime_execute_turn,
             run_ralph_loop,
             list_providers,
             load_state,
@@ -1947,6 +2108,28 @@ mod ralph_helpers_tests {
         for ch in out.chars() {
             assert!(ch.len_utf8() > 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod native_agent_turn_tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiple_native_tool_calls() {
+        let calls = parse_native_tool_calls(
+            "thinking\n```tool\nreadFile {\"path\":\"src/lib.rs\"}\nrunTest {\"args\":[\"npm\",\"test\"]}\n```",
+        )
+        .unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "readFile");
+        assert_eq!(calls[1].args["args"][0], "npm");
+    }
+
+    #[test]
+    fn rejects_native_tool_calls_without_json_arguments() {
+        assert!(parse_native_tool_calls("```tool\nreadFile\n```").is_err());
     }
 }
 
