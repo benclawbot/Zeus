@@ -14,6 +14,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,17 +22,60 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PlanStatus { Todo, InProgress, Done, Failed }
+const MAX_TOOL_OBSERVATION_BYTES: usize = 16 * 1024;
+
+static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+
+fn next_runtime_id(prefix: &str) -> String {
+    let sequence = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{prefix}-{}-{sequence}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )
+}
+
+fn bounded_redacted_observation(value: &str) -> String {
+    let (redacted, _) = crate::policy::redact_secrets(value);
+    if redacted.len() <= MAX_TOOL_OBSERVATION_BYTES {
+        return redacted;
+    }
+    const MARKER: &str = "\n[truncated]";
+    let mut end = MAX_TOOL_OBSERVATION_BYTES - MARKER.len();
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &redacted[..end], MARKER)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum RiskClass { ReadOnly, LocalWrite, Shell, Network, Dependency, Browser, Destructive }
+pub enum PlanStatus {
+    Todo,
+    InProgress,
+    Done,
+    Failed,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum ApprovalStatus { Pending, ApprovedOnce, Rejected, ApprovedForSession }
+pub enum RiskClass {
+    ReadOnly,
+    LocalWrite,
+    Shell,
+    Network,
+    Dependency,
+    Browser,
+    Destructive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalStatus {
+    Pending,
+    ApprovedOnce,
+    Rejected,
+    ApprovedForSession,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -252,7 +296,7 @@ impl Default for AgentRuntimeState {
     fn default() -> Self {
         let now = now();
         Self {
-            server_id: format!("runtime-{}", Utc::now().timestamp_millis()),
+            server_id: next_runtime_id("runtime"),
             started_at: now,
             sessions: HashMap::new(),
             tool_runs: Vec::new(),
@@ -276,6 +320,8 @@ pub enum ApprovalCheck {
     AlreadyConsumed,
     /// The id is unknown to the runtime.
     Unknown,
+    /// The approval belongs to a different agent session.
+    SessionMismatch,
     /// The id was rejected or never approved.
     NotApproved,
 }
@@ -288,27 +334,43 @@ struct BrowserDriver {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
-    script_path: PathBuf,
-    script_args: Vec<String>,
 }
 
 impl BrowserDriver {
     fn spawn(script_path: PathBuf, script_args: Vec<String>) -> Result<Self, String> {
         let mut command = Command::new("node");
         command.arg(&script_path);
-        for arg in &script_args { command.arg(arg); }
+        for arg in &script_args {
+            command.arg(arg);
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_remove("MINIMAX_API_KEY").env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY").env_remove("GITHUB_TOKEN")
+            .env_remove("MINIMAX_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("GITHUB_TOKEN")
             .spawn()
             .map_err(|e| format!("spawn browser driver: {e}"))?;
-        let stdin = child.stdin.take().ok_or_else(|| "browser driver stdin unavailable".to_string())?;
-        let stdout = BufReader::new(child.stdout.take().ok_or_else(|| "browser driver stdout unavailable".to_string())?);
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "browser driver stdin unavailable".to_string())?;
+        let stdout = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| "browser driver stdout unavailable".to_string())?,
+        );
         // Wait for the ready line before returning. The driver emits
         // `{"kind":"ready",...}` on startup; we drop it and proceed.
-        let mut driver = BrowserDriver { child, stdin, stdout, next_id: 1, script_path, script_args };
+        let mut driver = BrowserDriver {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        };
         driver.read_ready_line()?;
         Ok(driver)
     }
@@ -322,8 +384,12 @@ impl BrowserDriver {
                 Ok(0) => return Err("browser driver exited before becoming ready".to_string()),
                 Ok(_) => {
                     let trimmed = line.trim();
-                    if trimmed.contains("\"ready\"") { return Ok(()); }
-                    if trimmed.is_empty() { continue; }
+                    if trimmed.contains("\"ready\"") {
+                        return Ok(());
+                    }
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                 }
                 Err(err) => return Err(format!("read browser driver: {err}")),
             }
@@ -331,17 +397,30 @@ impl BrowserDriver {
         Err("browser driver did not become ready within 10s".to_string())
     }
 
-    fn request(&mut self, payload: &serde_json::Value, timeout: Duration) -> Result<serde_json::Value, String> {
+    fn request(
+        &mut self,
+        payload: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
         let id = self.next_id;
         self.next_id += 1;
         let mut framed = serde_json::json!({ "id": id });
         if let Some(obj) = payload.as_object() {
-            for (k, v) in obj { framed[k] = v.clone(); }
+            for (k, v) in obj {
+                framed[k] = v.clone();
+            }
         }
-        let serialized = serde_json::to_string(&framed).map_err(|e| format!("serialize browser request: {e}"))?;
-        self.stdin.write_all(serialized.as_bytes()).map_err(|e| format!("write browser driver: {e}"))?;
-        self.stdin.write_all(b"\n").map_err(|e| format!("write browser driver newline: {e}"))?;
-        self.stdin.flush().map_err(|e| format!("flush browser driver: {e}"))?;
+        let serialized = serde_json::to_string(&framed)
+            .map_err(|e| format!("serialize browser request: {e}"))?;
+        self.stdin
+            .write_all(serialized.as_bytes())
+            .map_err(|e| format!("write browser driver: {e}"))?;
+        self.stdin
+            .write_all(b"\n")
+            .map_err(|e| format!("write browser driver newline: {e}"))?;
+        self.stdin
+            .flush()
+            .map_err(|e| format!("flush browser driver: {e}"))?;
         let mut line = String::new();
         let started = Instant::now();
         while started.elapsed() < timeout {
@@ -350,7 +429,9 @@ impl BrowserDriver {
                 Ok(0) => return Err("browser driver closed the connection".to_string()),
                 Ok(_) => {
                     let trimmed = line.trim();
-                    if trimmed.is_empty() { continue; }
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                     match serde_json::from_str::<serde_json::Value>(trimmed) {
                         Ok(value) => {
                             if value.get("id").and_then(|v| v.as_u64()) == Some(id) {
@@ -388,18 +469,29 @@ impl AgentRuntimeService {
         Self::load_or_create_with(path, browser_driver_script_path())
     }
 
-    pub fn load_or_create_with(path: impl Into<PathBuf>, script_path: PathBuf) -> Result<Self, String> {
+    pub fn load_or_create_with(
+        path: impl Into<PathBuf>,
+        script_path: PathBuf,
+    ) -> Result<Self, String> {
         let state_path = path.into();
         let state = if state_path.exists() {
-            let raw = fs::read_to_string(&state_path).map_err(|e| format!("read runtime state: {e}"))?;
+            let raw =
+                fs::read_to_string(&state_path).map_err(|e| format!("read runtime state: {e}"))?;
             serde_json::from_str(&raw).unwrap_or_default()
         } else {
             AgentRuntimeState::default()
         };
-        Ok(Self { state_path, state: Arc::new(Mutex::new(state)), driver: Arc::new(Mutex::new(None)), script_path })
+        Ok(Self {
+            state_path,
+            state: Arc::new(Mutex::new(state)),
+            driver: Arc::new(Mutex::new(None)),
+            script_path,
+        })
     }
 
-    pub fn script_path(&self) -> &Path { &self.script_path }
+    pub fn script_path(&self) -> &Path {
+        &self.script_path
+    }
 
     pub fn status(&self) -> AgentRuntimeStatus {
         let state = self.state.lock();
@@ -408,24 +500,40 @@ impl AgentRuntimeService {
             started_at: state.started_at.clone(),
             sessions: state.sessions.len(),
             tool_runs: state.tool_runs.len(),
-            pending_approvals: state.approvals.iter().filter(|a| a.status == ApprovalStatus::Pending).count(),
-            memories: state.memories.iter().filter(|m| !m.stale && m.superseded_by.is_none()).count(),
+            pending_approvals: state
+                .approvals
+                .iter()
+                .filter(|a| a.status == ApprovalStatus::Pending)
+                .count(),
+            memories: state
+                .memories
+                .iter()
+                .filter(|m| !m.stale && m.superseded_by.is_none())
+                .count(),
             browser_sessions: state.browser_sessions.len(),
         }
     }
 
-    pub fn open_session(&self, id: String, project_id: String, label: String) -> Result<RuntimeSession, String> {
+    pub fn open_session(
+        &self,
+        id: String,
+        project_id: String,
+        label: String,
+    ) -> Result<RuntimeSession, String> {
         let mut state = self.state.lock();
         let now = now();
-        let session = state.sessions.entry(id.clone()).or_insert_with(|| RuntimeSession {
-            id,
-            project_id,
-            label: label.clone(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            current_plan: None,
-            read_files: Vec::new(),
-        });
+        let session = state
+            .sessions
+            .entry(id.clone())
+            .or_insert_with(|| RuntimeSession {
+                id,
+                project_id,
+                label: label.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                current_plan: None,
+                read_files: Vec::new(),
+            });
         session.label = label;
         session.updated_at = now;
         let out = session.clone();
@@ -434,18 +542,43 @@ impl AgentRuntimeService {
         Ok(out)
     }
 
-    pub fn define_plan(&self, session_id: &str, objective: String, labels: Vec<String>) -> Result<RuntimePlan, String> {
+    pub fn define_plan(
+        &self,
+        session_id: &str,
+        objective: String,
+        labels: Vec<String>,
+    ) -> Result<RuntimePlan, String> {
         let mut state = self.state.lock();
-        let session = state.sessions.get_mut(session_id).ok_or_else(|| format!("Unknown runtime session '{session_id}'."))?;
+        let session = state
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("Unknown runtime session '{session_id}'."))?;
         let now = now();
-        let steps = labels.into_iter().enumerate().map(|(index, label)| RuntimePlanStep {
-            id: format!("step-{}", index + 1),
-            label,
-            status: if index == 0 { PlanStatus::InProgress } else { PlanStatus::Todo },
-            depends_on: if index == 0 { Vec::new() } else { vec![format!("step-{index}")] },
+        let steps = labels
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| RuntimePlanStep {
+                id: format!("step-{}", index + 1),
+                label,
+                status: if index == 0 {
+                    PlanStatus::InProgress
+                } else {
+                    PlanStatus::Todo
+                },
+                depends_on: if index == 0 {
+                    Vec::new()
+                } else {
+                    vec![format!("step-{index}")]
+                },
+                updated_at: now.clone(),
+            })
+            .collect::<Vec<_>>();
+        let plan = RuntimePlan {
+            objective,
+            status: PlanStatus::InProgress,
+            steps,
             updated_at: now.clone(),
-        }).collect::<Vec<_>>();
-        let plan = RuntimePlan { objective, status: PlanStatus::InProgress, steps, updated_at: now.clone() };
+        };
         session.current_plan = Some(plan.clone());
         session.updated_at = now;
         drop(state);
@@ -453,7 +586,8 @@ impl AgentRuntimeService {
         Ok(plan)
     }
 
-    pub fn record_tool_run(&self, run: ToolRunRecord) -> Result<ToolRunRecord, String> {
+    pub fn record_tool_run(&self, mut run: ToolRunRecord) -> Result<ToolRunRecord, String> {
+        run.observation = bounded_redacted_observation(&run.observation);
         let mut state = self.state.lock();
         if let Some(session) = state.sessions.get_mut(&run.session_id) {
             for file in &run.files_touched {
@@ -463,19 +597,29 @@ impl AgentRuntimeService {
             }
             session.updated_at = now();
         }
-        state.transcript.push(format!("{} {} {}", run.created_at, run.tool, run.observation));
+        state.transcript.push(format!(
+            "{} {} {}",
+            run.created_at, run.tool, run.observation
+        ));
         state.tool_runs.push(run.clone());
         drop(state);
         self.persist()?;
         Ok(run)
     }
 
-    pub fn create_approval(&self, mut approval: PendingApproval) -> Result<PendingApproval, String> {
+    pub fn create_approval(
+        &self,
+        mut approval: PendingApproval,
+    ) -> Result<PendingApproval, String> {
         if approval.id.trim().is_empty() {
-            approval.id = format!("approval-{}", Utc::now().timestamp_millis());
+            approval.id = next_runtime_id("approval");
         }
         approval.status = ApprovalStatus::Pending;
-        approval.created_at = if approval.created_at.is_empty() { now() } else { approval.created_at };
+        approval.created_at = if approval.created_at.is_empty() {
+            now()
+        } else {
+            approval.created_at
+        };
         let mut state = self.state.lock();
         // If the approval already exists (re-submit), keep the original
         // id but refresh the payload.
@@ -484,41 +628,71 @@ impl AgentRuntimeService {
         } else {
             state.approvals.push(approval.clone());
         }
-        state.transcript.push(format!("{} approval requested {}", approval.created_at, approval.id));
+        state.transcript.push(format!(
+            "{} approval requested {}",
+            approval.created_at, approval.id
+        ));
         drop(state);
         self.persist()?;
         Ok(approval)
     }
 
-    pub fn resolve_approval(&self, id: &str, status: ApprovalStatus, note: Option<String>) -> Result<PendingApproval, String> {
+    pub fn resolve_approval(
+        &self,
+        id: &str,
+        status: ApprovalStatus,
+        note: Option<String>,
+    ) -> Result<PendingApproval, String> {
         let mut state = self.state.lock();
-        let approval = state.approvals.iter_mut().find(|item| item.id == id).ok_or_else(|| format!("Unknown approval '{id}'."))?;
+        let approval = state
+            .approvals
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| format!("Unknown approval '{id}'."))?;
         approval.status = status.clone();
         approval.resolved_at = Some(now());
         approval.resolution_note = note;
         let out = approval.clone();
-        state.transcript.push(format!("{} approval resolved {} {:?}", now(), id, out.status));
+        state.transcript.push(format!(
+            "{} approval resolved {} {:?}",
+            now(),
+            id,
+            out.status
+        ));
         // Track approval scope so `check_approval` knows when the id is
         // session-wide reusable. Do NOT mark one-shot as consumed here —
         // `check_approval` does that on first use.
-        match status {
-            ApprovalStatus::ApprovedForSession => { state.session_wide.insert(id.to_string()); }
-            _ => {}
+        if status == ApprovalStatus::ApprovedForSession {
+            state.session_wide.insert(id.to_string());
         }
         drop(state);
         self.persist()?;
         Ok(out)
     }
 
-    /// Look up an approval id and tell the caller whether it is usable
-    /// for an upcoming risky execution. Also marks one-shot approvals
-    /// as consumed when `consume_one_shot` is true.
-    pub fn check_approval(&self, id: &str, consume_one_shot: bool) -> ApprovalCheck {
+    /// Consume or validate an approval for the session that requested it.
+    /// A successful one-shot consumption is persisted before this function
+    /// returns so a restart cannot accidentally reuse the approval.
+    pub fn check_approval_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+        consume_one_shot: bool,
+    ) -> Result<ApprovalCheck, String> {
         let mut state = self.state.lock();
-        if state.session_wide.contains(id) { return ApprovalCheck::SessionWide; }
-        if state.consumed_one_shot.contains(id) { return ApprovalCheck::AlreadyConsumed; }
-        let Some(approval) = state.approvals.iter().find(|a| a.id == id) else { return ApprovalCheck::Unknown; };
-        match approval.status {
+        let Some(approval) = state.approvals.iter().find(|a| a.id == id) else {
+            return Ok(ApprovalCheck::Unknown);
+        };
+        if approval.session_id != session_id {
+            return Ok(ApprovalCheck::SessionMismatch);
+        }
+        if state.session_wide.contains(id) {
+            return Ok(ApprovalCheck::SessionWide);
+        }
+        if state.consumed_one_shot.contains(id) {
+            return Ok(ApprovalCheck::AlreadyConsumed);
+        }
+        let status = match approval.status {
             ApprovalStatus::ApprovedForSession => {
                 state.session_wide.insert(id.to_string());
                 ApprovalCheck::SessionWide
@@ -531,12 +705,20 @@ impl AgentRuntimeService {
             }
             ApprovalStatus::Rejected => ApprovalCheck::NotApproved,
             ApprovalStatus::Pending => ApprovalCheck::NotApproved,
+        };
+        let changed = matches!(status, ApprovalCheck::Valid) && consume_one_shot;
+        drop(state);
+        if changed {
+            self.persist()?;
         }
+        Ok(status)
     }
 
     pub fn list_pending_approvals(&self, session_id: Option<&str>) -> Vec<PendingApproval> {
         let state = self.state.lock();
-        state.approvals.iter()
+        state
+            .approvals
+            .iter()
             .filter(|item| item.status == ApprovalStatus::Pending)
             .filter(|item| session_id.map(|id| item.session_id == id).unwrap_or(true))
             .cloned()
@@ -545,7 +727,7 @@ impl AgentRuntimeService {
 
     pub fn upsert_memory(&self, mut memory: ProjectMemory) -> Result<ProjectMemory, String> {
         if memory.id.trim().is_empty() {
-            memory.id = format!("memory-{}", Utc::now().timestamp_millis());
+            memory.id = next_runtime_id("memory");
         }
         if memory.created_at.is_empty() {
             memory.created_at = now();
@@ -564,14 +746,24 @@ impl AgentRuntimeService {
     pub fn retrieve_memories(&self, project_id: &str, query: &str, limit: usize) -> Vec<MemoryHit> {
         let query_tokens = tokens(query);
         let state = self.state.lock();
-        let mut hits = state.memories.iter()
+        let mut hits = state
+            .memories
+            .iter()
             .filter(|m| m.project_id == project_id && !m.stale && m.superseded_by.is_none())
             .filter_map(|memory| {
                 let mut memory_tokens = tokens(&memory.content);
-                for tag in &memory.tags { memory_tokens.extend(tokens(tag)); }
+                for tag in &memory.tags {
+                    memory_tokens.extend(tokens(tag));
+                }
                 let overlap = query_tokens.intersection(&memory_tokens).count() as u32;
-                let tag_overlap = query_tokens.intersection(&tokens(&memory.tags.join(" "))).count() as u32;
-                let recency_bonus = if memory.created_at > since(7) { 1u32 } else { 0 };
+                let tag_overlap = query_tokens
+                    .intersection(&tokens(&memory.tags.join(" ")))
+                    .count() as u32;
+                let recency_bonus = if memory.created_at > since(7) {
+                    1u32
+                } else {
+                    0
+                };
                 let reliability_bonus = 0; // default — richer scoring lives in memory.rs
                 let score = overlap * 4 + tag_overlap * 6 + recency_bonus + reliability_bonus;
                 (score > 0).then(|| MemoryHit {
@@ -581,7 +773,11 @@ impl AgentRuntimeService {
                 })
             })
             .collect::<Vec<_>>();
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.memory.created_at.cmp(&b.memory.created_at)));
+        hits.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then(a.memory.created_at.cmp(&b.memory.created_at))
+        });
         hits.truncate(limit.max(1));
         hits
     }
@@ -605,7 +801,9 @@ impl AgentRuntimeService {
     /// started on the first real browser action.
     fn ensure_driver(&self) -> Result<(), String> {
         let mut guard = self.driver.lock();
-        if guard.is_some() { return Ok(()); }
+        if guard.is_some() {
+            return Ok(());
+        }
         let driver = BrowserDriver::spawn(self.script_path.clone(), vec![])?;
         *guard = Some(driver);
         Ok(())
@@ -613,12 +811,16 @@ impl AgentRuntimeService {
 
     pub fn browser_tool(&self, request: BrowserToolRequest) -> Result<BrowserToolResult, String> {
         let action = request.action.as_str();
-        if action == "status" { return Ok(self.browser_status()); }
+        if action == "status" {
+            return Ok(self.browser_status());
+        }
         // Spawn / reuse the driver only for real actions.
         if let Err(err) = self.ensure_driver() {
             return Ok(BrowserToolResult {
                 provider: "playwright".to_string(),
-                session_id: request.session_id.unwrap_or_else(|| "browser-default".to_string()),
+                session_id: request
+                    .session_id
+                    .unwrap_or_else(|| "browser-default".to_string()),
                 action: action.to_string(),
                 ok: false,
                 snapshot: None,
@@ -631,55 +833,117 @@ impl AgentRuntimeService {
         }
         let mut guard = self.driver.lock();
         let driver = guard.as_mut().expect("driver was just spawned");
-        let session_id = request.session_id.clone().unwrap_or_else(|| "browser-default".to_string());
+        let session_id = request
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "browser-default".to_string());
         let mut payload = serde_json::Map::new();
-        payload.insert("action".to_string(), serde_json::Value::String(action.to_string()));
-        payload.insert("sessionId".to_string(), serde_json::Value::String(session_id.clone()));
-        if let Some(url) = &request.url { payload.insert("url".to_string(), serde_json::Value::String(url.clone())); }
-        if let Some(selector) = &request.selector { payload.insert("selector".to_string(), serde_json::Value::String(selector.clone())); }
-        if let Some(text) = &request.text { payload.insert("text".to_string(), serde_json::Value::String(text.clone())); }
-        if let Some(script) = &request.script { payload.insert("script".to_string(), serde_json::Value::String(script.clone())); }
-        if let Some(test_command) = &request.test_command { payload.insert("testCommand".to_string(), serde_json::Value::String(test_command.clone())); }
-        if let Some(artifact) = &request.artifact_path { payload.insert("artifactPath".to_string(), serde_json::Value::String(artifact.clone())); }
-        if let Some(options) = &request.options { payload.insert("options".to_string(), options.clone()); }
-        let response = match driver.request(&serde_json::Value::Object(payload), Duration::from_secs(60)) {
-            Ok(value) => value,
-            Err(err) => {
-                // Drop the driver so the next call respawns it.
-                *guard = None;
-                return Ok(BrowserToolResult {
-                    provider: "playwright".to_string(),
-                    session_id,
-                    action: action.to_string(),
-                    ok: false,
-                    snapshot: None,
-                    artifact: None,
-                    value: None,
-                    message: format!("Browser driver error: {err}"),
-                    test_command: None,
-                    exit_code: None,
-                });
-            }
-        };
-        let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-        let message = response.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let snapshot = response.get("snapshot").and_then(|v| serde_json::from_value::<BrowserSnapshot>(v.clone()).ok());
-        let artifact = response.get("artifact").and_then(|v| v.as_str()).map(String::from);
+        payload.insert(
+            "action".to_string(),
+            serde_json::Value::String(action.to_string()),
+        );
+        payload.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String(session_id.clone()),
+        );
+        if let Some(url) = &request.url {
+            payload.insert("url".to_string(), serde_json::Value::String(url.clone()));
+        }
+        if let Some(selector) = &request.selector {
+            payload.insert(
+                "selector".to_string(),
+                serde_json::Value::String(selector.clone()),
+            );
+        }
+        if let Some(text) = &request.text {
+            payload.insert("text".to_string(), serde_json::Value::String(text.clone()));
+        }
+        if let Some(script) = &request.script {
+            payload.insert(
+                "script".to_string(),
+                serde_json::Value::String(script.clone()),
+            );
+        }
+        if let Some(test_command) = &request.test_command {
+            payload.insert(
+                "testCommand".to_string(),
+                serde_json::Value::String(test_command.clone()),
+            );
+        }
+        if let Some(artifact) = &request.artifact_path {
+            payload.insert(
+                "artifactPath".to_string(),
+                serde_json::Value::String(artifact.clone()),
+            );
+        }
+        if let Some(options) = &request.options {
+            payload.insert("options".to_string(), options.clone());
+        }
+        let response =
+            match driver.request(&serde_json::Value::Object(payload), Duration::from_secs(60)) {
+                Ok(value) => value,
+                Err(err) => {
+                    // Drop the driver so the next call respawns it.
+                    *guard = None;
+                    return Ok(BrowserToolResult {
+                        provider: "playwright".to_string(),
+                        session_id,
+                        action: action.to_string(),
+                        ok: false,
+                        snapshot: None,
+                        artifact: None,
+                        value: None,
+                        message: format!("Browser driver error: {err}"),
+                        test_command: None,
+                        exit_code: None,
+                    });
+                }
+            };
+        let ok = response
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let message = response
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let snapshot = response
+            .get("snapshot")
+            .and_then(|v| serde_json::from_value::<BrowserSnapshot>(v.clone()).ok());
+        let artifact = response
+            .get("artifact")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let value = response.get("value").cloned();
-        let test_command = response.get("testCommand").and_then(|v| v.as_str()).map(String::from);
-        let exit_code = response.get("exitCode").and_then(|v| v.as_i64()).map(|n| n as i32);
+        let test_command = response
+            .get("testCommand")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let exit_code = response
+            .get("exitCode")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
         // Persist a session record so the UI can show the browser state.
         let mut state = self.state.lock();
-        let entry = state.browser_sessions.entry(session_id.clone()).or_insert(BrowserSession {
-            id: session_id.clone(),
-            provider: "playwright".to_string(),
-            current_url: snapshot.as_ref().map(|s| s.url.clone()).filter(|u| !u.is_empty()),
-            last_snapshot: snapshot.as_ref().map(|s| s.body.clone()),
-            updated_at: now(),
-        });
+        let entry = state
+            .browser_sessions
+            .entry(session_id.clone())
+            .or_insert(BrowserSession {
+                id: session_id.clone(),
+                provider: "playwright".to_string(),
+                current_url: snapshot
+                    .as_ref()
+                    .map(|s| s.url.clone())
+                    .filter(|u| !u.is_empty()),
+                last_snapshot: snapshot.as_ref().map(|s| s.body.clone()),
+                updated_at: now(),
+            });
         entry.updated_at = now();
         if let Some(snap) = &snapshot {
-            if !snap.url.is_empty() { entry.current_url = Some(snap.url.clone()); }
+            if !snap.url.is_empty() {
+                entry.current_url = Some(snap.url.clone());
+            }
             entry.last_snapshot = Some(snap.body.clone());
         }
         drop(state);
@@ -691,7 +955,15 @@ impl AgentRuntimeService {
             snapshot,
             artifact,
             value,
-            message: if message.is_empty() { if ok { "ok".to_string() } else { "failed".to_string() } } else { message },
+            message: if message.is_empty() {
+                if ok {
+                    "ok".to_string()
+                } else {
+                    "failed".to_string()
+                }
+            } else {
+                message
+            },
             test_command,
             exit_code,
         };
@@ -704,13 +976,15 @@ impl AgentRuntimeService {
             fs::create_dir_all(parent).map_err(|e| format!("create runtime state dir: {e}"))?;
         }
         let state = self.state.lock();
-        let raw = serde_json::to_string_pretty(&*state).map_err(|e| format!("serialize runtime state: {e}"))?;
+        let raw = serde_json::to_string_pretty(&*state)
+            .map_err(|e| format!("serialize runtime state: {e}"))?;
         fs::write(&self.state_path, raw).map_err(|e| format!("write runtime state: {e}"))
     }
 }
 
 fn tokens(value: &str) -> HashSet<String> {
-    value.to_lowercase()
+    value
+        .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|token| token.len() > 2)
         .map(str::to_string)
@@ -723,7 +997,9 @@ fn since(days: i64) -> String {
     dt.to_rfc3339()
 }
 
-fn now() -> String { Utc::now().to_rfc3339() }
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
 
 /// Best-effort resolution of the browser driver script path. Looks at
 /// the workspace's `scripts/zeus-browser-driver.mjs` first, then at the
@@ -731,14 +1007,20 @@ fn now() -> String { Utc::now().to_rfc3339() }
 fn browser_driver_script_path() -> PathBuf {
     if let Ok(env_path) = std::env::var("ZEUS_BROWSER_DRIVER") {
         let p = PathBuf::from(env_path);
-        if p.is_file() { return p; }
+        if p.is_file() {
+            return p;
+        }
     }
     if let Ok(cwd) = std::env::current_dir() {
         for candidate in [
             cwd.join("scripts").join("zeus-browser-driver.mjs"),
-            cwd.join("..").join("scripts").join("zeus-browser-driver.mjs"),
+            cwd.join("..")
+                .join("scripts")
+                .join("zeus-browser-driver.mjs"),
         ] {
-            if candidate.is_file() { return candidate; }
+            if candidate.is_file() {
+                return candidate;
+            }
         }
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -747,9 +1029,16 @@ fn browser_driver_script_path() -> PathBuf {
         .join("zeus-browser-driver.mjs")
 }
 
-pub fn approval_for_steps(session_id: String, objective: String, labels: Vec<String>, files: Vec<String>, risk_class: RiskClass, diff_preview: Option<String>) -> PendingApproval {
+pub fn approval_for_steps(
+    session_id: String,
+    objective: String,
+    labels: Vec<String>,
+    files: Vec<String>,
+    risk_class: RiskClass,
+    diff_preview: Option<String>,
+) -> PendingApproval {
     PendingApproval {
-        id: format!("approval-{}", Utc::now().timestamp_millis()),
+        id: next_runtime_id("approval"),
         session_id,
         objective,
         risk_class,
@@ -771,42 +1060,213 @@ mod tests {
 
     #[test]
     fn approval_check_marks_one_shot_as_consumed() {
-        let dir = std::env::temp_dir().join(format!("zeus_rt_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("runtime.json");
-        let svc = AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
-        let approval = svc.create_approval(approval_for_steps(
-            "s".into(), "obj".into(), vec!["label".into()], vec![], RiskClass::Shell, None,
-        )).unwrap();
-        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None).unwrap();
-        assert_eq!(svc.check_approval(&approval.id, true), ApprovalCheck::Valid);
-        assert_eq!(svc.check_approval(&approval.id, true), ApprovalCheck::AlreadyConsumed);
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        let approval = svc
+            .create_approval(approval_for_steps(
+                "s".into(),
+                "obj".into(),
+                vec!["label".into()],
+                vec![],
+                RiskClass::Shell,
+                None,
+            ))
+            .unwrap();
+        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None)
+            .unwrap();
+        assert_eq!(
+            svc.check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::Valid
+        );
+        assert_eq!(
+            svc.check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::AlreadyConsumed
+        );
+    }
+
+    #[test]
+    fn approval_cannot_be_used_by_a_different_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_session_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        let approval = svc
+            .create_approval(approval_for_steps(
+                "session-a".into(),
+                "edit one file".into(),
+                vec!["write src/lib.rs".into()],
+                vec!["src/lib.rs".into()],
+                RiskClass::LocalWrite,
+                None,
+            ))
+            .unwrap();
+        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None)
+            .unwrap();
+
+        assert_eq!(
+            svc.check_approval_for_session("session-b", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::SessionMismatch
+        );
+        assert_eq!(
+            svc.check_approval_for_session("session-a", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::Valid
+        );
+    }
+
+    #[test]
+    fn consumed_one_shot_approval_survives_a_runtime_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_restart_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        let approval = svc
+            .create_approval(approval_for_steps(
+                "s".into(),
+                "edit one file".into(),
+                vec!["write src/lib.rs".into()],
+                vec!["src/lib.rs".into()],
+                RiskClass::LocalWrite,
+                None,
+            ))
+            .unwrap();
+        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None)
+            .unwrap();
+        assert_eq!(
+            svc.check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::Valid
+        );
+        drop(svc);
+
+        let restarted =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        assert_eq!(
+            restarted
+                .check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::AlreadyConsumed
+        );
+    }
+
+    #[test]
+    fn tool_observations_are_redacted_and_bounded_before_persistence() {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_observation_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        svc.open_session("s".into(), "p".into(), "test".into())
+            .unwrap();
+        let run = svc
+            .record_tool_run(ToolRunRecord {
+                id: "tool-1".into(),
+                session_id: "s".into(),
+                tool: "shell".into(),
+                label: "test".into(),
+                ok: true,
+                risk_class: RiskClass::Shell,
+                files_touched: vec![],
+                observation: format!(
+                    "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123\n{}",
+                    "x".repeat(32 * 1024)
+                ),
+                created_at: now(),
+            })
+            .unwrap();
+
+        assert!(run.observation.contains("[REDACTED:github-token]"));
+        assert!(run.observation.len() <= MAX_TOOL_OBSERVATION_BYTES);
     }
 
     #[test]
     fn approval_check_session_wide_can_be_reused() {
-        let dir = std::env::temp_dir().join(format!("zeus_rt_sw_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_sw_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("runtime.json");
-        let svc = AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
-        let approval = svc.create_approval(approval_for_steps(
-            "s".into(), "obj".into(), vec!["label".into()], vec![], RiskClass::Shell, None,
-        )).unwrap();
-        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedForSession, None).unwrap();
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        let approval = svc
+            .create_approval(approval_for_steps(
+                "s".into(),
+                "obj".into(),
+                vec!["label".into()],
+                vec![],
+                RiskClass::Shell,
+                None,
+            ))
+            .unwrap();
+        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedForSession, None)
+            .unwrap();
         for _ in 0..3 {
-            assert_eq!(svc.check_approval(&approval.id, false), ApprovalCheck::SessionWide);
+            assert_eq!(
+                svc.check_approval_for_session("s", &approval.id, false)
+                    .unwrap(),
+                ApprovalCheck::SessionWide
+            );
         }
     }
 
     #[test]
     fn check_unknown_approval_returns_unknown() {
-        let dir = std::env::temp_dir().join(format!("zeus_rt_u_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_u_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("runtime.json");
-        let svc = AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
-        assert_eq!(svc.check_approval("does-not-exist", false), ApprovalCheck::Unknown);
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        assert_eq!(
+            svc.check_approval_for_session("s", "does-not-exist", false)
+                .unwrap(),
+            ApprovalCheck::Unknown
+        );
+    }
+
+    #[test]
+    fn browser_driver_script_resolves_to_a_shipped_file() {
+        let script = browser_driver_script_path();
+
+        assert!(
+            script.is_file(),
+            "browser driver is missing from the shipped project: {}",
+            script.display()
+        );
     }
 }

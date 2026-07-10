@@ -9,10 +9,9 @@ describe("agentEngine frontend types", () => {
       phase: "idle",
       workspaceLimitsDisabled: true,
       filesystemScope: "unrestricted",
-      legacyLoopPreserved: true,
       events: ["agentStart", "toolExecutionEnd"],
       tools: [{ name: "readFile", label: "Read file", riskClass: "readOnly", executionMode: "parallel", description: "Read any file" }],
-      nextImplementation: [{ id: "provider-native-tool-calls", title: "Provider-native tool calls", outcome: "Replace fences", files: ["src/providers/registry.ts"] }],
+      nextImplementation: [{ id: "provider-native-tool-calls", title: "Provider-native tool calls", outcome: "Run turns in Rust", files: ["src-tauri/src/lib.rs"] }],
     };
     expect(health.workspaceLimitsDisabled).toBe(true);
     expect(health.tools[0].name).toBe("readFile");

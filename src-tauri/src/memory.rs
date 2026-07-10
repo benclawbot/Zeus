@@ -10,13 +10,24 @@
 //   - command_result
 //   - project_convention
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+static NEXT_MEMORY_ID: AtomicU64 = AtomicU64::new(0);
+
+fn next_memory_id() -> String {
+    let sequence = NEXT_MEMORY_ID.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "memory-{}-{sequence}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,17 +47,6 @@ impl MemoryCategory {
             MemoryCategory::FailurePattern => "failure-pattern",
             MemoryCategory::CommandResult => "command-result",
             MemoryCategory::ProjectConvention => "project-convention",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "architecture-decision" => Some(MemoryCategory::ArchitectureDecision),
-            "user-preference" => Some(MemoryCategory::UserPreference),
-            "failure-pattern" => Some(MemoryCategory::FailurePattern),
-            "command-result" => Some(MemoryCategory::CommandResult),
-            "project-convention" => Some(MemoryCategory::ProjectConvention),
-            _ => None,
         }
     }
 }
@@ -111,12 +111,15 @@ impl MemoryStore {
         } else {
             MemoryFile::default()
         };
-        Ok(Self { path, state: std::sync::Arc::new(Mutex::new(state)) })
+        Ok(Self {
+            path,
+            state: std::sync::Arc::new(Mutex::new(state)),
+        })
     }
 
     pub fn upsert(&self, mut memory: Memory) -> Result<Memory, String> {
         if memory.id.trim().is_empty() {
-            memory.id = format!("memory-{}", Utc::now().timestamp_millis());
+            memory.id = next_memory_id();
         }
         if memory.created_at.is_empty() {
             memory.created_at = Utc::now().to_rfc3339();
@@ -124,12 +127,22 @@ impl MemoryStore {
         memory.reliability = memory.reliability.clamp(0.0, 1.0);
         let mut state = self.state.lock();
         // Detect contradicting memories and mark them superseded.
-        if memory.category == MemoryCategory::UserPreference || memory.category == MemoryCategory::ProjectConvention {
+        if memory.category == MemoryCategory::UserPreference
+            || memory.category == MemoryCategory::ProjectConvention
+        {
             for existing in state.memories.iter_mut() {
-                if existing.id == memory.id { continue; }
-                if existing.project_id != memory.project_id { continue; }
-                if existing.category != memory.category { continue; }
-                if existing.stale || existing.superseded_by.is_some() { continue; }
+                if existing.id == memory.id {
+                    continue;
+                }
+                if existing.project_id != memory.project_id {
+                    continue;
+                }
+                if existing.category != memory.category {
+                    continue;
+                }
+                if existing.stale || existing.superseded_by.is_some() {
+                    continue;
+                }
                 if contradicts(&existing.content, &memory.content) {
                     existing.superseded_by = Some(memory.id.clone());
                     existing.stale = true;
@@ -145,78 +158,68 @@ impl MemoryStore {
         Ok(memory)
     }
 
-    pub fn list(&self, project_id: Option<&str>) -> Vec<Memory> {
-        let state = self.state.lock();
-        state.memories.iter()
-            .filter(|m| project_id.map(|id| m.project_id == id).unwrap_or(true))
-            .cloned()
-            .collect()
-    }
-
     pub fn retrieve(&self, ctx: &RetrievalContext) -> Vec<MemoryHit> {
         let state = self.state.lock();
         let query_tokens = tokenize(&ctx.query);
-        let mut scored: Vec<MemoryHit> = state.memories.iter()
+        let mut scored: Vec<MemoryHit> = state
+            .memories
+            .iter()
             .filter(|m| m.project_id == ctx.project_id)
             .filter(|m| !m.stale && m.superseded_by.is_none())
             .map(|memory| {
-                let mut score = score_memory(memory, &query_tokens, &ctx.tags, ctx.file_path.as_deref());
+                let mut score =
+                    score_memory(memory, &query_tokens, &ctx.tags, ctx.file_path.as_deref());
                 // Light recency tiebreaker: bump very recent memories a touch.
-                if memory.created_at > since(7) { score += 1; }
-                if memory.last_used_at.as_deref() > Some(since(7).as_str()) { score += 1; }
+                if memory.created_at > since(7) {
+                    score += 1;
+                }
+                if memory.last_used_at.as_deref() > Some(since(7).as_str()) {
+                    score += 1;
+                }
                 let reason = explain_score(memory, &query_tokens, ctx.file_path.as_deref(), score);
-                MemoryHit { memory: memory.clone(), score, reason }
+                MemoryHit {
+                    memory: memory.clone(),
+                    score,
+                    reason,
+                }
             })
             .filter(|hit| hit.score > 0)
             .collect();
-        scored.sort_by(|a, b| b.score.cmp(&a.score).then(a.memory.created_at.cmp(&b.memory.created_at)));
+        scored.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then(a.memory.created_at.cmp(&b.memory.created_at))
+        });
         scored.truncate(ctx.limit.max(1));
         scored
     }
 
-    /// Mark a memory as recently used (so the next retrieval gets a
-    /// recency bump). Returns the updated memory.
-    pub fn touch(&self, id: &str) -> Result<Option<Memory>, String> {
-        let mut state = self.state.lock();
-        if let Some(memory) = state.memories.iter_mut().find(|m| m.id == id) {
-            memory.last_used_at = Some(Utc::now().to_rfc3339());
-            memory.use_count = memory.use_count.saturating_add(1);
-            let out = memory.clone();
-            self.persist(&state)?;
-            return Ok(Some(out));
-        }
-        Ok(None)
-    }
-
-    pub fn mark_stale(&self, id: &str, superseded_by: Option<String>) -> Result<Option<Memory>, String> {
-        let mut state = self.state.lock();
-        if let Some(memory) = state.memories.iter_mut().find(|m| m.id == id) {
-            memory.stale = true;
-            memory.superseded_by = superseded_by;
-            let out = memory.clone();
-            self.persist(&state)?;
-            return Ok(Some(out));
-        }
-        Ok(None)
-    }
-
     fn persist(&self, state: &MemoryFile) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() { fs::create_dir_all(parent).map_err(|e| format!("create memory dir: {e}"))?; }
-        let raw = serde_json::to_string_pretty(state).map_err(|e| format!("serialize memories: {e}"))?;
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create memory dir: {e}"))?;
+        }
+        let raw =
+            serde_json::to_string_pretty(state).map_err(|e| format!("serialize memories: {e}"))?;
         fs::write(&self.path, raw).map_err(|e| format!("write memory file: {e}"))
     }
 }
 
 /// Tokenize a string into a hash set of normalized tokens.
 fn tokenize(value: &str) -> HashSet<String> {
-    value.to_lowercase()
+    value
+        .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
         .filter(|token| token.len() > 2)
         .map(str::to_string)
         .collect()
 }
 
-fn score_memory(memory: &Memory, query_tokens: &HashSet<String>, tags: &[String], file_path: Option<&str>) -> u32 {
+fn score_memory(
+    memory: &Memory,
+    query_tokens: &HashSet<String>,
+    tags: &[String],
+    file_path: Option<&str>,
+) -> u32 {
     let mut score = 0u32;
     let content_tokens = tokenize(&memory.content);
     let overlap = query_tokens.intersection(&content_tokens).count() as u32;
@@ -226,9 +229,13 @@ fn score_memory(memory: &Memory, query_tokens: &HashSet<String>, tags: &[String]
     let wanted_tags: HashSet<String> = tags.iter().map(|t| t.to_lowercase()).collect();
     let tag_overlap = memory_tags.intersection(&wanted_tags).count() as u32;
     score += tag_overlap * 6;
-    if memory.category == MemoryCategory::UserPreference || memory.category == MemoryCategory::ProjectConvention {
+    if memory.category == MemoryCategory::UserPreference
+        || memory.category == MemoryCategory::ProjectConvention
+    {
         // Always surface user preferences and conventions when any token overlaps.
-        if overlap > 0 { score += 2; }
+        if overlap > 0 {
+            score += 2;
+        }
     }
     if memory.category == MemoryCategory::FailurePattern && file_path.is_some() {
         // Failure patterns are most useful when tied to a file the agent is touching.
@@ -240,16 +247,24 @@ fn score_memory(memory: &Memory, query_tokens: &HashSet<String>, tags: &[String]
         }
     }
     if let (Some(current), Some(stored)) = (file_path, memory.file_path.as_deref()) {
-        if !stored.is_empty() && !current.is_empty() && (current.contains(stored) || stored.contains(current)) {
+        if !stored.is_empty()
+            && !current.is_empty()
+            && (current.contains(stored) || stored.contains(current))
+        {
             score += 4;
         }
     }
     // Reliability boost: 1.0 reliability contributes +6, 0.25 contributes ~1.5.
-    score += ((memory.reliability * 6.0).round() as u32).max(0);
+    score += (memory.reliability * 6.0).round() as u32;
     score
 }
 
-fn explain_score(memory: &Memory, query_tokens: &HashSet<String>, file_path: Option<&str>, score: u32) -> String {
+fn explain_score(
+    memory: &Memory,
+    query_tokens: &HashSet<String>,
+    file_path: Option<&str>,
+    score: u32,
+) -> String {
     let content_tokens = tokenize(&memory.content);
     let overlap = query_tokens.intersection(&content_tokens).count();
     let mut parts = Vec::new();
@@ -276,7 +291,16 @@ fn contradicts(existing: &str, newer: &str) -> bool {
     // signal of contradiction.
     let lower_existing = existing.to_lowercase();
     let lower_newer = newer.to_lowercase();
-    let negation_tokens = ["never", "don't", "do not", "avoid", "no longer", "instead of", "stop", "must not"];
+    let negation_tokens = [
+        "never",
+        "don't",
+        "do not",
+        "avoid",
+        "no longer",
+        "instead of",
+        "stop",
+        "must not",
+    ];
     let existing_has_neg = negation_tokens.iter().any(|t| lower_existing.contains(t));
     let newer_has_neg = negation_tokens.iter().any(|t| lower_newer.contains(t));
     let shared = tokenize(existing).intersection(&tokenize(newer)).count();
@@ -296,7 +320,9 @@ fn since(days: i64) -> String {
 /// always wrapped in a fenced block so the LLM can clearly tell where
 /// the injected context ends.
 pub fn build_injection(hits: &[MemoryHit]) -> String {
-    if hits.is_empty() { return String::new(); }
+    if hits.is_empty() {
+        return String::new();
+    }
     let mut out = String::from("Project memory context:\n");
     for hit in hits {
         out.push_str(&format!(
@@ -309,40 +335,16 @@ pub fn build_injection(hits: &[MemoryHit]) -> String {
     out
 }
 
-/// Aggregate helpers used by the agent runtime's retrieve endpoint so
-/// we don't have to expose `MemoryStore` to the front end.
-pub fn score_summary(hit: &MemoryHit, query: &str) -> HashMap<String, u32> {
-    let mut summary = HashMap::new();
-    summary.insert("overlap".to_string(), tokenize(&hit.memory.content).intersection(&tokenize(query)).count() as u32);
-    summary.insert("score".to_string(), hit.score);
-    summary.insert("use_count".to_string(), hit.memory.use_count);
-    summary
-}
-
-/// Refresh the in-memory index for a project. Returns the number of
-/// active memories (non-stale, non-superseded) for that project.
-pub fn active_count(store: &MemoryStore, project_id: &str) -> usize {
-    store.list(Some(project_id)).into_iter().filter(|m| !m.stale && m.superseded_by.is_none()).count()
-}
-
-/// Suggest the top memories to inject into a chat request. Returns at
-/// most `limit` items.
-pub fn suggest_injection(store: &MemoryStore, project_id: &str, query: &str, file_path: Option<&str>, limit: usize) -> Vec<MemoryHit> {
-    store.retrieve(&RetrievalContext {
-        project_id: project_id.to_string(),
-        query: query.to_string(),
-        file_path: file_path.map(str::to_string),
-        tags: Vec::new(),
-        limit,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zeus_mem_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_mem_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.join("memory.json")
@@ -352,34 +354,38 @@ mod tests {
     fn upsert_and_retrieve_ranks_by_overlap() {
         let path = temp_path();
         let store = MemoryStore::load_or_create(&path).unwrap();
-        store.upsert(Memory {
-            id: "".into(),
-            project_id: "zeus".into(),
-            category: MemoryCategory::FailurePattern,
-            content: "cargo test fails when src-tauri/src has a syntax error".into(),
-            tags: vec!["cargo".into(), "build".into()],
-            file_path: Some("src-tauri/src".into()),
-            reliability: 0.9,
-            created_at: String::new(),
-            stale: false,
-            superseded_by: None,
-            last_used_at: None,
-            use_count: 0,
-        }).unwrap();
-        store.upsert(Memory {
-            id: "".into(),
-            project_id: "zeus".into(),
-            category: MemoryCategory::ProjectConvention,
-            content: "Always run cargo fmt after editing Rust files".into(),
-            tags: vec!["rust".into(), "format".into()],
-            file_path: None,
-            reliability: 1.0,
-            created_at: String::new(),
-            stale: false,
-            superseded_by: None,
-            last_used_at: None,
-            use_count: 0,
-        }).unwrap();
+        store
+            .upsert(Memory {
+                id: "".into(),
+                project_id: "zeus".into(),
+                category: MemoryCategory::FailurePattern,
+                content: "cargo test fails when src-tauri/src has a syntax error".into(),
+                tags: vec!["cargo".into(), "build".into()],
+                file_path: Some("src-tauri/src".into()),
+                reliability: 0.9,
+                created_at: String::new(),
+                stale: false,
+                superseded_by: None,
+                last_used_at: None,
+                use_count: 0,
+            })
+            .unwrap();
+        store
+            .upsert(Memory {
+                id: "".into(),
+                project_id: "zeus".into(),
+                category: MemoryCategory::ProjectConvention,
+                content: "Always run cargo fmt after editing Rust files".into(),
+                tags: vec!["rust".into(), "format".into()],
+                file_path: None,
+                reliability: 1.0,
+                created_at: String::new(),
+                stale: false,
+                superseded_by: None,
+                last_used_at: None,
+                use_count: 0,
+            })
+            .unwrap();
         let hits = store.retrieve(&RetrievalContext {
             project_id: "zeus".into(),
             query: "cargo test failure".into(),
@@ -392,39 +398,95 @@ mod tests {
     }
 
     #[test]
+    fn blank_ids_never_replace_distinct_memories() {
+        let path = temp_path();
+        let store = MemoryStore::load_or_create(&path).unwrap();
+        let first = store
+            .upsert(Memory {
+                id: String::new(),
+                project_id: "zeus".into(),
+                category: MemoryCategory::CommandResult,
+                content: "first command result".into(),
+                tags: Vec::new(),
+                file_path: None,
+                reliability: 0.5,
+                created_at: String::new(),
+                stale: false,
+                superseded_by: None,
+                last_used_at: None,
+                use_count: 0,
+            })
+            .unwrap();
+        let second = store
+            .upsert(Memory {
+                id: String::new(),
+                project_id: "zeus".into(),
+                category: MemoryCategory::CommandResult,
+                content: "second command result".into(),
+                tags: Vec::new(),
+                file_path: None,
+                reliability: 0.5,
+                created_at: String::new(),
+                stale: false,
+                superseded_by: None,
+                last_used_at: None,
+                use_count: 0,
+            })
+            .unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(store.state.lock().memories.len(), 2);
+    }
+
+    #[test]
+    fn generated_memory_ids_are_unique_within_one_clock_tick() {
+        let first = next_memory_id();
+        let second = next_memory_id();
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn supersedes_contradicting_preferences() {
         let path = temp_path();
         let store = MemoryStore::load_or_create(&path).unwrap();
-        store.upsert(Memory {
-            id: "".into(),
-            project_id: "zeus".into(),
-            category: MemoryCategory::UserPreference,
-            content: "Use tabs for indentation".into(),
-            tags: vec!["format".into()],
-            file_path: None,
-            reliability: 1.0,
-            created_at: String::new(),
-            stale: false,
-            superseded_by: None,
-            last_used_at: None,
-            use_count: 0,
-        }).unwrap();
-        store.upsert(Memory {
-            id: "".into(),
-            project_id: "zeus".into(),
-            category: MemoryCategory::UserPreference,
-            content: "Never use tabs, switch to spaces".into(),
-            tags: vec!["format".into()],
-            file_path: None,
-            reliability: 1.0,
-            created_at: String::new(),
-            stale: false,
-            superseded_by: None,
-            last_used_at: None,
-            use_count: 0,
-        }).unwrap();
-        let all = store.list(Some("zeus"));
+        store
+            .upsert(Memory {
+                id: "".into(),
+                project_id: "zeus".into(),
+                category: MemoryCategory::UserPreference,
+                content: "Use tabs for indentation".into(),
+                tags: vec!["format".into()],
+                file_path: None,
+                reliability: 1.0,
+                created_at: String::new(),
+                stale: false,
+                superseded_by: None,
+                last_used_at: None,
+                use_count: 0,
+            })
+            .unwrap();
+        store
+            .upsert(Memory {
+                id: "".into(),
+                project_id: "zeus".into(),
+                category: MemoryCategory::UserPreference,
+                content: "Never use tabs, switch to spaces".into(),
+                tags: vec!["format".into()],
+                file_path: None,
+                reliability: 1.0,
+                created_at: String::new(),
+                stale: false,
+                superseded_by: None,
+                last_used_at: None,
+                use_count: 0,
+            })
+            .unwrap();
+        let all = store.state.lock().memories.clone();
         let stale: Vec<_> = all.iter().filter(|m| m.stale).collect();
-        assert!(!stale.is_empty(), "contradicting memory should be marked stale");
+        assert!(
+            !stale.is_empty(),
+            "contradicting memory should be marked stale"
+        );
     }
 }

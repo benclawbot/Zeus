@@ -4,7 +4,7 @@
    cluster, file attach, thinking state).
 
    The shared chat-bubble/avatar/body/heading rules stay in styles.css
-   because AgentProgressBubble renders the same chrome. Descendant
+   because chat entries render the same chrome. Descendant
    selectors that descend into those shared classes use :global() to
    reach them. */
 
@@ -53,7 +53,7 @@
 }
 
 /* User-side chat layout. Descends into the shared chat-bubble/avatar/body
-   classes that AgentProgressBubble also uses; those rules stay global.
+   classes used by the shared chat surface; those rules stay global.
    Avatar is pinned to the right edge; the body fills the remaining row
    width with right-aligned text, so long user prompts use the full
    column instead of floating in a narrow right-side strip.
@@ -214,7 +214,7 @@
   height: 24px;
   min-height: 24px;
   max-height: 160px;
-  resize: vertical;
+  resize: none;
   border: 0;
   outline: none;
   color: var(--text);
@@ -223,11 +223,12 @@
 }
 
 .composerBottom {
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   margin-top: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .composerTools {
@@ -235,6 +236,12 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.composerTools::-webkit-scrollbar {
+  display: none;
 }
 
 .composerTools button {
@@ -244,35 +251,6 @@
   height: 30px;
   border: 1px solid var(--line);
   border-radius: 6px;
-}
-
-.composerAccess {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 8px 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #f8f9fc;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.composerAccessSelect {
-  border: 0;
-  background: transparent;
-  font: inherit;
-  color: var(--text);
-  padding: 2px 0;
-  cursor: pointer;
-  outline: none;
-}
-
-.composerAccessSelect:focus-visible {
-  outline: 2px solid var(--purple);
-  outline-offset: 1px;
-  border-radius: 3px;
 }
 
 .attachedChip {
@@ -318,11 +296,6 @@
   min-width: 0;
   flex-shrink: 0;
   margin-left: auto;
-}
-
-.sendCluster span {
-  color: var(--muted);
-  font-size: 0.82rem;
 }
 
 .sendButton {

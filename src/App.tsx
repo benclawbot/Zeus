@@ -28,13 +28,11 @@ import { deleteSession, listSessions, newSessionId, saveSession, type PersistedS
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
 import { transitionHarnessProposal, type HarnessHistoryEntry, type HarnessProposal } from "./state/harness";
 import { countPendingProposals } from "./state/harness.notifications";
-import { mapStepResult, type AgentProgressStep } from "./components/AgentProgressBubble";
 import {
   runShellCommand,
   readWorkspaceFile,
   writeWorkspaceFile,
   applyWorkspaceEdit,
-  runAgentTask,
   parseShellWords,
   listWorkspaceDir,
   runProjectTest,
@@ -44,8 +42,6 @@ import {
   type WriteWorkspaceFileResult,
   type ApplyWorkspaceEditResult,
   type ReadWorkspaceFileResult,
-  type AgentRunResult,
-  type AgentStepRequest,
   type ListWorkspaceDirResult,
   type GitOperationResult,
   type TestRunResult,
@@ -113,12 +109,6 @@ interface ChatMessage {
   text: string;
   thinking?: boolean;
   skillId?: string;
-  /** When present, this bubble renders as an AgentProgressBubble instead of text. */
-  agentProgress?: {
-    steps: AgentProgressStep[];
-    completed: number;
-    partial: boolean;
-  };
   /**
    * Files attached to this turn. Persisted with the chat row so the user
    * can scroll back and reference the screenshot in a follow-up question.
@@ -188,127 +178,7 @@ interface AttachedFile {
 }
 export type { AttachedFile };
 
-// Parse a fenced `tool` block from the model's response. The model is told
-// (via SYSTEM_PROMPT) to emit exactly one block per turn, with one JSON step
-// per line. We extract the steps; the surrounding text stays in the chat
-// bubble so the user sees the model's commentary.
-// Sentinel that marks the end of a `createArtifact` raw-body block inside
-// a `tool` fence. The line up to (and not including) this marker is
-// appended verbatim to the file body. Mirrors `RAW_BODY_END_MARKER` in
-// providers/registry.ts.
-const RAW_BODY_END_MARKER = "<<<END";
-// Tool kinds whose body is collected verbatim until RAW_BODY_END_MARKER,
-// instead of being JSON-parsed on a single line. Matches registry.ts.
-const RAW_BODY_KINDS = new Set(["createArtifact"]);
-
-function parseToolBlock(text: string): AgentStepRequest[] | null {
-  const match = text.match(/```tool\s*\n([\s\S]*?)\n```/);
-  if (!match) return null;
-  const rawLines = match[1].split(/\r?\n/);
-  const steps: AgentStepRequest[] = [];
-  for (let i = 0; i < rawLines.length; ) {
-    const line = rawLines[i];
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) { i += 1; continue; }
-    const space = line.indexOf(" ");
-    if (space < 0) { i += 1; continue; }
-    const kind = line.slice(0, space).trim();
-    const rest = line.slice(space + 1).trim();
-    if (RAW_BODY_KINDS.has(kind)) {
-      // `createArtifact path=foo.html create=true overwrite=true`
       // — header carries key=value tokens, body runs until `<<<END`.
-      const metadata: Record<string, string> = {};
-      for (const token of rest.split(/\s+/)) {
-        if (!token) continue;
-        const eq = token.indexOf("=");
-        if (eq === -1) continue;
-        metadata[token.slice(0, eq)] = token.slice(eq + 1);
-      }
-      const bodyLines: string[] = [];
-      let j = i + 1;
-      while (j < rawLines.length) {
-        const nextTrim = rawLines[j].trim();
-        if (nextTrim === RAW_BODY_END_MARKER) { j += 1; break; }
-        bodyLines.push(rawLines[j]);
-        j += 1;
-      }
-      i = j;
-      if (metadata.path) {
-        steps.push({
-          kind: "writeFile",
-          path: metadata.path,
-          content: bodyLines.join("\n"),
-          create: metadata.create !== "false",
-          overwrite: metadata.overwrite !== "false",
-        });
-      }
-      continue;
-    }
-    let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(rest); } catch { i += 1; continue; }
-    const step = parseSingleToolStep(kind, parsed);
-    if (step) steps.push(step);
-    i += 1;
-  }
-  return steps.length > 0 ? steps : null;
-}
-
-function parseSingleToolStep(kind: string, parsed: Record<string, unknown>): AgentStepRequest | null {
-  if (kind === "readFile" && typeof parsed.path === "string") {
-    return { kind: "readFile", path: parsed.path, maxBytes: typeof parsed.maxBytes === "number" ? parsed.maxBytes : undefined };
-  }
-  if (kind === "writeFile" && typeof parsed.path === "string" && typeof parsed.content === "string") {
-    return {
-      kind: "writeFile",
-      path: parsed.path,
-      content: parsed.content,
-      create: parsed.create === true,
-      overwrite: parsed.overwrite === true,
-    };
-  }
-  if (kind === "editFile" && typeof parsed.path === "string" && typeof parsed.find === "string" && typeof parsed.replace === "string") {
-    // Accept both `replaceAll` (canonical) and `replace_all` (snake_case
-    // variant some models emit); an explicit true is required to enable
-    // replace-all, otherwise we default to a single replacement.
-    const replaceAll = parsed.replaceAll === true || parsed.replace_all === true;
-    return { kind: "editFile", path: parsed.path, find: parsed.find, replace: parsed.replace, replaceAll };
-  }
-  if (kind === "runCommand" && typeof parsed.program === "string" && Array.isArray(parsed.args)) {
-    return {
-      kind: "runCommand",
-      program: parsed.program,
-      args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
-      cwd: typeof parsed.cwd === "string" ? parsed.cwd : undefined,
-      timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
-    };
-  }
-  if (kind === "listDir" && typeof parsed.path === "string") {
-    return {
-      kind: "listDir",
-      path: parsed.path,
-      maxEntries: typeof parsed.maxEntries === "number" ? parsed.maxEntries : undefined,
-    };
-  }
-  if (kind === "loadProjectConfig") {
-    return { kind: "loadProjectConfig" };
-  }
-  if (kind === "gitOp" && Array.isArray(parsed.args)) {
-    return {
-      kind: "gitOp",
-      args: parsed.args.filter((arg): arg is string => typeof arg === "string"),
-      timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
-    };
-  }
-  if (kind === "runTest") {
-    return {
-      kind: "runTest",
-      args: Array.isArray(parsed.args) ? parsed.args.filter((arg): arg is string => typeof arg === "string") : [],
-      timeoutMs: typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
-    };
-  }
-  return null;
-}
-
 interface GoalState {
   objective: string;
   status: "active" | "complete";
@@ -338,7 +208,7 @@ const SYSTEM_PROMPT = [
   "runCommand {\"program\":\"npm\",\"args\":[\"test\"]}",
   "editFile {\"path\":\"src/foo.ts\",\"find\":\"old\",\"replace\":\"new\",\"replaceAll\":false}",
   "```",
-  "Available step kinds: readFile, writeFile, editFile, runCommand, listDir, search, createArtifact, loadProjectConfig, gitOp, runTest.",
+  "Available tools: readFile, writeFile, editFile, runCommand, listDir, search, loadProjectConfig, gitOp, runTest, webSearch.",
   "After the steps run, you'll see the structured observation in the next turn and can either chain another tool block or write a plain-text summary.",
   "",
   "# Final reply structure",
@@ -349,7 +219,6 @@ const SYSTEM_PROMPT = [
   "If pending items need a user decision, end the reply with a **Decision needed** section that names the choice, options, and which option you recommend.",
 ].join("\n");
 const COMPACT_KEEP_LAST = 6;
-const MAX_TOOL_TURNS = 6;
 const PROJECT_NAME = "Zeus";
 const DEFAULT_PROJECT: ProjectRef = { id: "zeus", name: "Zeus" };
 const FALLBACK_IMAGE_PREVIEW = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
@@ -541,7 +410,6 @@ export function App() {
       return Array.isArray(parsed) ? parsed.slice(0, 16) : [];
     } catch { return []; }
   });
-  const [agentProgress, setAgentProgress] = useState<{ steps: AgentProgressStep[]; completed: number; partial: boolean } | null>(null);
   const [runtimePlan, setRuntimePlan] = useState<RuntimePlan | null>(null);
   const [proposalDraftBody, setProposalDraftBody] = useState<string | null>(null);
   const notificationCount = countPendingProposals(proposal, activeView === "Harness Evolution");
@@ -1092,12 +960,6 @@ const livePromptTokens = useMemo(() => {
     return `read ${result.path} (${result.bytesRead} bytes${result.truncated ? ", truncated" : ""})\n\n\`\`\`\n${preview}\n\`\`\``;
   }
 
-  function summarizeAgentRun(result: AgentRunResult): string {
-    return `agent run ${result.completed ? "completed" : "failed"} — ${result.summary}` +
-      (result.filesTouched.length ? `\n\nfiles touched: ${result.filesTouched.join(", ")}` : "") +
-      (result.proposedHarnessRule ? `\n\nproposed harness rule: ${result.proposedHarnessRule}` : "");
-  }
-
   function summarizeList(result: ListWorkspaceDirResult): string {
     if (result.entries.length === 0) return `ls ${result.path || "/"}: empty`;
     const lines = result.entries.slice(0, 200).map((e) => `- ${e.name} (${e.kind})`);
@@ -1572,31 +1434,25 @@ const livePromptTokens = useMemo(() => {
     const augmentedSystem = [SYSTEM_PROMPT, terseBlock, minimalBlock, projectHint].filter((s) => s && s.trim().length > 0).join("\n\n");
 
     // Seed messages: system prompt + compact context + the user's prompt.
-    // The recursive runChatTurn appends the model's last reply and any tool
-    // results, so subsequent iterations see the full picture.
     const seedMessages: ChatRequestMessage[] = [
       { role: "system", content: augmentedSystem },
       ...buildContextMessages([...chat, userMessage, thinkingMessage] as UiChatBubble[], compactFromId),
       { role: "user", content: userOutboundContent },
     ];
 
-    await runChatTurn(seedMessages, thinkingMessage.id, controller.signal, 0, prompt);
+    await runChatTurn(seedMessages, thinkingMessage.id, controller.signal, prompt);
 
     if (!controller.signal.aborted) setRunState("idle");
     abortRef.current = null;
     return;
   }
 
-  // Recursive multi-turn chat driver. After each model response, scans for
-  // a fenced `tool` block. If found, runs the steps through runAgentTask,
-  // appends the result to the chat, then re-prompts the model with the
-  // updated history so it can either chain another tool call or produce
-  // a final answer. Bounded by MAX_TOOL_TURNS to prevent runaway loops.
+  // The Rust runtime owns the complete provider/tool/replan loop. React only
+  // renders the terminal response for the current chat turn.
   async function runChatTurn(
     seedMessages: ChatRequestMessage[],
     thinkingBubbleId: number,
     signal: AbortSignal,
-    depth: number,
     originalPrompt: string,
   ): Promise<void> {
     if (signal.aborted) return;
@@ -1616,6 +1472,8 @@ const livePromptTokens = useMemo(() => {
           provider,
           skillId: skillForTurn ?? undefined,
           messages: seedMessages,
+          sessionId: activeSession?.id,
+          objective: originalPrompt,
           ...(providerOverrides.model ? { model: providerOverrides.model } : {}),
           ...(providerOverrides.baseUrl ? { baseUrl: providerOverrides.baseUrl } : {}),
         });
@@ -1673,102 +1531,16 @@ const livePromptTokens = useMemo(() => {
       setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
       setTimeout(() => persistActiveSession({ chat: nextChat }), 0);
 
-      // No tool block: the model gave a final answer. Done.
-      const steps = parseToolBlock(clean);
-      if (!steps || steps.length === 0) return;
-
-      // Bound recursion. If the model keeps asking for tools past the cap,
-      // surface a clear message instead of silently stopping.
-      if (depth >= MAX_TOOL_TURNS) {
-        appendZeusMessage(`Stopped after ${MAX_TOOL_TURNS} tool turns. The model kept requesting workspace actions without producing a final answer.`);
-        return;
-      }
-
-      if (!isTauri) {
-        appendZeusMessage("Workspace tool steps require the Zeus desktop runtime.");
-        return;
-      }
-
-      // Run the requested steps. Show progress and the result in the chat.
-      appendZeusMessage(`running ${steps.length} agent step${steps.length === 1 ? "" : "s"}...`);
-      let agentResult: AgentRunResult | null = null;
-      let agentError: string | null = null;
-      try {
-        const result = await runAgentTask({
-          objective: originalPrompt,
-          steps,
-          stopOnError: false,
-        });
-        agentResult = result;
-        // Build the per-step progress bubble from the agent's log.
-        const stepsForBubble: AgentProgressStep[] = result.logs.map((entry) => {
-          const mapped = mapStepResult(entry.result);
-          const step: AgentProgressStep = { index: entry.index, label: entry.label, status: mapped.status };
-          if (mapped.message !== undefined) step.result = mapped.message;
-          return step;
-        });
-        const completedCount = stepsForBubble.filter((s) => s.status === "ok" || s.status === "failed").length;
-        const failedCount = stepsForBubble.filter((s) => s.status === "failed").length;
-        const progressMessage: ChatMessage = {
-          id: nextMessageId(),
-          role: "zeus",
-          text: "",
-          agentProgress: {
-            steps: stepsForBubble,
-            completed: completedCount,
-            partial: failedCount > 0 && !result.completed,
-          },
-        };
-        appendZeusMessage(summarizeAgentRun(result));
-        setChat((entries) => [...entries, progressMessage]);
-        if (result.proposedHarnessRule) adoptProposedHarnessRule(result.proposedHarnessRule);
-      } catch (err) {
-        agentError = err instanceof Error ? err.message : String(err);
-        appendZeusMessage(`Agent run failed: ${agentError}`);
-      }
-
-      if (signal.aborted) return;
-
-      // Build the next-turn messages: prior history + model reply + tool
-      // result. The model sees the result and can chain another tool call
-      // or emit a final summary.
-      const toolSummary = agentResult
-        ? `Tool result for the \`tool\` block you just emitted:\n\n${summarizeAgentRun(agentResult)}\n\nFiles touched: ${agentResult.filesTouched.join(", ") || "(none)"}\nDiff:\n\`\`\`\n${agentResult.diff || "(no diff)"}\n\`\`\`\n\nNow either emit another \`tool\` block if more steps are needed, or respond to the user with a plain-text summary.`
-        : `Tool result for the \`tool\` block you just emitted:\n\nFAILED: ${agentError}\n\nEither retry with a corrected \`tool\` block or respond to the user explaining what went wrong.`;
-
-      // Append a fresh thinking bubble for the next turn.
-      const nextThinkingId = nextMessageId();
-      setChat((entries) => [...entries, { id: nextThinkingId, role: "zeus", text: "", thinking: true }]);
-      // Snapshot the latest chat into a fresh context for the recursive call.
-      const nextHistorySnapshot = nextChat as UiChatBubble[];
-      const nextContextMessages = buildContextMessages(nextHistorySnapshot, compactFromId);
-      // Use the same augmented system prompt (terse + minimal-code) on
-      // every recursive turn so a multi-step tool run doesn't drop the
-      // output-discipline instructions.
-      const terseBlockRec = getTerseOutputInstructions(terseLevel);
-      const minimalBlockRec = getMinimalCodeInstructions(minimalLevel);
-      const augmentedSystemRec = [SYSTEM_PROMPT, terseBlockRec, minimalBlockRec].filter((s) => s && s.trim().length > 0).join("\n\n");
-      const nextMessages: ChatRequestMessage[] = [
-        { role: "system", content: augmentedSystemRec },
-        ...nextContextMessages,
-      ];
+      // The Rust runtime already completed the bounded observe-and-replan
+      // cycle before returning this response. The browser must never run a
+      // second tool loop or act as a compatibility fallback.
+      return;
 
       // Transition the harness proposal from "implementing" to a terminal
       // state based on the agent run outcome. Only fire when the proposal
       // is currently "implementing" — the user may have applied multiple
       // proposals back-to-back and we don't want to retroactively mark
       // an already-applied one as failed.
-      if (proposal.status === "implementing" && agentResult) {
-        const target: HarnessProposal["status"] = agentResult.completed ? "applied" : "failed";
-        const proposalAfter = { ...proposal, status: target };
-        setProposal(proposalAfter);
-        setHistory((entries) => [
-          { proposalId: proposal.id, action: target, at: new Date().toISOString(), sessionId: activeSession?.id },
-          ...entries,
-        ].slice(0, 4));
-      }
-
-      await runChatTurn(nextMessages, nextThinkingId, signal, depth + 1, originalPrompt);
     } catch (error) {
       if (signal.aborted) return;
       if (signal.aborted) return;
@@ -2080,19 +1852,11 @@ useEffect(() => {
     }
     return message.trim();
   }, [chat, message]);
-  const lastAgentRun = useMemo(() => {
-    for (let i = chat.length - 1; i >= 0; i -= 1) {
-      const ap = chat[i].agentProgress;
-      if (ap) return { steps: ap.steps, partial: ap.partial };
-    }
-    return null;
-  }, [chat]);
   const lastToolFailed = useMemo(() => {
-    if (lastAgentRun?.partial) return true;
     if (history.length === 0) return false;
     const first = history[0];
     return /agent run failed|failed:|status:\s*failed/i.test(`${first.action} ${first.at}`);
-  }, [lastAgentRun, history]);
+  }, [history]);
 
   return (
     <main className="app-shell">
@@ -2204,9 +1968,6 @@ useEffect(() => {
             applySlashPick={applySlashPick}
             activeSkillId={activeSkillId}
             detachSkill={detachSkill}
-            accessMode={accessMode}
-            setAccessMode={setAccessMode}
-            persistAccess={persistAccess}
             runState={runState}
             handleSend={handleSend}
             stopRun={stopRun}
@@ -2286,7 +2047,6 @@ useEffect(() => {
 
       <InspectorPanel
         latestUserObjective={latestUserObjective}
-        lastAgentRun={lastAgentRun}
         lastToolFailed={lastToolFailed}
         runtimePlan={runtimePlan}
         latestTurnTokens={latestTurnTokens}

@@ -38,7 +38,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../skills/": "skills"
+      "../skills/": "skills",
+      "../scripts/zeus-browser-driver.mjs": "scripts/zeus-browser-driver.mjs"
     },
     "externalBin": [
       "binaries/ddgs"

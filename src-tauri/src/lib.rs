@@ -25,7 +25,7 @@ mod validation;
 mod web_search;
 mod workspace;
 
-use agent_runtime::AgentRuntimeService;
+use agent_runtime::{AgentRuntimeService, ApprovalCheck, RiskClass, ToolRunRecord};
 use persistence::{
     list_sessions as db_list_sessions, open_and_init, save_session as db_save_session,
     EditProposalRequest, PersistedProposal, PersistedSession, PersistedState, RecordActionRequest,
@@ -37,19 +37,14 @@ use providers::{
 };
 use workspace::{
     apply_workspace_edit as apply_workspace_edit_impl,
-    list_workspace_dir as list_workspace_dir_impl,
-    load_project_config as load_project_config_impl,
-    read_workspace_file as read_workspace_file_impl,
-    run_agent_task as run_agent_task_impl,
-    run_git_operation as run_git_operation_impl,
-    run_project_test as run_project_test_impl,
-    run_shell_command as run_shell_command_impl,
-    write_workspace_file as write_workspace_file_impl,
-    AgentRunRequest, AgentRunResult, ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult,
-    GitOperationRequest, GitOperationResult, ListWorkspaceDirRequest, ListWorkspaceDirResult,
-    ProjectConfigRequest, ProjectConfigResult, ReadWorkspaceFileRequest, ReadWorkspaceFileResult,
-    ShellCommandRequest, ShellCommandResult, TestRunRequest, TestRunResult,
-    WriteWorkspaceFileRequest, WriteWorkspaceFileResult,
+    list_workspace_dir as list_workspace_dir_impl, load_project_config as load_project_config_impl,
+    read_workspace_file as read_workspace_file_impl, run_git_operation as run_git_operation_impl,
+    run_project_test as run_project_test_impl, run_shell_command as run_shell_command_impl,
+    write_workspace_file as write_workspace_file_impl, ApplyWorkspaceEditRequest,
+    ApplyWorkspaceEditResult, GitOperationRequest, GitOperationResult, ListWorkspaceDirRequest,
+    ListWorkspaceDirResult, ProjectConfigRequest, ProjectConfigResult, ReadWorkspaceFileRequest,
+    ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult, TestRunRequest,
+    TestRunResult, WriteWorkspaceFileRequest, WriteWorkspaceFileResult,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -248,7 +243,9 @@ fn skill_index_from_dir(root: &Path) -> Result<Vec<SkillIndexEntry>, String> {
     for path in dirs {
         match skill_index_entry_from_dir(&path) {
             Ok(entry) => skills.push(entry),
-            Err(error) => tracing::warn!(skill = %path.display(), "Skipping invalid skill: {error}"),
+            Err(error) => {
+                tracing::warn!(skill = %path.display(), "Skipping invalid skill: {error}")
+            }
         }
     }
     skills.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
@@ -604,7 +601,8 @@ fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
     let path = provider_keys_path(app)?;
     let mut parsed = if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        serde_json::from_str::<ProviderKeysFile>(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?
+        serde_json::from_str::<ProviderKeysFile>(&raw)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?
     } else {
         ProviderKeysFile::default()
     };
@@ -626,20 +624,31 @@ fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
 /// Quotes (single or double) wrapping the value are stripped.
 fn parse_dotenv(contents: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    for raw in contents.split(|c| c == '\n' || c == '\r') {
+    for raw in contents.split(['\n', '\r']) {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        let Some(eq) = line.find('=') else { continue; };
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
         let key = line[..eq].trim().to_string();
-        if key.is_empty() { continue; }
+        if key.is_empty() {
+            continue;
+        }
         // Conventional env-var shape: leading letter or underscore,
         // then alphanumerics or underscores. This rejects `1INVALID=...`
         // style lines that some shells accept but the API keys here don't
         // need to.
         let mut chars = key.chars();
-        let first_ok = chars.next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+        let first_ok = chars
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false);
         let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !(first_ok && rest_ok) { continue; }
+        if !(first_ok && rest_ok) {
+            continue;
+        }
         let mut value = line[eq + 1..].trim().to_string();
         if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
             || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
@@ -666,7 +675,12 @@ fn merge_dotenv_into(parsed: &mut ProviderKeysFile) {
             parsed.openai = Some(value.clone());
         }
     }
-    if parsed.anthropic.as_deref().map(str::is_empty).unwrap_or(true) {
+    if parsed
+        .anthropic
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true)
+    {
         if let Some(value) = map.get("ANTHROPIC_API_KEY") {
             parsed.anthropic = Some(value.clone());
         }
@@ -749,15 +763,33 @@ fn set_provider_keys(
     } else {
         ProviderKeysFile::default()
     };
-    if let Some(value) = request.minimax { next.minimax = normalize_key(Some(value)); }
-    if let Some(value) = request.openai { next.openai = normalize_key(Some(value)); }
-    if let Some(value) = request.anthropic { next.anthropic = normalize_key(Some(value)); }
-    if let Some(value) = request.minimax_base_url { next.minimax_base_url = normalize_optional(Some(value)); }
-    if let Some(value) = request.openai_base_url { next.openai_base_url = normalize_optional(Some(value)); }
-    if let Some(value) = request.anthropic_base_url { next.anthropic_base_url = normalize_optional(Some(value)); }
-    if let Some(value) = request.minimax_model { next.minimax_model = normalize_optional(Some(value)); }
-    if let Some(value) = request.openai_model { next.openai_model = normalize_optional(Some(value)); }
-    if let Some(value) = request.anthropic_model { next.anthropic_model = normalize_optional(Some(value)); }
+    if let Some(value) = request.minimax {
+        next.minimax = normalize_key(Some(value));
+    }
+    if let Some(value) = request.openai {
+        next.openai = normalize_key(Some(value));
+    }
+    if let Some(value) = request.anthropic {
+        next.anthropic = normalize_key(Some(value));
+    }
+    if let Some(value) = request.minimax_base_url {
+        next.minimax_base_url = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.openai_base_url {
+        next.openai_base_url = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.anthropic_base_url {
+        next.anthropic_base_url = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.minimax_model {
+        next.minimax_model = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.openai_model {
+        next.openai_model = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.anthropic_model {
+        next.anthropic_model = normalize_optional(Some(value));
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -864,7 +896,9 @@ async fn test_provider(
         provider: provider_id.clone(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: serde_json::Value::String("Respond with the single word OK and nothing else.".to_string()),
+            content: serde_json::Value::String(
+                "Respond with the single word OK and nothing else.".to_string(),
+            ),
         }],
         skill_id: None,
         options: serde_json::json!({
@@ -926,6 +960,189 @@ async fn send_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<ChatRe
     dispatch_chat(&request_with_messages, None)
         .await
         .map_err(String::from)
+}
+
+const NATIVE_AGENT_MAX_TURNS: usize = 12;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAgentTurnRequest {
+    session_id: String,
+    objective: String,
+    provider: String,
+    messages: Vec<ChatMessage>,
+    skill_id: Option<String>,
+    #[serde(default)]
+    options: serde_json::Value,
+    workspace_dir: Option<String>,
+    approval_id: Option<String>,
+    approval_session_id: Option<String>,
+    max_turns: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAgentTurnResult {
+    content: String,
+    model: String,
+    usage: Option<serde_json::Value>,
+    turns: usize,
+    tool_results: Vec<engine::AgentEngineToolBatchResult>,
+}
+
+fn parse_native_tool_calls(content: &str) -> Result<Vec<engine::AgentEngineToolCall>, String> {
+    let mut calls = Vec::new();
+    for fenced in content.split("```tool").skip(1) {
+        let body = fenced.split("```").next().unwrap_or_default();
+        for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Some((name, raw_args)) = line.split_once(char::is_whitespace) else {
+                return Err(format!(
+                    "Native tool call '{line}' is missing its JSON arguments."
+                ));
+            };
+            let args: serde_json::Value = serde_json::from_str(raw_args.trim())
+                .map_err(|error| format!("Parse native tool call '{name}': {error}"))?;
+            if !args.is_object() {
+                return Err(format!(
+                    "Native tool call '{name}' arguments must be a JSON object."
+                ));
+            }
+            calls.push(engine::AgentEngineToolCall {
+                id: None,
+                name: name.to_string(),
+                args,
+            });
+        }
+    }
+    Ok(calls)
+}
+
+fn strip_native_tool_blocks(content: &str) -> String {
+    let mut remaining = content;
+    let mut out = String::new();
+    while let Some(start) = remaining.find("```tool") {
+        out.push_str(&remaining[..start]);
+        let after_start = &remaining[start + "```tool".len()..];
+        match after_start.find("```") {
+            Some(end) => remaining = &after_start[end + "```".len()..],
+            None => return out.trim().to_string(),
+        }
+    }
+    out.push_str(remaining);
+    out.trim().to_string()
+}
+
+#[tauri::command]
+async fn agent_runtime_execute_turn(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: NativeAgentTurnRequest,
+) -> Result<NativeAgentTurnResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
+    let runtime = app
+        .try_state::<AgentRuntimeService>()
+        .map(|service| service.inner().clone())
+        .ok_or_else(|| "AgentRuntimeService was not managed by the Tauri app.".to_string())?;
+    runtime.open_session(
+        request.session_id.clone(),
+        request
+            .workspace_dir
+            .clone()
+            .unwrap_or_else(|| "desktop".to_string()),
+        request.objective.chars().take(120).collect(),
+    )?;
+    let mut messages = inject_skill(
+        &app,
+        &ChatRequest {
+            provider: request.provider.clone(),
+            messages: request.messages,
+            skill_id: request.skill_id.clone(),
+            options: request.options.clone(),
+        },
+    )?;
+    let max_turns = request
+        .max_turns
+        .unwrap_or(NATIVE_AGENT_MAX_TURNS)
+        .clamp(1, NATIVE_AGENT_MAX_TURNS);
+    let mut tool_results = Vec::new();
+    let mut last_response: Option<ChatResponse> = None;
+    for turn in 0..max_turns {
+        let response = dispatch_chat(
+            &ChatRequest {
+                provider: request.provider.clone(),
+                messages: messages.clone(),
+                skill_id: None,
+                options: request.options.clone(),
+            },
+            None,
+        )
+        .await
+        .map_err(String::from)?;
+        let calls = parse_native_tool_calls(&response.content)?;
+        if calls.is_empty() {
+            return Ok(NativeAgentTurnResult {
+                content: response.content,
+                model: response.model,
+                usage: response.usage,
+                turns: turn + 1,
+                tool_results,
+            });
+        }
+        let access_mode = {
+            let conn = state.db.lock();
+            current_access_mode(&conn)?
+        };
+        let batch = engine::execute_tool_batch(
+            engine::AgentEngineToolBatchRequest {
+                objective: request.objective.clone(),
+                workspace_dir: request.workspace_dir.clone(),
+                calls,
+                approved: request.approval_id.is_some(),
+                approval_id: request.approval_id.clone(),
+                approval_session_id: request.approval_session_id.clone(),
+                stop_on_error: false,
+            },
+            access_mode.as_deref(),
+        );
+        for item in &batch.results {
+            let _ = runtime.record_tool_run(ToolRunRecord {
+                id: format!("turn-{turn}-{}", item.id),
+                session_id: request.session_id.clone(),
+                tool: item.name.clone(),
+                label: item.name.clone(),
+                ok: item.ok,
+                risk_class: RiskClass::ReadOnly,
+                files_touched: Vec::new(),
+                observation: format!("{}\n{}", item.content, item.details),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+        let observation = serde_json::to_string(&batch)
+            .map_err(|error| format!("serialize tool observation: {error}"))?;
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: serde_json::Value::String(response.content.clone()),
+        });
+        messages.push(ChatMessage { role: "user".into(), content: serde_json::Value::String(format!("Native tool observation:\n{observation}\nRespond with another tool block only if more work is required; otherwise give the final answer.")) });
+        tool_results.push(batch);
+        last_response = Some(response);
+    }
+    let response = last_response
+        .ok_or_else(|| "Native agent did not receive a provider response.".to_string())?;
+    Ok(NativeAgentTurnResult {
+        content: format!(
+            "{}\n\nStopped after {max_turns} native tool turns.",
+            strip_native_tool_blocks(&response.content)
+        ),
+        model: response.model,
+        usage: response.usage,
+        turns: max_turns,
+        tool_results,
+    })
 }
 
 /// Default completion marker for the Ralph loop. Matches the canonical
@@ -1016,9 +1233,18 @@ pub struct RunRalphRequest {
 /// state lives only in the workspace and the iteration log returned
 /// here, so there is no risk of context bloat between iterations.
 #[tauri::command]
-async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Result<RunRalphResult, String> {
-    let marker = request.completion_marker.clone().unwrap_or_else(|| RALPH_DEFAULT_MARKER.to_string());
-    let max_iterations = request.max_iterations.unwrap_or(RALPH_DEFAULT_MAX_ITERATIONS).max(1);
+async fn run_ralph_loop(
+    app: tauri::AppHandle,
+    request: RunRalphRequest,
+) -> Result<RunRalphResult, String> {
+    let marker = request
+        .completion_marker
+        .clone()
+        .unwrap_or_else(|| RALPH_DEFAULT_MARKER.to_string());
+    let max_iterations = request
+        .max_iterations
+        .unwrap_or(RALPH_DEFAULT_MAX_ITERATIONS)
+        .max(1);
     let base_system = match request.system_message.clone() {
         Some(s) if !s.trim().is_empty() => s,
         _ => format!(
@@ -1034,10 +1260,17 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
 
     for index in 0..max_iterations {
         let prior = iterations.last();
-        let user_content = render_ralph_user_prompt(&request.objective, index, prior, request.verifier.as_ref());
+        let user_content =
+            render_ralph_user_prompt(&request.objective, index, prior, request.verifier.as_ref());
         let messages = vec![
-            ChatMessage { role: "system".to_string(), content: serde_json::Value::String(base_system.clone()) },
-            ChatMessage { role: "user".to_string(), content: serde_json::Value::String(user_content) },
+            ChatMessage {
+                role: "system".to_string(),
+                content: serde_json::Value::String(base_system.clone()),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::String(user_content),
+            },
         ];
         let chat_request = ChatRequest {
             provider: request.provider.clone(),
@@ -1049,7 +1282,10 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
             }),
         };
         let messages_with_skill = inject_skill(&app, &chat_request)?;
-        let chat_with_skill = ChatRequest { messages: messages_with_skill, ..chat_request };
+        let chat_with_skill = ChatRequest {
+            messages: messages_with_skill,
+            ..chat_request
+        };
         let response = dispatch_chat(&chat_with_skill, None)
             .await
             .map_err(|e| e.public_message())?;
@@ -1060,17 +1296,23 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
         // Run the verifier only when the marker has been seen at least
         // once. This keeps cost low (verifiers are usually tests) while
         // also letting the loop exit when *both* succeed.
-        let mut verifier_ok: Option<bool> = None;
         if marker_seen {
             if let Some(verifier) = request.verifier.as_ref() {
                 let result = run_ralph_verifier(verifier).await?;
-                verifier_ok = Some(result.success);
                 if !result.success {
-                    iterations.push(RalphIteration { index, marker_seen, assistant_excerpt });
+                    iterations.push(RalphIteration {
+                        index,
+                        marker_seen,
+                        assistant_excerpt,
+                    });
                     continue;
                 }
             }
-            iterations.push(RalphIteration { index, marker_seen, assistant_excerpt });
+            iterations.push(RalphIteration {
+                index,
+                marker_seen,
+                assistant_excerpt,
+            });
             return Ok(RunRalphResult {
                 completed: true,
                 iterations_run: iterations.len(),
@@ -1084,13 +1326,20 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
             });
         }
 
-        iterations.push(RalphIteration { index, marker_seen, assistant_excerpt });
+        iterations.push(RalphIteration {
+            index,
+            marker_seen,
+            assistant_excerpt,
+        });
     }
 
     Ok(RunRalphResult {
         completed: false,
         iterations_run: iterations.len(),
-        exit_reason: format!("reached max iterations ({}) without completion marker", max_iterations),
+        exit_reason: format!(
+            "reached max iterations ({}) without completion marker",
+            max_iterations
+        ),
         marker,
         iterations,
     })
@@ -1147,7 +1396,9 @@ async fn run_ralph_verifier(verifier: &RalphVerifier) -> Result<RalphVerifierOut
         .map_err(|e| format!("spawn verifier '{}': {e}", verifier.program))?;
     let mut timed_out = false;
     loop {
-        let waited = child.try_wait().map_err(|e| format!("wait verifier: {e}"))?;
+        let waited = child
+            .try_wait()
+            .map_err(|e| format!("wait verifier: {e}"))?;
         if waited.is_some() {
             break;
         }
@@ -1194,9 +1445,13 @@ struct RalphVerifierOutcome {
 }
 
 fn excerpt(content: &str, max: usize) -> String {
-    if content.len() <= max { return content.to_string(); }
+    if content.len() <= max {
+        return content.to_string();
+    }
     let mut end = max;
-    while end > 0 && !content.is_char_boundary(end) { end -= 1; }
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
     let mut out = content[..end].to_string();
     out.push_str("\n...[truncated]");
     out
@@ -1225,7 +1480,9 @@ fn agent_engine_execute_tools(
 }
 
 #[tauri::command]
-async fn web_search(request: web_search::WebSearchRequest) -> Result<web_search::WebSearchResult, String> {
+async fn web_search(
+    request: web_search::WebSearchRequest,
+) -> Result<web_search::WebSearchResult, String> {
     web_search::web_search(request).await
 }
 
@@ -1383,11 +1640,43 @@ fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn validate_runtime_approval(
+    app: &tauri::AppHandle,
+    session_id: Option<&str>,
+    approval_id: Option<&str>,
+) -> Result<(), String> {
+    let (Some(session_id), Some(approval_id)) = (session_id, approval_id) else {
+        return match (session_id, approval_id) {
+            (None, None) => Ok(()),
+            _ => Err("A runtime approval requires both an approval id and session id.".to_string()),
+        };
+    };
+    let runtime = app
+        .try_state::<AgentRuntimeService>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| "AgentRuntimeService was not managed by the Tauri app.".to_string())?;
+    match runtime.check_approval_for_session(session_id, approval_id, true)? {
+        ApprovalCheck::Valid | ApprovalCheck::SessionWide => Ok(()),
+        ApprovalCheck::AlreadyConsumed => Err("This approval has already been used.".to_string()),
+        ApprovalCheck::Unknown => Err("No approval matches the supplied id.".to_string()),
+        ApprovalCheck::SessionMismatch => {
+            Err("This approval belongs to a different agent session.".to_string())
+        }
+        ApprovalCheck::NotApproved => Err("Approval was rejected or never approved.".to_string()),
+    }
+}
+
 #[tauri::command]
 fn run_shell_command(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: ShellCommandRequest,
 ) -> Result<ShellCommandResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1409,9 +1698,15 @@ fn read_workspace_file(
 
 #[tauri::command]
 fn write_workspace_file(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: WriteWorkspaceFileRequest,
 ) -> Result<WriteWorkspaceFileResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1421,26 +1716,20 @@ fn write_workspace_file(
 
 #[tauri::command]
 fn apply_workspace_edit(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: ApplyWorkspaceEditRequest,
 ) -> Result<ApplyWorkspaceEditResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
     };
     apply_workspace_edit_impl(request, access_mode.as_deref())
-}
-
-#[tauri::command]
-fn run_agent_task(
-    state: tauri::State<'_, AppState>,
-    request: AgentRunRequest,
-) -> Result<AgentRunResult, String> {
-    let access_mode = {
-        let conn = state.db.lock();
-        current_access_mode(&conn)?
-    };
-    Ok(run_agent_task_impl(request, access_mode.as_deref()))
 }
 
 #[tauri::command]
@@ -1469,9 +1758,15 @@ fn load_project_config(
 
 #[tauri::command]
 fn run_git_operation(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: GitOperationRequest,
 ) -> Result<GitOperationResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1505,7 +1800,7 @@ pub fn run() {
             // Apply user-saved provider API keys (set via the Settings UI)
             // on top of whatever .env / process env already has. Missing
             // file is not an error — the user simply hasn't saved keys yet.
-            let _ = load_provider_keys_into_env(&app.handle());
+            let _ = load_provider_keys_into_env(app.handle());
             // Resolve <app_data_dir>/zeus.db. Tauri creates the dir on
             // first access; open_and_init creates the file and schema.
             let db_path = match app.path().app_data_dir() {
@@ -1517,9 +1812,19 @@ pub fn run() {
             seed_default_state(&conn)
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("seed: {e}").into() })?;
             let runtime_path = db_path.with_file_name("agent-runtime.json");
-            let runtime = AgentRuntimeService::load_or_create(runtime_path).map_err(
-                |e| -> Box<dyn std::error::Error> { format!("runtime open: {e}").into() },
-            )?;
+            let bundled_driver = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|directory| directory.join("scripts").join("zeus-browser-driver.mjs"))
+                .filter(|path| path.is_file());
+            let runtime = match bundled_driver {
+                Some(driver_path) => {
+                    AgentRuntimeService::load_or_create_with(runtime_path, driver_path)
+                }
+                None => AgentRuntimeService::load_or_create(runtime_path),
+            }
+            .map_err(|e| -> Box<dyn std::error::Error> { format!("runtime open: {e}").into() })?;
             app.manage(runtime);
             app.manage(AppState {
                 db: Arc::new(Mutex::new(conn)),
@@ -1528,6 +1833,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             send_chat,
+            agent_runtime_execute_turn,
             run_ralph_loop,
             list_providers,
             load_state,
@@ -1544,7 +1850,6 @@ pub fn run() {
             read_workspace_file,
             write_workspace_file,
             apply_workspace_edit,
-            run_agent_task,
             list_workspace_dir,
             load_project_config,
             run_git_operation,
@@ -1578,6 +1883,7 @@ pub fn run() {
             agent_runtime_commands::agent_runtime_github_read_pr,
             agent_runtime_commands::agent_runtime_github_ci_status,
             agent_runtime_commands::agent_runtime_github_fix_ci,
+            agent_runtime_commands::agent_runtime_github_workflow_log,
             agent_runtime_commands::agent_runtime_upsert_memory_v2,
             agent_runtime_commands::agent_runtime_retrieve_memories_v2,
             agent_runtime_commands::agent_runtime_inject_memories,
@@ -1591,17 +1897,6 @@ pub fn run() {
 mod skills_resolver_tests {
     use super::skills_dir_candidates;
     use std::path::PathBuf;
-
-    /// Build a fake Tauri AppHandle from a resource-dir path. The
-    /// resolver only consults `resource_dir()` + the rest of the env,
-    /// so a tiny stand-in keeps the test focused on the algorithm
-    /// without dragging in Tauri runtime state.
-    struct StubApp {
-        resource_dir: Option<PathBuf>,
-        cwd: PathBuf,
-        manifest_root: PathBuf,
-        env_skill_dir: Option<PathBuf>,
-    }
 
     fn tempdir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -1628,7 +1923,9 @@ mod skills_resolver_tests {
         // The compile-time manifest fallback MUST include
         // `<repo>/skills`, which is where the real skills live in dev.
         assert!(
-            candidates.iter().any(|c| c.ends_with("skills") && c.is_absolute()),
+            candidates
+                .iter()
+                .any(|c| c.ends_with("skills") && c.is_absolute()),
             "candidates must include the manifest-rooted skills path; got {candidates:?}"
         );
     }
@@ -1690,7 +1987,8 @@ mod skills_resolver_tests {
         std::fs::write(
             inner.join("SKILL.md"),
             "---\nname: nested-skill\ndescription: Should be discovered.\n---\n\n# Nested\n",
-        ).unwrap();
+        )
+        .unwrap();
         let skills = crate::list_skills_from_dir(&root).expect("list");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id, "nested-skill");
@@ -1701,7 +1999,11 @@ mod skills_resolver_tests {
         let root = tempdir("invalid");
         // Folder without SKILL.md -> ignored.
         std::fs::create_dir_all(root.join("not-a-skill")).unwrap();
-        std::fs::write(root.join("not-a-skill").join("readme.txt"), "no frontmatter").unwrap();
+        std::fs::write(
+            root.join("not-a-skill").join("readme.txt"),
+            "no frontmatter",
+        )
+        .unwrap();
         // File directly under root (not a folder) -> ignored.
         std::fs::write(root.join("loose.md"), "---\nname: loose\n---\n").unwrap();
         // Real skill.
@@ -1710,7 +2012,8 @@ mod skills_resolver_tests {
         std::fs::write(
             good.join("SKILL.md"),
             "---\nname: real\ndescription: Should survive the filter.\n---\n\n# Real\n",
-        ).unwrap();
+        )
+        .unwrap();
         let skills = crate::list_skills_from_dir(&root).expect("list");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id, "real");
@@ -1756,8 +2059,17 @@ mod ralph_helpers_tests {
 
     #[test]
     fn verifier_present_adds_reminder_to_prompt() {
-        let verifier = RalphVerifier { program: "echo".into(), args: vec![], cwd: None, timeout_ms: None };
-        let prior = RalphIteration { index: 0, marker_seen: false, assistant_excerpt: "x".into() };
+        let verifier = RalphVerifier {
+            program: "echo".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: None,
+        };
+        let prior = RalphIteration {
+            index: 0,
+            marker_seen: false,
+            assistant_excerpt: "x".into(),
+        };
         let prompt = render_ralph_user_prompt("obj", 1, Some(&prior), Some(&verifier));
         assert!(prompt.contains("verifier will run after every iteration"));
     }
@@ -1770,7 +2082,9 @@ mod ralph_helpers_tests {
 
     #[test]
     fn excerpt_truncates_long_content_on_utf8_boundary() {
-        let value: String = (0..200).map(|i| char::from_u32(i as u32).unwrap_or('?')).collect();
+        let value: String = (0..200)
+            .map(|i| char::from_u32(i as u32).unwrap_or('?'))
+            .collect();
         let truncated = excerpt(&value, 64);
         assert!(truncated.len() <= 64 + "...[truncated]".len() + 1);
         assert!(truncated.ends_with("...[truncated]"));
@@ -1781,10 +2095,40 @@ mod ralph_helpers_tests {
         // 4-byte emoji characters; truncating in the middle must not split one.
         let value = "🦀🦀🦀🦀🦀 extra";
         let out = truncate_utf8(value, 5); // 4 bytes of one emoji isn't safe — round down
-        // Should contain only complete codepoints.
+                                           // Should contain only complete codepoints.
         for ch in out.chars() {
             assert!(ch.len_utf8() > 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod native_agent_turn_tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiple_native_tool_calls() {
+        let calls = parse_native_tool_calls(
+            "thinking\n```tool\nreadFile {\"path\":\"src/lib.rs\"}\nrunTest {\"args\":[\"npm\",\"test\"]}\n```",
+        )
+        .unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "readFile");
+        assert_eq!(calls[1].args["args"][0], "npm");
+    }
+
+    #[test]
+    fn rejects_native_tool_calls_without_json_arguments() {
+        assert!(parse_native_tool_calls("```tool\nreadFile\n```").is_err());
+    }
+
+    #[test]
+    fn strips_native_tool_blocks_from_a_bounded_final_response() {
+        assert_eq!(
+            strip_native_tool_blocks("before\n```tool\nreadFile {\"path\":\"x\"}\n```\nafter"),
+            "before\n\nafter"
+        );
     }
 }
 
@@ -1795,8 +2139,14 @@ mod dotenv_helpers_tests {
     #[test]
     fn parse_dotenv_extracts_simple_pairs() {
         let map = parse_dotenv("MINIMAX_API_KEY=sk-abc\nOPENAI_API_KEY=sk-other\n");
-        assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-abc"));
-        assert_eq!(map.get("OPENAI_API_KEY").map(String::as_str), Some("sk-other"));
+        assert_eq!(
+            map.get("MINIMAX_API_KEY").map(String::as_str),
+            Some("sk-abc")
+        );
+        assert_eq!(
+            map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-other")
+        );
     }
 
     #[test]
@@ -1808,8 +2158,14 @@ mod dotenv_helpers_tests {
              INVALID LINE WITHOUT EQUALS\n\
              1INVALID=skip\n",
         );
-        assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-with-quotes"));
-        assert_eq!(map.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-single-quoted"));
+        assert_eq!(
+            map.get("MINIMAX_API_KEY").map(String::as_str),
+            Some("sk-with-quotes")
+        );
+        assert_eq!(
+            map.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-single-quoted")
+        );
         assert_eq!(map.get("INVALID LINE WITHOUT EQUALS"), None);
         assert_eq!(map.get("1INVALID"), None);
     }
@@ -1843,7 +2199,7 @@ mod dotenv_helpers_tests {
 
     #[test]
     fn merge_dotenv_does_not_clobber_already_set_key() {
-        let mut parsed = ProviderKeysFile {
+        let parsed = ProviderKeysFile {
             minimax: Some("persisted".to_string()),
             ..Default::default()
         };
@@ -1852,6 +2208,9 @@ mod dotenv_helpers_tests {
         // or empty. Verify that contract here so the precedence order
         // (JSON > .env) is testable without filesystem access.
         let should_fill = parsed.minimax.as_deref().map(str::is_empty).unwrap_or(true);
-        assert!(!should_fill, "a non-empty persisted key must not be overwritten by .env");
+        assert!(
+            !should_fill,
+            "a non-empty persisted key must not be overwritten by .env"
+        );
     }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render, screen, within } from "@testing-library/react";
-import { PlanProgressPanel, type AgentRunSummary } from "./PlanProgressPanel";
+import { PlanProgressPanel } from "./PlanProgressPanel";
 
 describe("PlanProgressPanel", () => {
   it("renders the empty state when there is no user objective", () => {
@@ -20,27 +20,6 @@ describe("PlanProgressPanel", () => {
       element?.className === "plan-objective" && /Add a settings panel/.test(element.textContent ?? ""),
     );
     expect(objective.textContent).toMatch(/Add a settings panel/);
-  });
-
-  it("marks the act step done and verify in-progress after a successful agent run", () => {
-    const run: AgentRunSummary = {
-      steps: [
-        { index: 0, label: "read package.json", status: "ok" },
-        { index: 1, label: "edit src/App.tsx", status: "ok" },
-      ],
-      partial: false,
-    };
-    const { container } = render(
-      <PlanProgressPanel latestUserObjective="ship a panel" lastAgentRun={run} />,
-    );
-    const list = container.querySelector(".compact-list");
-    expect(list).toBeTruthy();
-    // The "act" row should carry data-status="done" after ok observations.
-    const actRow = within(list as HTMLElement).getByText("Run the next safest tool action").closest(".compact-row");
-    expect(actRow?.getAttribute("data-status")).toBe("done");
-    // Verify should be in_progress when observations have all passed.
-    const verifyRow = within(list as HTMLElement).getByText("Verify output with tests or focused checks").closest(".compact-row");
-    expect(verifyRow?.getAttribute("data-status")).toBe("in_progress");
   });
 
   it("marks recover in-progress when the last tool run failed", () => {
@@ -83,40 +62,6 @@ describe("PlanProgressPanel", () => {
     expect(screen.queryByText("Inspect workspace and available tools")).toBeNull();
     expect(screen.getByText("0 / 4 done")).toBeTruthy();
     expect(screen.getByText("0%")).toBeTruthy();
-  });
-
-  it("updates LLM plan step statuses from agent observations", () => {
-    const runtimePlan = {
-      objective: "Add settings panel",
-      status: "in_progress" as const,
-      steps: [
-        { id: "plan-0", label: "Read package.json", status: "todo" as const },
-        { id: "plan-1", label: "Create SettingsPanel.tsx", status: "todo" as const },
-        { id: "plan-2", label: "Wire panel into App.tsx", status: "todo" as const },
-      ],
-    };
-    const run = {
-      steps: [
-        { index: 0, label: "readFile /package.json", status: "ok" as const },
-      ],
-      partial: false,
-    };
-    const { container } = render(
-      <PlanProgressPanel
-        latestUserObjective="Add settings panel"
-        runtimePlan={runtimePlan}
-        lastAgentRun={run}
-      />,
-    );
-    const list = container.querySelector(".compact-list");
-    expect(list).toBeTruthy();
-    // First step is done; second step is in_progress; rest todo.
-    const row0 = within(list as HTMLElement).getByText("Read package.json").closest(".compact-row");
-    expect(row0?.getAttribute("data-status")).toBe("done");
-    const row1 = within(list as HTMLElement).getByText("Create SettingsPanel.tsx").closest(".compact-row");
-    expect(row1?.getAttribute("data-status")).toBe("in_progress");
-    // Heading reflects 1 of 3 done.
-    expect(screen.getByText("1 / 3 done")).toBeTruthy();
   });
 
   it("falls back to heuristic plan when runtimePlan is null", () => {

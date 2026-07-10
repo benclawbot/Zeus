@@ -60,6 +60,10 @@ export interface ChatOptions {
   baseUrl?: string;
   /** Optional temperature override. Provider-specific support. */
   temperature?: number;
+  /** Runtime session that owns native tool observations and approvals. */
+  sessionId?: string;
+  /** Human objective used to label native tool execution. */
+  objective?: string;
 }
 
 export interface ChatResponse {

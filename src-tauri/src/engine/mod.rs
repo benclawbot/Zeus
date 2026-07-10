@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 use crate::code_intelligence;
 use crate::patch;
 use crate::workspace::{
-    self, AgentStepRequest, ApplyWorkspaceEditRequest, GitOperationRequest,
-    ListWorkspaceDirRequest, ProjectConfigRequest, ReadWorkspaceFileRequest,
-    ShellCommandRequest, TestRunRequest, WriteWorkspaceFileRequest,
+    self, ApplyWorkspaceEditRequest, GitOperationRequest, ListWorkspaceDirRequest,
+    ProjectConfigRequest, ReadWorkspaceFileRequest, ShellCommandRequest, TestRunRequest,
+    WriteWorkspaceFileRequest,
 };
 
 pub const ENGINE_VERSION: &str = "pi-rust-foundation-1";
@@ -55,13 +55,6 @@ pub enum ToolExecutionMode {
     Parallel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum QueueMode {
-    All,
-    OneAtATime,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineToolManifest {
@@ -89,7 +82,6 @@ pub struct AgentEngineHealth {
     pub phase: EnginePhase,
     pub workspace_limits_disabled: bool,
     pub filesystem_scope: &'static str,
-    pub legacy_loop_preserved: bool,
     pub events: Vec<EngineEventType>,
     pub tools: Vec<EngineToolManifest>,
     pub next_implementation: Vec<FollowUpMilestone>,
@@ -114,6 +106,8 @@ pub struct AgentEngineToolBatchRequest {
     pub approved: bool,
     #[serde(default)]
     pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_session_id: Option<String>,
     #[serde(default)]
     pub stop_on_error: bool,
 }
@@ -149,7 +143,6 @@ pub fn health() -> AgentEngineHealth {
         phase: EnginePhase::Idle,
         workspace_limits_disabled: true,
         filesystem_scope: "unrestricted: absolute paths and parent traversal are allowed; workspaceDir is only a relative-path anchor",
-        legacy_loop_preserved: true,
         events: vec![
             EngineEventType::AgentStart,
             EngineEventType::AgentEnd,
@@ -203,7 +196,7 @@ pub fn follow_up_plan() -> Vec<FollowUpMilestone> {
         FollowUpMilestone {
             id: "approval-single-gate",
             title: "Approval as the only gate",
-            outcome: "Make beforeToolCall create/consume PendingApproval; demote approved: bool to legacy compatibility only.",
+            outcome: "Create and consume session-bound approvals before any risky tool execution.",
             files: vec!["src-tauri/src/agent_runtime.rs", "src-tauri/src/engine/approval_gate.rs", "src-tauri/src/workspace.rs"],
         },
         FollowUpMilestone {
@@ -221,14 +214,20 @@ pub fn follow_up_plan() -> Vec<FollowUpMilestone> {
     ]
 }
 
-pub fn execute_tool_batch(request: AgentEngineToolBatchRequest, access_mode: Option<&str>) -> AgentEngineToolBatchResult {
+pub fn execute_tool_batch(
+    request: AgentEngineToolBatchRequest,
+    access_mode: Option<&str>,
+) -> AgentEngineToolBatchResult {
     let mut results = Vec::new();
     let mut files_touched = Vec::new();
     let mut diffs = Vec::new();
     let mut completed = true;
 
     for (index, call) in request.calls.iter().enumerate() {
-        let id = call.id.clone().unwrap_or_else(|| format!("tool-{}", index + 1));
+        let id = call
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("tool-{}", index + 1));
         let result = execute_one_tool(&id, call, &request, access_mode);
         if !result.ok {
             completed = false;
@@ -236,12 +235,19 @@ pub fn execute_tool_batch(request: AgentEngineToolBatchRequest, access_mode: Opt
         if let Some(path) = result.details.get("fileTouched").and_then(Value::as_str) {
             files_touched.push(path.to_string());
         }
-        if let Some(diff) = result.details.get("diff").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+        if let Some(diff) = result
+            .details
+            .get("diff")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
             diffs.push(diff.to_string());
         }
         let should_stop = request.stop_on_error && !result.ok;
         results.push(result);
-        if should_stop { break; }
+        if should_stop {
+            break;
+        }
     }
 
     files_touched.sort();
@@ -269,8 +275,22 @@ fn execute_one_tool(
     access_mode: Option<&str>,
 ) -> AgentEngineToolResult {
     match run_tool(call, batch, access_mode) {
-        Ok((content, details)) => AgentEngineToolResult { id: id.to_string(), name: call.name.clone(), ok: true, content, details, is_error: false },
-        Err(message) => AgentEngineToolResult { id: id.to_string(), name: call.name.clone(), ok: false, content: message.clone(), details: json!({ "error": message }), is_error: true },
+        Ok((content, details)) => AgentEngineToolResult {
+            id: id.to_string(),
+            name: call.name.clone(),
+            ok: true,
+            content,
+            details,
+            is_error: false,
+        },
+        Err(message) => AgentEngineToolResult {
+            id: id.to_string(),
+            name: call.name.clone(),
+            ok: false,
+            content: message.clone(),
+            details: json!({ "error": message }),
+            is_error: true,
+        },
     }
 }
 
@@ -283,44 +303,78 @@ fn run_tool(
         "listDir" | "list_dir" => {
             let path = string_arg(&call.args, "path").unwrap_or_else(|| ".".to_string());
             let max_entries = usize_arg(&call.args, "maxEntries");
-            let out = workspace::list_workspace_dir(ListWorkspaceDirRequest { path, workspace_dir: workspace_dir(&call.args, batch), max_entries }, access_mode)?;
-            Ok((format!("listed {} entries under {}", out.entries.len(), out.path), json!(out)))
+            let out = workspace::list_workspace_dir(
+                ListWorkspaceDirRequest {
+                    path,
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    max_entries,
+                },
+                access_mode,
+            )?;
+            Ok((
+                format!("listed {} entries under {}", out.entries.len(), out.path),
+                json!(out),
+            ))
         }
         "readFile" | "read_file" => {
             let path = required_string_arg(&call.args, "path")?;
             let max_bytes = usize_arg(&call.args, "maxBytes");
-            let out = workspace::read_workspace_file(ReadWorkspaceFileRequest { path, workspace_dir: workspace_dir(&call.args, batch), max_bytes }, access_mode)?;
-            Ok((format!("read {} bytes from {}", out.bytes_read, out.path), json!(out)))
+            let out = workspace::read_workspace_file(
+                ReadWorkspaceFileRequest {
+                    path,
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    max_bytes,
+                },
+                access_mode,
+            )?;
+            Ok((
+                format!("read {} bytes from {}", out.bytes_read, out.path),
+                json!(out),
+            ))
         }
         "writeFile" | "write_file" => {
             let path = required_string_arg(&call.args, "path")?;
             let content = required_string_arg(&call.args, "content")?;
-            let out = workspace::write_workspace_file(WriteWorkspaceFileRequest {
-                path,
-                workspace_dir: workspace_dir(&call.args, batch),
-                content,
-                create: bool_arg(&call.args, "create", true),
-                overwrite: bool_arg(&call.args, "overwrite", true),
-                expected_text: string_arg(&call.args, "expectedText"),
-                approved: batch.approved,
-                approval_id: batch.approval_id.clone(),
-            }, access_mode)?;
-            Ok((format!("wrote {} bytes to {}", out.bytes_written, out.path), json!({ "fileTouched": out.path, "diff": out.diff, "result": out })))
+            let out = workspace::write_workspace_file(
+                WriteWorkspaceFileRequest {
+                    path,
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    content,
+                    create: bool_arg(&call.args, "create", true),
+                    overwrite: bool_arg(&call.args, "overwrite", true),
+                    expected_text: string_arg(&call.args, "expectedText"),
+                    approved: batch.approved,
+                    approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
+                },
+                access_mode,
+            )?;
+            Ok((
+                format!("wrote {} bytes to {}", out.bytes_written, out.path),
+                json!({ "fileTouched": out.path, "diff": out.diff, "result": out }),
+            ))
         }
         "editFile" | "edit_file" => {
             let path = required_string_arg(&call.args, "path")?;
             let find = required_string_arg(&call.args, "find")?;
             let replace = required_string_arg(&call.args, "replace")?;
-            let out = workspace::apply_workspace_edit(ApplyWorkspaceEditRequest {
-                path,
-                workspace_dir: workspace_dir(&call.args, batch),
-                find,
-                replace,
-                replace_all: bool_arg(&call.args, "replaceAll", false),
-                approved: batch.approved,
-                approval_id: batch.approval_id.clone(),
-            }, access_mode)?;
-            Ok((format!("edited {} replacement(s) in {}", out.replacements, out.path), json!({ "fileTouched": out.path, "diff": out.diff, "result": out })))
+            let out = workspace::apply_workspace_edit(
+                ApplyWorkspaceEditRequest {
+                    path,
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    find,
+                    replace,
+                    replace_all: bool_arg(&call.args, "replaceAll", false),
+                    approved: batch.approved,
+                    approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
+                },
+                access_mode,
+            )?;
+            Ok((
+                format!("edited {} replacement(s) in {}", out.replacements, out.path),
+                json!({ "fileTouched": out.path, "diff": out.diff, "result": out }),
+            ))
         }
         "applyPatch" | "apply_patch" => {
             let patch_text = required_string_arg(&call.args, "patch")?;
@@ -330,34 +384,72 @@ fn run_tool(
             let parsed = patch::parse_patch(&patch_text)?;
             let out = patch::apply_patch(&parsed, &PathBuf::from(base_dir))?;
             let touched = out.files_touched.join(", ");
-            Ok((format!("patch applied: {}", out.message), json!({ "fileTouched": touched, "result": out })))
+            Ok((
+                format!("patch applied: {}", out.message),
+                json!({ "fileTouched": touched, "result": out }),
+            ))
         }
         "runCommand" | "run_command" => {
             let program = required_string_arg(&call.args, "program")?;
             let args = string_list_arg(&call.args, "args");
-            let out = workspace::run_shell_command(ShellCommandRequest {
-                program,
-                args,
-                cwd: string_arg(&call.args, "cwd"),
-                workspace_dir: workspace_dir(&call.args, batch),
-                timeout_ms: u64_arg(&call.args, "timeoutMs"),
-                approved: batch.approved,
-                approval_id: batch.approval_id.clone(),
-            }, access_mode)?;
-            Ok((format!("command exited {:?}: {}", out.exit_code, out.program), json!(out)))
+            let out = workspace::run_shell_command(
+                ShellCommandRequest {
+                    program,
+                    args,
+                    cwd: string_arg(&call.args, "cwd"),
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    timeout_ms: u64_arg(&call.args, "timeoutMs"),
+                    approved: batch.approved,
+                    approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
+                },
+                access_mode,
+            )?;
+            Ok((
+                format!("command exited {:?}: {}", out.exit_code, out.program),
+                json!(out),
+            ))
         }
         "gitOp" | "git_op" => {
             let args = string_list_arg(&call.args, "args");
-            let out = workspace::run_git_operation(GitOperationRequest { workspace_dir: workspace_dir(&call.args, batch), args, timeout_ms: u64_arg(&call.args, "timeoutMs") }, access_mode)?;
+            let out = workspace::run_git_operation(
+                GitOperationRequest {
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    args,
+                    timeout_ms: u64_arg(&call.args, "timeoutMs"),
+                    approved: batch.approved,
+                    approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
+                },
+                access_mode,
+            )?;
             Ok((format!("git exited {:?}", out.exit_code), json!(out)))
         }
         "runTest" | "run_test" => {
             let args = string_list_arg(&call.args, "args");
-            let out = workspace::run_project_test(TestRunRequest { workspace_dir: workspace_dir(&call.args, batch), args, timeout_ms: u64_arg(&call.args, "timeoutMs") }, access_mode)?;
-            Ok((format!("tests exited {:?}: passed={}, failed={}", out.exit_code, out.passed_count, out.failed_count), json!(out)))
+            let out = workspace::run_project_test(
+                TestRunRequest {
+                    workspace_dir: workspace_dir(&call.args, batch),
+                    args,
+                    timeout_ms: u64_arg(&call.args, "timeoutMs"),
+                },
+                access_mode,
+            )?;
+            Ok((
+                format!(
+                    "tests exited {:?}: passed={}, failed={}",
+                    out.exit_code, out.passed_count, out.failed_count
+                ),
+                json!(out),
+            ))
         }
         "loadProjectConfig" | "load_project_config" => {
-            let out = workspace::load_project_config(ProjectConfigRequest { workspace_dir: workspace_dir(&call.args, batch) }, access_mode)?;
+            let out = workspace::load_project_config(
+                ProjectConfigRequest {
+                    workspace_dir: workspace_dir(&call.args, batch),
+                },
+                access_mode,
+            )?;
             Ok((format!("loaded project config {}", out.path), json!(out)))
         }
         "searchCode" | "search" | "search_code" => {
@@ -365,12 +457,21 @@ fn run_tool(
             let root = string_arg(&call.args, "root")
                 .or_else(|| workspace_dir(&call.args, batch))
                 .unwrap_or_else(|| ".".to_string());
-            let max = usize_arg(&call.args, "maxResults").unwrap_or(50).clamp(1, 200);
-            let seen = string_list_arg(&call.args, "seenFiles").into_iter().collect::<HashSet<_>>();
+            let max = usize_arg(&call.args, "maxResults")
+                .unwrap_or(50)
+                .clamp(1, 200);
+            let seen = string_list_arg(&call.args, "seenFiles")
+                .into_iter()
+                .collect::<HashSet<_>>();
             let mut cache = code_intelligence::SymbolCache::default();
-            cache.ensure(&PathBuf::from(root)).map_err(|e| format!("build symbol index: {e}"))?;
+            cache
+                .ensure(&PathBuf::from(root))
+                .map_err(|e| format!("build symbol index: {e}"))?;
             let hits = code_intelligence::search(&cache.index, &query, &seen, max);
-            Ok((format!("search returned {} hits for {:?}", hits.len(), query), json!({ "query": query, "hits": hits })))
+            Ok((
+                format!("search returned {} hits for {:?}", hits.len(), query),
+                json!({ "query": query, "hits": hits }),
+            ))
         }
         "webSearch" | "web_search" => {
             let query = required_string_arg(&call.args, "query")?;
@@ -378,30 +479,21 @@ fn run_tool(
             let request = crate::web_search::WebSearchRequest { query, max_results };
             let result = tauri::async_runtime::block_on(crate::web_search::web_search(request))
                 .map_err(|e| format!("web search: {e}"))?;
-            let summary = format!("web search returned {} hit(s) for {:?}", result.hits.len(), result.query);
+            let summary = format!(
+                "web search returned {} hit(s) for {:?}",
+                result.hits.len(),
+                result.query
+            );
             Ok((summary, json!(result)))
-        }
-        "agentTask" | "agent_task" => {
-            let steps_value = call.args.get("steps").cloned().ok_or_else(|| "agentTask requires steps".to_string())?;
-            let steps: Vec<AgentStepRequest> = serde_json::from_value(steps_value).map_err(|e| format!("parse steps: {e}"))?;
-            let out = workspace::run_agent_task(workspace::AgentRunRequest {
-                objective: string_arg(&call.args, "objective").unwrap_or_else(|| batch.objective.clone()),
-                workspace_dir: workspace_dir(&call.args, batch),
-                steps,
-                approved: batch.approved,
-                approval_id: batch.approval_id.clone(),
-                max_correction_steps: usize_arg(&call.args, "maxCorrectionSteps"),
-                stop_on_error: bool_arg(&call.args, "stopOnError", batch.stop_on_error),
-                prior_failures: 0,
-            }, access_mode);
-            Ok((out.summary.clone(), json!(out)))
         }
         other => Err(format!("Unknown engine tool '{other}'.")),
     }
 }
 
 fn workspace_dir(args: &Value, batch: &AgentEngineToolBatchRequest) -> Option<String> {
-    string_arg(args, "workspaceDir").or_else(|| string_arg(args, "root")).or_else(|| batch.workspace_dir.clone())
+    string_arg(args, "workspaceDir")
+        .or_else(|| string_arg(args, "root"))
+        .or_else(|| batch.workspace_dir.clone())
 }
 
 fn required_string_arg(args: &Value, name: &str) -> Result<String, String> {
@@ -409,7 +501,11 @@ fn required_string_arg(args: &Value, name: &str) -> Result<String, String> {
 }
 
 fn string_arg(args: &Value, name: &str) -> Option<String> {
-    args.get(name).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+    args.get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn bool_arg(args: &Value, name: &str, default: bool) -> bool {
@@ -427,7 +523,13 @@ fn u64_arg(args: &Value, name: &str) -> Option<u64> {
 fn string_list_arg(args: &Value, name: &str) -> Vec<String> {
     args.get(name)
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -440,7 +542,10 @@ mod tests {
     use serde_json::json;
 
     fn temp_root(name: &str) -> PathBuf {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
         let dir = std::env::temp_dir().join(format!("zeus-engine-{name}-{stamp}"));
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -452,7 +557,10 @@ mod tests {
         assert!(health.ok);
         assert!(health.workspace_limits_disabled);
         assert!(health.tools.iter().any(|tool| tool.name == "readFile"));
-        assert!(health.next_implementation.iter().any(|step| step.id == "provider-native-tool-calls"));
+        assert!(health
+            .next_implementation
+            .iter()
+            .any(|step| step.id == "provider-native-tool-calls"));
     }
 
     #[test]
@@ -470,13 +578,17 @@ mod tests {
             }],
             approved: true,
             approval_id: None,
+            approval_session_id: None,
             stop_on_error: true,
         };
         let result = execute_tool_batch(request, Some("Full"));
         assert!(result.completed, "{result:?}");
         assert_eq!(result.results[0].id, "read-1");
         assert!(result.results[0].content.contains("read"));
-        assert!(result.results[0].details["content"].as_str().unwrap().contains("unrestricted read works"));
+        assert!(result.results[0].details["content"]
+            .as_str()
+            .unwrap()
+            .contains("unrestricted read works"));
     }
 
     #[test]
@@ -485,11 +597,20 @@ mod tests {
             objective: "bad tool".to_string(),
             workspace_dir: None,
             calls: vec![
-                AgentEngineToolCall { id: None, name: "nope".to_string(), args: json!({}) },
-                AgentEngineToolCall { id: None, name: "listDir".to_string(), args: json!({ "path": "." }) },
+                AgentEngineToolCall {
+                    id: None,
+                    name: "nope".to_string(),
+                    args: json!({}),
+                },
+                AgentEngineToolCall {
+                    id: None,
+                    name: "listDir".to_string(),
+                    args: json!({ "path": "." }),
+                },
             ],
             approved: false,
             approval_id: None,
+            approval_session_id: None,
             stop_on_error: true,
         };
         let result = execute_tool_batch(request, Some("Full"));

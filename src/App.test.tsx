@@ -138,8 +138,8 @@ describe("App", () => {
 
     const composer = screen.getByLabelText("Message Zeus") as HTMLTextAreaElement;
 
-    // The composer hint text should advertise the keyboard contract.
-    expect(screen.getByText(/Enter sends.*Shift\+Enter adds a line/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Enter sends.*Shift\+Enter adds a line/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access mode")).not.toBeInTheDocument();
 
     // Plain Enter triggers handleSend → dispatchChat → sendMinimaxChat.
     // sendMinimaxChat is mocked above (it would otherwise throw in jsdom
@@ -183,28 +183,9 @@ describe("App", () => {
     expect(screen.getByRole("img", { name: "bug-screenshot.png preview" })).toBeInTheDocument();
   });
 
-  it("exposes the access mode as a native listbox in the composer", () => {
+  it("keeps access-mode policy controls out of the composer", () => {
     render(<App />);
-
-    // The composer replaces the old @ button with a listbox that drives
-    // the same accessMode state the right panel used to.
-    const select = screen.getByLabelText("Access mode") as HTMLSelectElement;
-    expect(select).toBeInTheDocument();
-    expect(select.tagName).toBe("SELECT");
-    // All four modes are present, in the canonical order.
-    const options = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
-    expect(options).toEqual(["Full", "Local", "Review", "Locked"]);
-    // Default is "Full".
-    expect(select.value).toBe("Full");
-  });
-
-  it("changing the access-mode listbox updates the state", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    const select = screen.getByLabelText("Access mode") as HTMLSelectElement;
-    await user.selectOptions(select, "Locked");
-    expect(select.value).toBe("Locked");
+    expect(screen.queryByLabelText("Access mode")).not.toBeInTheDocument();
   });
 
   it("wires navigation and inspector shortcuts to state-backed views", async () => {

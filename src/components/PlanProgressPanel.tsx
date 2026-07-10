@@ -2,27 +2,13 @@ import { Check } from "lucide-react";
 import type { ReactNode } from "react";
 import {
   derivePlanFromObjective,
-  updatePlanFromObservations,
   type PlanStatus,
   type RuntimePlan,
-  type ToolObservation,
 } from "../agentRuntimeDeepLoop";
-
-/**
- * Per-step status shape produced by the most recent agent run, as
- * stored on `ChatMessage.agentProgress`. We only need a narrow slice
- * here to feed `updatePlanFromObservations`.
- */
-export interface AgentRunSummary {
-  steps: ReadonlyArray<{ index: number; label: string; status: "ok" | "failed" | "pending" | "running"; result?: string }>;
-  partial: boolean;
-}
 
 interface PlanProgressPanelProps {
   /** Most recent user message text. Empty string means "no objective yet". */
   latestUserObjective: string;
-  /** Summary of the most recent agent run, if any. Used to mark plan steps done/failed. */
-  lastAgentRun?: AgentRunSummary | null;
   /** True when the last tool/agent invocation failed and we're in recovery. */
   lastToolFailed?: boolean;
   /**
@@ -46,18 +32,8 @@ function statusLabel(status: PlanStatus): string {
   return status;
 }
 
-function observationsFromAgentRun(run: AgentRunSummary | null | undefined): ToolObservation[] {
-  if (!run) return [];
-  return run.steps.map((step) => ({
-    label: step.label,
-    ok: step.status === "ok",
-    message: step.result ?? (step.status === "failed" ? "step failed" : "ok"),
-  }));
-}
-
 function buildPlan(
   latestUserObjective: string,
-  lastAgentRun: AgentRunSummary | null | undefined,
   lastToolFailed: boolean | undefined,
   runtimePlan: RuntimePlan | null | undefined,
 ): RuntimePlan | null {
@@ -70,7 +46,7 @@ function buildPlan(
   const basePlan = runtimePlan && runtimePlan.steps.length > 0
     ? { ...runtimePlan, objective: runtimePlan.objective || objective }
     : derivePlanFromObjective(objective);
-  const updated = updatePlanFromObservations(basePlan, observationsFromAgentRun(lastAgentRun));
+  const updated = basePlan;
   if (lastToolFailed) {
     // Heuristic plan: a "recover" step is always present, target it.
     // LLM plan: promote the last in-progress or todo step into recovery.
@@ -95,11 +71,10 @@ function buildPlan(
 
 export function PlanProgressPanel({
   latestUserObjective,
-  lastAgentRun,
   lastToolFailed,
   runtimePlan,
 }: PlanProgressPanelProps): ReactNode {
-  const plan = buildPlan(latestUserObjective, lastAgentRun, lastToolFailed, runtimePlan);
+  const plan = buildPlan(latestUserObjective, lastToolFailed, runtimePlan);
   const total = plan?.steps.length ?? 0;
   const completed = plan?.steps.filter((step) => step.status === "done").length ?? 0;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;

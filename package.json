@@ -10,6 +10,7 @@
     "sidecar:build:win": "powershell -ExecutionPolicy Bypass -File scripts/build-ddgs-sidecar.ps1",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "browser:driver:test": "node scripts/zeus-browser-driver.test.mjs",
     "browser:smoke": "node scripts/browser-smoke.mjs",
     "browser:smoke:visible": "ZEUS_BROWSER_VISIBLE=1 node scripts/browser-smoke.mjs",
     "tauri": "tauri",

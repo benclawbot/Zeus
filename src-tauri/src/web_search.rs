@@ -24,17 +24,18 @@
 //! order so a single transient failure doesn't break the agent loop.
 //! An explicit `ZEUS_SEARCH_PROVIDER` always wins (no fallback).
 
-use std::process::Stdio;
-use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::process::Stdio;
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
-const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) ZeusBot/1.0 (+https://github.com/benclawbot/Zeus)";
+const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) ZeusBot/1.0 (+https://github.com/benclawbot/Zeus)";
 
 /// Hard cap on how many hits we will return. The DDG HTML page rarely
 /// surfaces more than ~30 useful links anyway, but we trim so the
@@ -68,8 +69,12 @@ fn select_provider(name: Option<&str>) -> &'static str {
             _ => "duckduckgo",
         };
     }
-    if resolve_ddgs_bin().is_some() { return "ddgs"; }
-    if std::env::var("ZEUS_SEARXNG_URL").is_ok() { return "searxng"; }
+    if resolve_ddgs_bin().is_some() {
+        return "ddgs";
+    }
+    if std::env::var("ZEUS_SEARXNG_URL").is_ok() {
+        return "searxng";
+    }
     "duckduckgo"
 }
 
@@ -78,12 +83,19 @@ fn select_provider(name: Option<&str>) -> &'static str {
 /// the user can also install ddgs via `pip` / `uv` which lands it as a
 /// Python script wrapper.
 fn ddgs_candidate_names() -> &'static [&'static str] {
-    if cfg!(windows) { &["ddgs.exe", "ddgs", "ddgs.bat", "ddgs.cmd"] } else { &["ddgs"] }
+    if cfg!(windows) {
+        &["ddgs.exe", "ddgs", "ddgs.bat", "ddgs.cmd"]
+    } else {
+        &["ddgs"]
+    }
 }
 
 /// Returns an error if the body looks like DDG's bot challenge page.
 fn check_ddg_challenge(body: &str) -> Result<(), String> {
-    if DDG_CHALLENGE_MARKERS.iter().any(|marker| body.contains(marker)) {
+    if DDG_CHALLENGE_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker))
+    {
         return Err(
             "DuckDuckGo is blocking automated requests from this agent (bot-challenge page returned). \
              Install the ddgs Python package (`pip install ddgs`) and add its bin to PATH, \
@@ -169,10 +181,16 @@ pub async fn web_search(request: WebSearchRequest) -> Result<WebSearchResult, St
             }
         }
     }
-    Err(format!("all search providers failed; last error: {last_err}"))
+    Err(format!(
+        "all search providers failed; last error: {last_err}"
+    ))
 }
 
-async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) -> Result<WebSearchResult, String> {
+async fn duckduckgo_search(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> Result<WebSearchResult, String> {
     let form = [("q", query), ("kl", "us-en")];
     let response = client
         .post(DEFAULT_ENDPOINT)
@@ -181,7 +199,10 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) 
         .await
         .map_err(|e| format!("duckduckgo request failed: {e}"))?;
     let status = response.status();
-    let body = response.text().await.map_err(|e| format!("read duckduckgo response: {e}"))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("read duckduckgo response: {e}"))?;
     if !status.is_success() {
         return Err(format!("duckduckgo responded with status {status}"));
     }
@@ -192,7 +213,12 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str, limit: usize) 
     } else {
         format!("DuckDuckGo returned {} hit(s) for \"{query}\".", hits.len())
     };
-    Ok(WebSearchResult { provider: "duckduckgo", query: query.to_string(), hits, message })
+    Ok(WebSearchResult {
+        provider: "duckduckgo",
+        query: query.to_string(),
+        hits,
+        message,
+    })
 }
 
 /// ddgs sidecar backend. Zeus ships a self-contained `ddgs` exe as a
@@ -225,8 +251,7 @@ async fn ddgs_search(query: &str, limit: usize) -> Result<WebSearchResult, Strin
         {
             cmd.creation_flags(0x08000000);
         }
-        cmd
-            .stdout(Stdio::piped())
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .map_err(|e| format!("spawn ddgs: {e}"))?
@@ -245,7 +270,12 @@ async fn ddgs_search(query: &str, limit: usize) -> Result<WebSearchResult, Strin
     } else {
         format!("ddgs returned {} hit(s) for \"{query}\".", hits.len())
     };
-    Ok(WebSearchResult { provider: "ddgs", query: query.to_string(), hits, message })
+    Ok(WebSearchResult {
+        provider: "ddgs",
+        query: query.to_string(),
+        hits,
+        message,
+    })
 }
 
 /// Locate the ddgs sidecar. Resolution order:
@@ -267,7 +297,7 @@ fn resolve_ddgs_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for name in ddgs_candidate_names() {
-                let candidate = dir.join(&name);
+                let candidate = dir.join(name);
                 if candidate.is_file() {
                     return Some(candidate);
                 }
@@ -276,7 +306,11 @@ fn resolve_ddgs_bin() -> Option<std::path::PathBuf> {
     }
     // Last-resort PATH walk. Useful when developing from `cargo run`.
     let path = std::env::var_os("PATH")?;
-    let extensions: &[&str] = if cfg!(windows) { &["", ".exe", ".bat", ".cmd"] } else { &[""] };
+    let extensions: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".bat", ".cmd"]
+    } else {
+        &[""]
+    };
     for dir in std::env::split_paths(&path) {
         for ext in extensions {
             let candidate = if ext.is_empty() {
@@ -307,7 +341,13 @@ pub fn parse_ddgs_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
     let parsed: Vec<DdgsEntry> = match serde_json::from_str(body) {
         Ok(value) => value,
         Err(err) => {
-            eprintln!("ddgs json parse failed: {err}; body preview: {}", body.chars().take(200).collect::<String>().replace('\n', " "));
+            eprintln!(
+                "ddgs json parse failed: {err}; body preview: {}",
+                body.chars()
+                    .take(200)
+                    .collect::<String>()
+                    .replace('\n', " ")
+            );
             return Vec::new();
         }
     };
@@ -315,7 +355,9 @@ pub fn parse_ddgs_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
         .into_iter()
         .filter_map(|entry| {
             let url = entry.href.unwrap_or_default();
-            if url.is_empty() { return None; }
+            if url.is_empty() {
+                return None;
+            }
             let title = entry.title.unwrap_or_default();
             let snippet = entry.body.unwrap_or_default();
             let snippet = if snippet.len() > SNIPPET_TRUNCATE_CHARS {
@@ -323,7 +365,11 @@ pub fn parse_ddgs_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
             } else {
                 snippet
             };
-            Some(WebSearchHit { title, url, snippet })
+            Some(WebSearchHit {
+                title,
+                url,
+                snippet,
+            })
         })
         .take(limit.max(1))
         .collect()
@@ -333,18 +379,30 @@ pub fn parse_ddgs_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
 /// running SearXNG instance with JSON output enabled (`server:
 /// {"json": true}` in settings.yml). Uses the documented `/search`
 /// endpoint with `format=json`.
-async fn searxng_search(client: &reqwest::Client, query: &str, limit: usize) -> Result<WebSearchResult, String> {
+async fn searxng_search(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> Result<WebSearchResult, String> {
     let base = std::env::var("ZEUS_SEARXNG_URL")
         .map_err(|_| "ZEUS_SEARCH_PROVIDER=searxng requires ZEUS_SEARXNG_URL (e.g. https://searx.example.com).".to_string())?;
     let endpoint = format!("{}/search", base.trim_end_matches('/'));
     let response = client
         .get(&endpoint)
-        .query(&[("q", query), ("format", "json"), ("categories", "general"), ("language", "en-US")])
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("categories", "general"),
+            ("language", "en-US"),
+        ])
         .send()
         .await
         .map_err(|e| format!("searxng request failed: {e}"))?;
     let status = response.status();
-    let body = response.text().await.map_err(|e| format!("read searxng response: {e}"))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("read searxng response: {e}"))?;
     if !status.is_success() {
         return Err(format!("searxng responded with status {status}"));
     }
@@ -354,7 +412,12 @@ async fn searxng_search(client: &reqwest::Client, query: &str, limit: usize) -> 
     } else {
         format!("SearXNG returned {} hit(s) for \"{query}\".", hits.len())
     };
-    Ok(WebSearchResult { provider: "searxng", query: query.to_string(), hits, message })
+    Ok(WebSearchResult {
+        provider: "searxng",
+        query: query.to_string(),
+        hits,
+        message,
+    })
 }
 
 /// Subset of SearXNG's JSON result shape. We only deserialize the
@@ -392,7 +455,9 @@ pub fn parse_searxng_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
         .into_iter()
         .filter_map(|entry| {
             let url = entry.url.unwrap_or_default();
-            if url.is_empty() { return None; }
+            if url.is_empty() {
+                return None;
+            }
             let title = entry.title.unwrap_or_default();
             let snippet = entry.content.unwrap_or_default();
             let snippet = if snippet.len() > SNIPPET_TRUNCATE_CHARS {
@@ -400,7 +465,11 @@ pub fn parse_searxng_json(body: &str, limit: usize) -> Vec<WebSearchHit> {
             } else {
                 snippet
             };
-            Some(WebSearchHit { title, url, snippet })
+            Some(WebSearchHit {
+                title,
+                url,
+                snippet,
+            })
         })
         .take(limit.max(1))
         .collect()
@@ -429,13 +498,15 @@ fn validate_query(query: &str) -> Result<(), String> {
 // `result__url` for the visible URL). They have been stable on the
 // `/html/` endpoint for years.
 static RESULT_LINK_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).expect("ddg result link regex")
+    Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+        .expect("ddg result link regex")
 });
 static RESULT_URL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?s)<a[^>]*class="result__url"[^>]*>(.*?)</a>"#).expect("ddg result url regex")
 });
 static RESULT_SNIPPET_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?s)<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).expect("ddg result snippet regex")
+    Regex::new(r#"(?s)<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#)
+        .expect("ddg result snippet regex")
 });
 static HTML_TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").expect("html strip regex"));
 static WHITESPACE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("whitespace regex"));
@@ -467,22 +538,44 @@ pub fn parse_ddg_html(html: &str, limit: usize) -> Vec<WebSearchHit> {
     let mut seen_urls: Vec<String> = Vec::new();
     for cap in RESULT_LINK_RE.captures_iter(html) {
         let raw_url = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        if raw_url.is_empty() { continue; }
+        if raw_url.is_empty() {
+            continue;
+        }
         let url = normalize_url(raw_url);
-        if url.is_empty() || seen_urls.contains(&url) { continue; }
+        if url.is_empty() || seen_urls.contains(&url) {
+            continue;
+        }
         let title = strip_tags(cap.get(2).map(|m| m.as_str()).unwrap_or(""));
         let after = &html[cap.get(0).map(|m| m.end()).unwrap_or(0)..];
-        let visible_url = RESULT_URL_RE.find(after).map(|m| strip_tags(m.as_str())).unwrap_or_default();
-        let snippet = RESULT_SNIPPET_RE.find(after).map(|m| strip_tags(m.as_str())).unwrap_or_default();
+        let visible_url = RESULT_URL_RE
+            .find(after)
+            .map(|m| strip_tags(m.as_str()))
+            .unwrap_or_default();
+        let snippet = RESULT_SNIPPET_RE
+            .find(after)
+            .map(|m| strip_tags(m.as_str()))
+            .unwrap_or_default();
         let snippet = if snippet.len() > SNIPPET_TRUNCATE_CHARS {
             format!("{}…", &snippet[..SNIPPET_TRUNCATE_CHARS])
         } else {
             snippet
         };
-        if title.is_empty() && snippet.is_empty() && visible_url.is_empty() { continue; }
-        hits.push(WebSearchHit { title, url: if url.is_empty() { visible_url.clone() } else { url.clone() }, snippet });
+        if title.is_empty() && snippet.is_empty() && visible_url.is_empty() {
+            continue;
+        }
+        hits.push(WebSearchHit {
+            title,
+            url: if url.is_empty() {
+                visible_url.clone()
+            } else {
+                url.clone()
+            },
+            snippet,
+        });
         seen_urls.push(url);
-        if hits.len() >= limit { break; }
+        if hits.len() >= limit {
+            break;
+        }
     }
     hits
 }
@@ -588,7 +681,10 @@ mod tests {
             normalize_url("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ffoo&rut=abc"),
             "https://example.com/foo"
         );
-        assert_eq!(normalize_url("https://example.org/bar"), "https://example.org/bar");
+        assert_eq!(
+            normalize_url("https://example.org/bar"),
+            "https://example.org/bar"
+        );
     }
 
     #[test]
@@ -604,7 +700,10 @@ mod tests {
         let result = check_ddg_challenge(challenge_body);
         assert!(result.is_err(), "expected challenge detection to fire");
         let message = result.unwrap_err();
-        assert!(message.contains("blocking automated requests"), "unexpected message: {message}");
+        assert!(
+            message.contains("blocking automated requests"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
@@ -660,7 +759,10 @@ mod tests {
 
     #[test]
     fn searxng_truncates_long_snippets() {
-        let body = format!(r#"{{"results":[{{"title":"Long","url":"https://example.com","content":"{}"}}]}}"#, "x".repeat(SNIPPET_TRUNCATE_CHARS + 50));
+        let body = format!(
+            r#"{{"results":[{{"title":"Long","url":"https://example.com","content":"{}"}}]}}"#,
+            "x".repeat(SNIPPET_TRUNCATE_CHARS + 50)
+        );
         let hits = parse_searxng_json(&body, MAX_HITS);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.ends_with('…'));
@@ -672,7 +774,10 @@ mod tests {
         // SearXNG with JSON output disabled returns HTML error pages.
         // The parser should fail soft (empty hits) rather than
         // bubbling up a serde error to the caller.
-        let hits = parse_searxng_json("<!DOCTYPE html><html><body>JSON output not enabled</body></html>", MAX_HITS);
+        let hits = parse_searxng_json(
+            "<!DOCTYPE html><html><body>JSON output not enabled</body></html>",
+            MAX_HITS,
+        );
         assert!(hits.is_empty());
     }
 
@@ -687,7 +792,10 @@ mod tests {
         let hits = parse_ddgs_json(DDGS_FIXTURE, MAX_HITS);
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].title, "Async Rust: What is a runtime?");
-        assert_eq!(hits[0].url, "https://kerkour.com/rust-async-await-what-is-a-runtime");
+        assert_eq!(
+            hits[0].url,
+            "https://kerkour.com/rust-async-await-what-is-a-runtime"
+        );
         assert_eq!(hits[1].url, "https://corrode.dev/blog/async/");
     }
 
@@ -699,7 +807,10 @@ mod tests {
 
     #[test]
     fn ddgs_truncates_long_snippets() {
-        let body = format!(r#"[{{"title":"Long","href":"https://example.com","body":"{}"}}]"#, "x".repeat(SNIPPET_TRUNCATE_CHARS + 50));
+        let body = format!(
+            r#"[{{"title":"Long","href":"https://example.com","body":"{}"}}]"#,
+            "x".repeat(SNIPPET_TRUNCATE_CHARS + 50)
+        );
         let hits = parse_ddgs_json(&body, MAX_HITS);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.ends_with('…'));

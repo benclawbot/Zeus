@@ -1,5 +1,5 @@
 // Barrel re-export so existing imports (`import { dispatchChat } from "./providers/registry"`)
-// keep working after the split into `chatTypes` / `toolBlockParser` / `toolDispatch` /
+// keep working after the split into `chatTypes` / `toolDispatch` /
 // `providerRegistry`. New code should import from the specific module it needs.
 
 export type {
@@ -14,24 +14,9 @@ export type {
 export { textFromContent } from "./chatTypes";
 
 export {
-  RAW_BODY_END_MARKER,
-  extractToolBlocks,
-  parseToolBlocks,
-  parseToolSteps,
-  type ParsedToolStep,
-  type SearchStep,
-  type RawToolBlock,
-} from "./toolBlockParser";
-
-export {
   dispatchChat,
   withWorkspaceToolPrompt,
-  runToolSteps,
-  formatAgentRunResult,
-  formatStepLog,
-  MAX_TOOL_TURNS,
-  MAX_TOOL_OBSERVATION_CHARS,
-  MAX_REPEATED_TOOL_BLOCKS,
+  NATIVE_WORKSPACE_TOOL_PROMPT,
 } from "./toolDispatch";
 
 export { findProvider, listProviders } from "./providerRegistry";

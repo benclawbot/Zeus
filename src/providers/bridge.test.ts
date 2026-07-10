@@ -25,6 +25,7 @@ import { describe, expect, it } from "vitest";
 const DECLARED_COMMANDS = [
   // lib.rs (top-level Tauri commands)
   "send_chat",
+  "agent_runtime_execute_turn",
   "test_provider",
   "get_provider_keys",
   "set_provider_keys",
@@ -47,7 +48,6 @@ const DECLARED_COMMANDS = [
   "read_workspace_file",
   "write_workspace_file",
   "apply_workspace_edit",
-  "run_agent_task",
   "list_workspace_dir",
   "load_project_config",
   "run_git_operation",

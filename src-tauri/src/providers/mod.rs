@@ -144,7 +144,9 @@ pub fn message_text(content: &serde_json::Value) -> String {
             .filter_map(|part| {
                 part.get("type").and_then(|t| t.as_str()).and_then(|t| {
                     if t == "text" {
-                        part.get("text").and_then(|v| v.as_str()).map(str::to_string)
+                        part.get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
                     } else {
                         None
                     }
@@ -278,7 +280,9 @@ pub async fn dispatch_chat(
         .ok_or_else(|| ProviderError::Unknown(request.provider.clone()))?;
     let model = extract_model(request);
     let base_url = extract_base_url(request);
-    provider.send(&request.messages, model, base_url, skill_message).await
+    provider
+        .send(&request.messages, model, base_url, skill_message)
+        .await
 }
 
 /// Read the model id out of the provider-specific options bag. Each
@@ -354,7 +358,10 @@ mod tests {
             skill_id: None,
             options: serde_json::json!({ "baseUrl": "https://api.example.test/v1" }),
         };
-        assert_eq!(extract_base_url(&request), Some("https://api.example.test/v1"));
+        assert_eq!(
+            extract_base_url(&request),
+            Some("https://api.example.test/v1")
+        );
     }
 
     #[test]

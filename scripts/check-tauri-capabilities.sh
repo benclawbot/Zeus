@@ -5,7 +5,11 @@ set -euo pipefail
 # adding a new plugin permission so the guard stays meaningful.
 ALLOWED='["core:default","dialog:default"]'
 for f in src-tauri/capabilities/*.json; do
-  ACTUAL=$(jq -c '.permissions' "$f")
+  if command -v jq >/dev/null 2>&1; then
+    ACTUAL=$(jq -c '.permissions' "$f")
+  else
+    ACTUAL=$(node -e 'const fs = require("fs"); const file = process.argv[1]; process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(file, "utf8")).permissions));' "$f")
+  fi
   if [[ "$ACTUAL" != "$ALLOWED" ]]; then
     echo "FAIL: $f grants $ACTUAL — expected exactly $ALLOWED"
     exit 1

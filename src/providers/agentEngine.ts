@@ -25,7 +25,6 @@ export interface AgentEngineHealth {
   phase: EnginePhase;
   workspaceLimitsDisabled: boolean;
   filesystemScope: string;
-  legacyLoopPreserved: boolean;
   events: string[];
   tools: EngineToolManifest[];
   nextImplementation: FollowUpMilestone[];
