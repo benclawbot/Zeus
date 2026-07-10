@@ -1113,4 +1113,15 @@ mod tests {
             ApprovalCheck::Unknown
         );
     }
+
+    #[test]
+    fn browser_driver_script_resolves_to_a_shipped_file() {
+        let script = browser_driver_script_path();
+
+        assert!(
+            script.is_file(),
+            "browser driver is missing from the shipped project: {}",
+            script.display()
+        );
+    }
 }

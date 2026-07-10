@@ -1594,9 +1594,19 @@ pub fn run() {
             seed_default_state(&conn)
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("seed: {e}").into() })?;
             let runtime_path = db_path.with_file_name("agent-runtime.json");
-            let runtime = AgentRuntimeService::load_or_create(runtime_path).map_err(
-                |e| -> Box<dyn std::error::Error> { format!("runtime open: {e}").into() },
-            )?;
+            let bundled_driver = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|directory| directory.join("scripts").join("zeus-browser-driver.mjs"))
+                .filter(|path| path.is_file());
+            let runtime = match bundled_driver {
+                Some(driver_path) => {
+                    AgentRuntimeService::load_or_create_with(runtime_path, driver_path)
+                }
+                None => AgentRuntimeService::load_or_create(runtime_path),
+            }
+            .map_err(|e| -> Box<dyn std::error::Error> { format!("runtime open: {e}").into() })?;
             app.manage(runtime);
             app.manage(AppState {
                 db: Arc::new(Mutex::new(conn)),
