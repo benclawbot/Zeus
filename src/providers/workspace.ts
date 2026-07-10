@@ -165,9 +165,6 @@ export interface AgentRunRequest {
    *  id down to the Rust runtime, which consumes or honors it. */
   approvalId?: string;
   approvalSessionId?: string;
-  /** Hard cap on the self-correction iterations the agent loop is
-   *  allowed to perform. Defaults to 5 in the Rust runtime. */
-  maxCorrectionSteps?: number;
   stopOnError?: boolean;
 }
 

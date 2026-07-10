@@ -55,13 +55,6 @@ pub enum ToolExecutionMode {
     Parallel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum QueueMode {
-    All,
-    OneAtATime,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineToolManifest {
@@ -512,7 +505,6 @@ fn run_tool(
                     approved: batch.approved,
                     approval_id: batch.approval_id.clone(),
                     approval_session_id: batch.approval_session_id.clone(),
-                    max_correction_steps: usize_arg(&call.args, "maxCorrectionSteps"),
                     stop_on_error: bool_arg(&call.args, "stopOnError", batch.stop_on_error),
                     prior_failures: 0,
                 },

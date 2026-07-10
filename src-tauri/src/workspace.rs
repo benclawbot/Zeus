@@ -205,11 +205,6 @@ pub struct AgentRunRequest {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub approval_session_id: Option<String>,
-    /// Hard cap on the total number of self-correction iterations the
-    /// agent is allowed to run after the initial plan executes. Defaults
-    /// to 5 so a stuck agent doesn't loop forever.
-    #[serde(default)]
-    pub max_correction_steps: Option<usize>,
     #[serde(default)]
     pub stop_on_error: bool,
     #[serde(default)]
@@ -876,6 +871,12 @@ pub fn write_workspace_file(
             request.path
         ));
     }
+    if existed && !request.overwrite {
+        return Err(format!(
+            "Refusing to overwrite '{}' without overwrite=true.",
+            request.path
+        ));
+    }
     if let Some(expected) = request.expected_text.as_deref() {
         let current =
             fs::read_to_string(&path).map_err(|e| format!("read '{}': {e}", request.path))?;
@@ -1402,6 +1403,7 @@ fn workspace_root(session_workspace: Option<&str>) -> Result<PathBuf, String> {
         .map_err(|e| format!("resolve workspace root '{}': {e}", root.display()))
 }
 
+#[cfg(test)]
 fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     resolve_workspace_path_with_mode(root, relative, None)
 }
@@ -1976,7 +1978,6 @@ mod tests {
                 approved: false,
                 approval_id: None,
                 approval_session_id: None,
-                max_correction_steps: None,
                 stop_on_error: true,
                 prior_failures: 1,
             },
@@ -2077,7 +2078,6 @@ mod tests {
                 approved: false,
                 approval_id: None,
                 approval_session_id: None,
-                max_correction_steps: None,
                 stop_on_error: true,
                 prior_failures: 0,
             },
@@ -2120,7 +2120,6 @@ mod tests {
                 approved: false,
                 approval_id: None,
                 approval_session_id: None,
-                max_correction_steps: None,
                 stop_on_error: true,
                 prior_failures: 0,
             },

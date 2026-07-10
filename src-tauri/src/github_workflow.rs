@@ -4,7 +4,6 @@
 // client. Every operation routes through `gh` so the user's existing
 // GitHub auth is reused.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -214,9 +213,7 @@ fn run_gh(
         .wait_with_output()
         .map_err(|e| format!("collect gh: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut truncated = false;
     let stdout = if stdout.len() > MAX_CAPTURE_BYTES {
-        truncated = true;
         format!("{}\n...[truncated]", &stdout[..MAX_CAPTURE_BYTES])
     } else {
         stdout
@@ -306,7 +303,7 @@ pub fn commit_staged(request: CommitRequest) -> Result<CommitResult, String> {
         let _ = child.wait();
     }
     // Commit via git directly so we control the output parsing.
-    let mut child = Command::new("git")
+    let child = Command::new("git")
         .args(["commit", "-m", &request.message])
         .current_dir(&root)
         .stdin(Stdio::null())
@@ -326,7 +323,7 @@ pub fn commit_staged(request: CommitRequest) -> Result<CommitResult, String> {
         });
     }
     // Capture the new SHA.
-    let mut sha_child = Command::new("git")
+    let sha_child = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(&root)
         .stdin(Stdio::null())

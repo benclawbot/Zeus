@@ -478,7 +478,7 @@ fn apply_one_file(
         .ok_or_else(|| format!("missing original for {}", file.path))?;
     let mut current_lines: Vec<String> = original.lines().map(String::from).collect();
     let mut hunks_sorted = file.hunks.clone();
-    hunks_sorted.sort_by(|a, b| b.old_start.cmp(&a.old_start));
+    hunks_sorted.sort_by_key(|hunk| std::cmp::Reverse(hunk.old_start));
     for hunk in &hunks_sorted {
         let start = hunk.old_start.saturating_sub(1);
         let end = start + hunk.old_count;

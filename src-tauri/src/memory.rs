@@ -10,7 +10,7 @@
 //   - command_result
 //   - project_convention
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,17 +47,6 @@ impl MemoryCategory {
             MemoryCategory::FailurePattern => "failure-pattern",
             MemoryCategory::CommandResult => "command-result",
             MemoryCategory::ProjectConvention => "project-convention",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "architecture-decision" => Some(MemoryCategory::ArchitectureDecision),
-            "user-preference" => Some(MemoryCategory::UserPreference),
-            "failure-pattern" => Some(MemoryCategory::FailurePattern),
-            "command-result" => Some(MemoryCategory::CommandResult),
-            "project-convention" => Some(MemoryCategory::ProjectConvention),
-            _ => None,
         }
     }
 }
@@ -169,16 +158,6 @@ impl MemoryStore {
         Ok(memory)
     }
 
-    pub fn list(&self, project_id: Option<&str>) -> Vec<Memory> {
-        let state = self.state.lock();
-        state
-            .memories
-            .iter()
-            .filter(|m| project_id.map(|id| m.project_id == id).unwrap_or(true))
-            .cloned()
-            .collect()
-    }
-
     pub fn retrieve(&self, ctx: &RetrievalContext) -> Vec<MemoryHit> {
         let state = self.state.lock();
         let query_tokens = tokenize(&ctx.query);
@@ -213,36 +192,6 @@ impl MemoryStore {
         });
         scored.truncate(ctx.limit.max(1));
         scored
-    }
-
-    /// Mark a memory as recently used (so the next retrieval gets a
-    /// recency bump). Returns the updated memory.
-    pub fn touch(&self, id: &str) -> Result<Option<Memory>, String> {
-        let mut state = self.state.lock();
-        if let Some(memory) = state.memories.iter_mut().find(|m| m.id == id) {
-            memory.last_used_at = Some(Utc::now().to_rfc3339());
-            memory.use_count = memory.use_count.saturating_add(1);
-            let out = memory.clone();
-            self.persist(&state)?;
-            return Ok(Some(out));
-        }
-        Ok(None)
-    }
-
-    pub fn mark_stale(
-        &self,
-        id: &str,
-        superseded_by: Option<String>,
-    ) -> Result<Option<Memory>, String> {
-        let mut state = self.state.lock();
-        if let Some(memory) = state.memories.iter_mut().find(|m| m.id == id) {
-            memory.stale = true;
-            memory.superseded_by = superseded_by;
-            let out = memory.clone();
-            self.persist(&state)?;
-            return Ok(Some(out));
-        }
-        Ok(None)
     }
 
     fn persist(&self, state: &MemoryFile) -> Result<(), String> {
@@ -306,7 +255,7 @@ fn score_memory(
         }
     }
     // Reliability boost: 1.0 reliability contributes +6, 0.25 contributes ~1.5.
-    score += ((memory.reliability * 6.0).round() as u32).max(0);
+    score += (memory.reliability * 6.0).round() as u32;
     score
 }
 
@@ -384,49 +333,6 @@ pub fn build_injection(hits: &[MemoryHit]) -> String {
         ));
     }
     out
-}
-
-/// Aggregate helpers used by the agent runtime's retrieve endpoint so
-/// we don't have to expose `MemoryStore` to the front end.
-pub fn score_summary(hit: &MemoryHit, query: &str) -> HashMap<String, u32> {
-    let mut summary = HashMap::new();
-    summary.insert(
-        "overlap".to_string(),
-        tokenize(&hit.memory.content)
-            .intersection(&tokenize(query))
-            .count() as u32,
-    );
-    summary.insert("score".to_string(), hit.score);
-    summary.insert("use_count".to_string(), hit.memory.use_count);
-    summary
-}
-
-/// Refresh the in-memory index for a project. Returns the number of
-/// active memories (non-stale, non-superseded) for that project.
-pub fn active_count(store: &MemoryStore, project_id: &str) -> usize {
-    store
-        .list(Some(project_id))
-        .into_iter()
-        .filter(|m| !m.stale && m.superseded_by.is_none())
-        .count()
-}
-
-/// Suggest the top memories to inject into a chat request. Returns at
-/// most `limit` items.
-pub fn suggest_injection(
-    store: &MemoryStore,
-    project_id: &str,
-    query: &str,
-    file_path: Option<&str>,
-    limit: usize,
-) -> Vec<MemoryHit> {
-    store.retrieve(&RetrievalContext {
-        project_id: project_id.to_string(),
-        query: query.to_string(),
-        file_path: file_path.map(str::to_string),
-        tags: Vec::new(),
-        limit,
-    })
 }
 
 #[cfg(test)]
@@ -529,7 +435,7 @@ mod tests {
             .unwrap();
 
         assert_ne!(first.id, second.id);
-        assert_eq!(store.list(Some("zeus")).len(), 2);
+        assert_eq!(store.state.lock().memories.len(), 2);
     }
 
     #[test]
@@ -576,7 +482,7 @@ mod tests {
                 use_count: 0,
             })
             .unwrap();
-        let all = store.list(Some("zeus"));
+        let all = store.state.lock().memories.clone();
         let stale: Vec<_> = all.iter().filter(|m| m.stale).collect();
         assert!(
             !stale.is_empty(),

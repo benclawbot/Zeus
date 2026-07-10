@@ -625,7 +625,7 @@ fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
 /// Quotes (single or double) wrapping the value are stripped.
 fn parse_dotenv(contents: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    for raw in contents.split(|c| c == '\n' || c == '\r') {
+    for raw in contents.split(['\n', '\r']) {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -1297,11 +1297,9 @@ async fn run_ralph_loop(
         // Run the verifier only when the marker has been seen at least
         // once. This keeps cost low (verifiers are usually tests) while
         // also letting the loop exit when *both* succeed.
-        let mut verifier_ok: Option<bool> = None;
         if marker_seen {
             if let Some(verifier) = request.verifier.as_ref() {
                 let result = run_ralph_verifier(verifier).await?;
-                verifier_ok = Some(result.success);
                 if !result.success {
                     iterations.push(RalphIteration {
                         index,
@@ -1821,7 +1819,7 @@ pub fn run() {
             // Apply user-saved provider API keys (set via the Settings UI)
             // on top of whatever .env / process env already has. Missing
             // file is not an error — the user simply hasn't saved keys yet.
-            let _ = load_provider_keys_into_env(&app.handle());
+            let _ = load_provider_keys_into_env(app.handle());
             // Resolve <app_data_dir>/zeus.db. Tauri creates the dir on
             // first access; open_and_init creates the file and schema.
             let db_path = match app.path().app_data_dir() {
@@ -1905,6 +1903,7 @@ pub fn run() {
             agent_runtime_commands::agent_runtime_github_read_pr,
             agent_runtime_commands::agent_runtime_github_ci_status,
             agent_runtime_commands::agent_runtime_github_fix_ci,
+            agent_runtime_commands::agent_runtime_github_workflow_log,
             agent_runtime_commands::agent_runtime_upsert_memory_v2,
             agent_runtime_commands::agent_runtime_retrieve_memories_v2,
             agent_runtime_commands::agent_runtime_inject_memories,
@@ -1918,17 +1917,6 @@ pub fn run() {
 mod skills_resolver_tests {
     use super::skills_dir_candidates;
     use std::path::PathBuf;
-
-    /// Build a fake Tauri AppHandle from a resource-dir path. The
-    /// resolver only consults `resource_dir()` + the rest of the env,
-    /// so a tiny stand-in keeps the test focused on the algorithm
-    /// without dragging in Tauri runtime state.
-    struct StubApp {
-        resource_dir: Option<PathBuf>,
-        cwd: PathBuf,
-        manifest_root: PathBuf,
-        env_skill_dir: Option<PathBuf>,
-    }
 
     fn tempdir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -2231,7 +2219,7 @@ mod dotenv_helpers_tests {
 
     #[test]
     fn merge_dotenv_does_not_clobber_already_set_key() {
-        let mut parsed = ProviderKeysFile {
+        let parsed = ProviderKeysFile {
             minimax: Some("persisted".to_string()),
             ..Default::default()
         };

@@ -334,8 +334,6 @@ struct BrowserDriver {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
-    script_path: PathBuf,
-    script_args: Vec<String>,
 }
 
 impl BrowserDriver {
@@ -372,8 +370,6 @@ impl BrowserDriver {
             stdin,
             stdout,
             next_id: 1,
-            script_path,
-            script_args,
         };
         driver.read_ready_line()?;
         Ok(driver)
@@ -666,11 +662,8 @@ impl AgentRuntimeService {
         // Track approval scope so `check_approval` knows when the id is
         // session-wide reusable. Do NOT mark one-shot as consumed here —
         // `check_approval` does that on first use.
-        match status {
-            ApprovalStatus::ApprovedForSession => {
-                state.session_wide.insert(id.to_string());
-            }
-            _ => {}
+        if status == ApprovalStatus::ApprovedForSession {
+            state.session_wide.insert(id.to_string());
         }
         drop(state);
         self.persist()?;

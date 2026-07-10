@@ -297,7 +297,7 @@ fn resolve_ddgs_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for name in ddgs_candidate_names() {
-                let candidate = dir.join(&name);
+                let candidate = dir.join(name);
                 if candidate.is_file() {
                     return Some(candidate);
                 }

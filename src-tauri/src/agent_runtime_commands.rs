@@ -47,14 +47,6 @@ pub struct CreateApprovalRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResolveApprovalRequest {
-    pub id: String,
-    pub status: ApprovalStatus,
-    pub note: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RetrieveMemoriesRequest {
     pub project_id: String,
     pub query: String,
@@ -115,7 +107,7 @@ fn memory_store(app: &tauri::AppHandle) -> Result<memory_mod::MemoryStore, Strin
         .script_path()
         .parent()
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir());
+        .unwrap_or_else(std::env::temp_dir);
     let store_path = path.join("agent-memory.json");
     memory_mod::MemoryStore::load_or_create(store_path)
 }

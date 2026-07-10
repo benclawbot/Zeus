@@ -8,11 +8,10 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// All seven command classes called out in the upgrade spec.
 ///
@@ -45,14 +44,6 @@ impl CommandClass {
             CommandClass::Privileged => "privileged",
         }
     }
-
-    /// Risky classes need approval in at least one access mode.
-    pub fn is_risky(self) -> bool {
-        !matches!(
-            self,
-            CommandClass::Safe | CommandClass::Test | CommandClass::Build
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,30 +52,6 @@ pub enum AccessMode {
     Review,
     Local,
     Full,
-}
-
-impl AccessMode {
-    pub fn from_str(value: Option<&str>) -> Self {
-        match value.unwrap_or("Full") {
-            "Locked" => AccessMode::Locked,
-            "Review" => AccessMode::Review,
-            "Local" => AccessMode::Local,
-            _ => AccessMode::Full,
-        }
-    }
-}
-
-/// What the policy decided for a specific execution request. Returned to
-/// the frontend so the UI can show "approval required" or "approved"
-/// badges.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PolicyDecision {
-    pub access_mode: String,
-    pub command_class: String,
-    pub approval_required: bool,
-    pub approved: bool,
-    pub approval_id: Option<String>,
 }
 
 /// Authorization outcome returned by `authorize`. The `Forbidden` variant
@@ -138,16 +105,15 @@ pub fn classify_command(program: &str, args: &[String]) -> CommandClass {
         return CommandClass::Destructive;
     }
     // git subcommands that rewrite history or push.
-    if name == "git" {
-        if text.contains(" push")
+    if name == "git"
+        && (text.contains(" push")
             || text.contains(" reset")
             || text.contains(" clean")
             || text.contains(" checkout --")
             || text.contains(" branch -d")
-            || text.contains(" branch -D")
-        {
-            return CommandClass::Destructive;
-        }
+            || text.contains(" branch -D"))
+    {
+        return CommandClass::Destructive;
     }
     // Dependency install / update / remove.
     if matches!(
@@ -277,6 +243,7 @@ pub fn authorize(mode: AccessMode, class: CommandClass) -> AuthOutcome {
 /// Validate a program + argument pair. Rejects null bytes, empty program
 /// names, and embedded whitespace in the program (defensive — shells
 /// usually reject this anyway but we don't want to depend on that).
+#[cfg(test)]
 pub fn validate_program(program: &str) -> Result<(), String> {
     if program.trim().is_empty() {
         return Err("Program must not be empty.".to_string());
@@ -290,26 +257,14 @@ pub fn validate_program(program: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_args(args: &[String]) -> Result<(), String> {
-    for arg in args {
-        if arg.contains('\0') {
-            return Err("Command arguments contain invalid characters.".to_string());
-        }
-    }
-    Ok(())
-}
-
 /// Block workspace path escape. Mirrors the resolver in `workspace.rs` so
 /// sandboxing and path resolution agree on what "inside the workspace"
 /// Zeus currently runs in unrestricted filesystem mode. The workspace path
 /// is now only a convenience anchor for relative paths, not a security
 /// boundary. This guard intentionally allows targets anywhere for every
 /// access mode; policy can be tightened again later in one place.
-pub fn ensure_inside_workspace(root: &Path, target: &Path) -> Result<(), String> {
-    ensure_inside_workspace_with_mode(root, target, None)
-}
-
-pub fn ensure_inside_workspace_with_mode(
+#[cfg(test)]
+fn ensure_inside_workspace_with_mode(
     root: &Path,
     target: &Path,
     mode: Option<&str>,
@@ -459,29 +414,6 @@ pub fn scrubbed_env() -> Vec<(String, String)> {
 /// SIGKILL after the deadline; on Windows the `Command::kill` path is
 /// used which terminates the process tree the OS tracks. Returns
 /// `(timed_out, duration_ms)`.
-pub fn enforce_timeout<F>(
-    started: std::time::Instant,
-    timeout: Duration,
-    try_wait: F,
-    kill: impl Fn(),
-) -> (bool, u128)
-where
-    F: Fn() -> Result<Option<std::process::ExitStatus>, String>,
-{
-    loop {
-        match try_wait() {
-            Ok(Some(_)) => return (false, started.elapsed().as_millis()),
-            Ok(None) => {}
-            Err(_) => {}
-        }
-        if started.elapsed() >= timeout {
-            kill();
-            return (true, started.elapsed().as_millis());
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

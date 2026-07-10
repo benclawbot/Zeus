@@ -1,8 +1,13 @@
+#![allow(dead_code)]
+
 #[path = "../src/agent_runtime.rs"]
 mod agent_runtime;
 
 #[path = "../src/code_intelligence.rs"]
 mod code_intelligence;
+
+#[path = "../src/policy.rs"]
+mod policy;
 
 use std::collections::HashSet;
 use std::fs;

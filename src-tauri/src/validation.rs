@@ -269,6 +269,12 @@ pub fn run_validation(request: ValidationRequest) -> Result<ValidationResult, St
     let commands = select_commands(kind, &kinds_slice);
     let timeout_ms = request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     let mode = AccessMode::Full; // Validation always runs at full mode — the user explicitly asked.
+    let mode = match std::env::var("ZEUS_VALIDATION_ACCESS_MODE").ok().as_deref() {
+        Some("Locked") => AccessMode::Locked,
+        Some("Review") => AccessMode::Review,
+        Some("Local") => AccessMode::Local,
+        _ => mode,
+    };
     let mut results = Vec::new();
     let mut errors = Vec::new();
     let mut likely_files = BTreeSet::new();

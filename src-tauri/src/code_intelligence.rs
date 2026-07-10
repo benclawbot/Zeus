@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,7 +17,6 @@ pub enum SymbolKind {
     Function,
     Struct,
     Class,
-    Method,
     Interface,
     Enum,
     Variable,
@@ -32,7 +31,6 @@ impl SymbolKind {
             SymbolKind::Function => "function",
             SymbolKind::Struct => "struct",
             SymbolKind::Class => "class",
-            SymbolKind::Method => "method",
             SymbolKind::Interface => "interface",
             SymbolKind::Enum => "enum",
             SymbolKind::Variable => "variable",
@@ -53,16 +51,6 @@ pub struct SymbolHit {
     pub snippet: String,
     pub score: u32,
     pub already_read: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodeSearchRequest {
-    pub root: String,
-    pub query: String,
-    pub max_results: usize,
-    pub seen_files: Vec<String>,
-    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -256,7 +244,7 @@ fn parse_symbol_line(line: &str, ext: &str) -> Vec<ParsedSymbol> {
             out.push(symbol_after(rest, SymbolKind::Interface, " {"));
         }
         if let Some(rest) = strip_any(line, &["export type ", "type "]) {
-            out.push(symbol_after(rest, SymbolKind::TypeAlias(), " = ;"));
+            out.push(symbol_after(rest, SymbolKind::Interface, " = ;"));
         }
         if let Some(rest) = strip_any(line, &["export const ", "const ", "let ", "var "]) {
             out.push(symbol_after(rest, SymbolKind::Variable, "=:"));
@@ -288,12 +276,6 @@ fn parse_symbol_line(line: &str, ext: &str) -> Vec<ParsedSymbol> {
     out
 }
 
-impl SymbolKind {
-    fn TypeAlias() -> SymbolKind {
-        SymbolKind::Interface
-    }
-}
-
 fn strip_any<'a>(line: &'a str, prefixes: &[&str]) -> Option<&'a str> {
     for prefix in prefixes {
         if let Some(rest) = line.strip_prefix(prefix) {
@@ -316,7 +298,7 @@ fn take_token_before<'a>(line: &'a str, terminators: &str) -> Option<&'a str> {
     }
 }
 
-fn symbol_after<'a>(line: &'a str, kind: SymbolKind, terminators: &str) -> ParsedSymbol {
+fn symbol_after(line: &str, kind: SymbolKind, terminators: &str) -> ParsedSymbol {
     let token = take_token_before(line, terminators).unwrap_or("").trim();
     ParsedSymbol {
         name: token.to_string(),
@@ -558,10 +540,7 @@ fn extract_imports(raw: &str, rel: &str) -> Vec<String> {
         if trimmed.starts_with("use ") {
             let rest = trimmed.trim_start_matches("use ").trim_end_matches(';');
             // take the leading path
-            let path = rest
-                .split(|c: char| c == '{' || c == ' ' || c == ':')
-                .next()
-                .unwrap_or("");
+            let path = rest.split(['{', ' ', ':']).next().unwrap_or("");
             if !path.is_empty() {
                 out.insert(path.to_string());
             }
@@ -621,11 +600,11 @@ fn extract_imports(raw: &str, rel: &str) -> Vec<String> {
 
 fn walk_source(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    walk_source_inner(root, root, &mut out);
+    walk_source_inner(root, &mut out);
     out
 }
 
-fn walk_source_inner(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+fn walk_source_inner(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -637,7 +616,7 @@ fn walk_source_inner(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
             continue;
         }
         if path.is_dir() {
-            walk_source_inner(root, &path, out);
+            walk_source_inner(&path, out);
         } else if path.is_file()
             && matches!(
                 path.extension().and_then(|e| e.to_str()).unwrap_or(""),
