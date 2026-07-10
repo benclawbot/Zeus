@@ -48,12 +48,20 @@ impl CommandClass {
 
     /// Risky classes need approval in at least one access mode.
     pub fn is_risky(self) -> bool {
-        !matches!(self, CommandClass::Safe | CommandClass::Test | CommandClass::Build)
+        !matches!(
+            self,
+            CommandClass::Safe | CommandClass::Test | CommandClass::Build
+        )
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccessMode { Locked, Review, Local, Full }
+pub enum AccessMode {
+    Locked,
+    Review,
+    Local,
+    Full,
+}
 
 impl AccessMode {
     pub fn from_str(value: Option<&str>) -> Self {
@@ -112,7 +120,17 @@ pub fn classify_command(program: &str, args: &[String]) -> CommandClass {
     // Destructive filesystem + system commands.
     if matches!(
         name.as_str(),
-        "rm" | "del" | "erase" | "rmdir" | "format" | "mkfs" | "dd" | "shutdown" | "reboot" | "halt" | "poweroff" | "truncate"
+        "rm" | "del"
+            | "erase"
+            | "rmdir"
+            | "format"
+            | "mkfs"
+            | "dd"
+            | "shutdown"
+            | "reboot"
+            | "halt"
+            | "poweroff"
+            | "truncate"
     ) {
         return CommandClass::Destructive;
     }
@@ -134,7 +152,21 @@ pub fn classify_command(program: &str, args: &[String]) -> CommandClass {
     // Dependency install / update / remove.
     if matches!(
         name.as_str(),
-        "npm" | "pnpm" | "yarn" | "cargo" | "pip" | "pip3" | "poetry" | "bun" | "bundle" | "gem" | "brew" | "apt" | "apt-get" | "pacman" | "dnf"
+        "npm"
+            | "pnpm"
+            | "yarn"
+            | "cargo"
+            | "pip"
+            | "pip3"
+            | "poetry"
+            | "bun"
+            | "bundle"
+            | "gem"
+            | "brew"
+            | "apt"
+            | "apt-get"
+            | "pacman"
+            | "dnf"
     ) {
         if text.contains(" install")
             || text.contains(" add ")
@@ -157,19 +189,29 @@ pub fn classify_command(program: &str, args: &[String]) -> CommandClass {
         }
     }
     // Network-capable tools.
-    if matches!(name.as_str(), "curl" | "wget" | "ssh" | "scp" | "rsync" | "nc" | "ncat" | "gh") {
+    if matches!(
+        name.as_str(),
+        "curl" | "wget" | "ssh" | "scp" | "rsync" | "nc" | "ncat" | "gh"
+    ) {
         return CommandClass::Network;
     }
     // gh CLI specifically: PR/issue reads are Network, but repo mutations are
     // pushed through the dedicated GitHub workflow module so we don't need to
     // split them further here.
     // Test runners.
-    if matches!(name.as_str(), "vitest" | "jest" | "pytest" | "mocha" | "playwright") {
+    if matches!(
+        name.as_str(),
+        "vitest" | "jest" | "pytest" | "mocha" | "playwright"
+    ) {
         return CommandClass::Test;
     }
     // cargo: build / test.
     if name == "cargo" {
-        if text.contains(" build") || text.contains(" check") || text.contains(" fmt") || text.contains(" clippy") {
+        if text.contains(" build")
+            || text.contains(" check")
+            || text.contains(" fmt")
+            || text.contains(" clippy")
+        {
             return CommandClass::Build;
         }
         if text.contains(" test") {
@@ -181,7 +223,19 @@ pub fn classify_command(program: &str, args: &[String]) -> CommandClass {
         }
     }
     // Compilers.
-    if matches!(name.as_str(), "rustc" | "tsc" | "ts-node" | "node" | "python" | "python3" | "go" | "javac" | "gcc" | "clang") {
+    if matches!(
+        name.as_str(),
+        "rustc"
+            | "tsc"
+            | "ts-node"
+            | "node"
+            | "python"
+            | "python3"
+            | "go"
+            | "javac"
+            | "gcc"
+            | "clang"
+    ) {
         return CommandClass::Build;
     }
     // Network-aware: git fetch / pull / clone.
@@ -208,7 +262,10 @@ pub fn authorize(mode: AccessMode, class: CommandClass) -> AuthOutcome {
     use AccessMode::*;
     use CommandClass::*;
     match (mode, class) {
-        (Locked, _) => AuthOutcome::Forbidden(format!("Locked mode blocks {} shell commands.", class.label())),
+        (Locked, _) => AuthOutcome::Forbidden(format!(
+            "Locked mode blocks {} shell commands.",
+            class.label()
+        )),
         (Review, _) => AuthOutcome::ApprovalRequired { risk: class },
         (Local, Safe | Test | Build) => AuthOutcome::Allowed,
         (Local, _) => AuthOutcome::ApprovalRequired { risk: class },
@@ -252,7 +309,11 @@ pub fn ensure_inside_workspace(root: &Path, target: &Path) -> Result<(), String>
     ensure_inside_workspace_with_mode(root, target, None)
 }
 
-pub fn ensure_inside_workspace_with_mode(root: &Path, target: &Path, mode: Option<&str>) -> Result<(), String> {
+pub fn ensure_inside_workspace_with_mode(
+    root: &Path,
+    target: &Path,
+    mode: Option<&str>,
+) -> Result<(), String> {
     let _ = (root, target, mode);
     Ok(())
 }
@@ -366,7 +427,10 @@ pub fn redact_secrets(input: &str) -> (String, usize) {
     for compiled in SECRET_PATTERNS.iter() {
         let replacement = format!("[REDACTED:{}]", compiled.pattern.label());
         let before_len = out.len();
-        out = compiled.regex.replace_all(&out, replacement.as_str()).to_string();
+        out = compiled
+            .regex
+            .replace_all(&out, replacement.as_str())
+            .to_string();
         if out.len() != before_len {
             count += 1;
         }
@@ -380,7 +444,10 @@ pub fn redact_secrets(input: &str) -> (String, usize) {
 pub fn scrubbed_env() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (key, value) in std::env::vars() {
-        if SCRUBBED_ENV_VARS.iter().any(|name| key.eq_ignore_ascii_case(name)) {
+        if SCRUBBED_ENV_VARS
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+        {
             continue;
         }
         out.push((key, value));
@@ -421,15 +488,42 @@ mod tests {
 
     #[test]
     fn classifies_known_dangerous_commands() {
-        assert_eq!(classify_command("rm", &["-rf".into(), "/".into()]), CommandClass::Destructive);
-        assert_eq!(classify_command("sudo", &["apt".into(), "update".into()]), CommandClass::Privileged);
-        assert_eq!(classify_command("git", &["push".into(), "origin".into(), "main".into()]), CommandClass::Destructive);
-        assert_eq!(classify_command("npm", &["install".into()]), CommandClass::Dependency);
-        assert_eq!(classify_command("curl", &["https://example.com".into()]), CommandClass::Network);
-        assert_eq!(classify_command("npm", &["test".into()]), CommandClass::Test);
-        assert_eq!(classify_command("vitest", &["run".into()]), CommandClass::Test);
-        assert_eq!(classify_command("cargo", &["build".into()]), CommandClass::Build);
-        assert_eq!(classify_command("tsc", &["--noEmit".into()]), CommandClass::Build);
+        assert_eq!(
+            classify_command("rm", &["-rf".into(), "/".into()]),
+            CommandClass::Destructive
+        );
+        assert_eq!(
+            classify_command("sudo", &["apt".into(), "update".into()]),
+            CommandClass::Privileged
+        );
+        assert_eq!(
+            classify_command("git", &["push".into(), "origin".into(), "main".into()]),
+            CommandClass::Destructive
+        );
+        assert_eq!(
+            classify_command("npm", &["install".into()]),
+            CommandClass::Dependency
+        );
+        assert_eq!(
+            classify_command("curl", &["https://example.com".into()]),
+            CommandClass::Network
+        );
+        assert_eq!(
+            classify_command("npm", &["test".into()]),
+            CommandClass::Test
+        );
+        assert_eq!(
+            classify_command("vitest", &["run".into()]),
+            CommandClass::Test
+        );
+        assert_eq!(
+            classify_command("cargo", &["build".into()]),
+            CommandClass::Build
+        );
+        assert_eq!(
+            classify_command("tsc", &["--noEmit".into()]),
+            CommandClass::Build
+        );
         assert_eq!(classify_command("ls", &[]), CommandClass::Safe);
     }
 
@@ -438,17 +532,31 @@ mod tests {
         use AccessMode::*;
         use CommandClass::*;
         assert!(matches!(authorize(Locked, Safe), AuthOutcome::Forbidden(_)));
-        assert!(matches!(authorize(Review, Safe), AuthOutcome::ApprovalRequired { .. }));
+        assert!(matches!(
+            authorize(Review, Safe),
+            AuthOutcome::ApprovalRequired { .. }
+        ));
         assert!(matches!(authorize(Local, Safe), AuthOutcome::Allowed));
-        assert!(matches!(authorize(Local, Dependency), AuthOutcome::ApprovalRequired { .. }));
+        assert!(matches!(
+            authorize(Local, Dependency),
+            AuthOutcome::ApprovalRequired { .. }
+        ));
         assert!(matches!(authorize(Full, Network), AuthOutcome::Allowed));
-        assert!(matches!(authorize(Full, Destructive), AuthOutcome::ApprovalRequired { .. }));
-        assert!(matches!(authorize(Full, Privileged), AuthOutcome::ApprovalRequired { .. }));
+        assert!(matches!(
+            authorize(Full, Destructive),
+            AuthOutcome::ApprovalRequired { .. }
+        ));
+        assert!(matches!(
+            authorize(Full, Privileged),
+            AuthOutcome::ApprovalRequired { .. }
+        ));
     }
 
     #[test]
     fn redacts_github_and_provider_keys() {
-        let (scrubbed, count) = redact_secrets("token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 key=sk-proj-abcdefghijklmnopqrstuvwxyz");
+        let (scrubbed, count) = redact_secrets(
+            "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 key=sk-proj-abcdefghijklmnopqrstuvwxyz",
+        );
         assert!(scrubbed.contains("[REDACTED:github-token]"));
         assert!(scrubbed.contains("[REDACTED:openai-key]"));
         assert!(count >= 2);
@@ -471,8 +579,11 @@ mod tests {
 
     #[test]
     fn ensure_inside_all_modes_allow_any_path() {
-        let bogus_root = std::env::temp_dir()
-            .join(format!("zeus_ensure_root_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let bogus_root = std::env::temp_dir().join(format!(
+            "zeus_ensure_root_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&bogus_root);
         std::fs::create_dir_all(&bogus_root).unwrap();
         let bogus = bogus_root.canonicalize().unwrap();

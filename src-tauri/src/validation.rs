@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::policy::{classify_command, AccessMode, AuthOutcome, authorize};
+use crate::policy::{authorize, classify_command, AccessMode, AuthOutcome};
 
 const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
@@ -57,7 +57,7 @@ pub struct ValidationRequest {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationCommandResult {
-    pub kind: String,    // "typecheck" | "test" | "build" | "browser_smoke" | "coverage"
+    pub kind: String, // "typecheck" | "test" | "build" | "browser_smoke" | "coverage"
     pub program: String,
     pub args: Vec<String>,
     pub exit_code: Option<i32>,
@@ -111,45 +111,143 @@ pub fn detect_project_type(workspace_dir: Option<&str>) -> Result<ProjectType, S
     }
     if root.join("pyproject.toml").is_file() || root.join("pytest.ini").is_file() {
         files.push("pyproject.toml".to_string());
-        kind = if kind == ProjectKind::Unknown { ProjectKind::Python } else { kind };
+        kind = if kind == ProjectKind::Unknown {
+            ProjectKind::Python
+        } else {
+            kind
+        };
     }
     if root.join("go.mod").is_file() {
         files.push("go.mod".to_string());
-        kind = if kind == ProjectKind::Unknown { ProjectKind::Go } else { kind };
+        kind = if kind == ProjectKind::Unknown {
+            ProjectKind::Go
+        } else {
+            kind
+        };
     }
-    Ok(ProjectType { kind: kind.label().to_string(), root: root.to_string_lossy().to_string(), config_files: files })
+    Ok(ProjectType {
+        kind: kind.label().to_string(),
+        root: root.to_string_lossy().to_string(),
+        config_files: files,
+    })
 }
 
 /// Pick validation commands for the given project kind and the requested
 /// kinds (or the full default set if none specified).
-pub fn select_commands(kind: ProjectKind, kinds: &[String]) -> Vec<(&'static str, String, Vec<String>)> {
-    let wanted: Option<BTreeSet<&str>> = if kinds.is_empty() { None } else {
+pub fn select_commands(
+    kind: ProjectKind,
+    kinds: &[String],
+) -> Vec<(&'static str, String, Vec<String>)> {
+    let wanted: Option<BTreeSet<&str>> = if kinds.is_empty() {
+        None
+    } else {
         Some(kinds.iter().map(|s| s.as_str()).collect())
     };
     let mut out = Vec::new();
-    let include = |label: &'static str| wanted.as_ref().map(|set| set.contains(label)).unwrap_or(true);
+    let include = |label: &'static str| {
+        wanted
+            .as_ref()
+            .map(|set| set.contains(label))
+            .unwrap_or(true)
+    };
     match kind {
         ProjectKind::Node => {
-            if include("typecheck") { out.push(("typecheck", "npx".to_string(), vec!["tsc".into(), "--noEmit".into()])); }
-            if include("test") { out.push(("test", "npm".to_string(), vec!["test".into(), "--silent".into()])); }
-            if include("build") { out.push(("build", "npm".to_string(), vec!["run".into(), "build".into()])); }
-            if include("browser_smoke") { out.push(("browser_smoke", "node".to_string(), vec!["scripts/browser-smoke.mjs".into()])); }
-            if include("coverage") { out.push(("coverage", "npm".to_string(), vec!["test".into(), "--".into(), "--coverage".into()])); }
+            if include("typecheck") {
+                out.push((
+                    "typecheck",
+                    "npx".to_string(),
+                    vec!["tsc".into(), "--noEmit".into()],
+                ));
+            }
+            if include("test") {
+                out.push((
+                    "test",
+                    "npm".to_string(),
+                    vec!["test".into(), "--silent".into()],
+                ));
+            }
+            if include("build") {
+                out.push((
+                    "build",
+                    "npm".to_string(),
+                    vec!["run".into(), "build".into()],
+                ));
+            }
+            if include("browser_smoke") {
+                out.push((
+                    "browser_smoke",
+                    "node".to_string(),
+                    vec!["scripts/browser-smoke.mjs".into()],
+                ));
+            }
+            if include("coverage") {
+                out.push((
+                    "coverage",
+                    "npm".to_string(),
+                    vec!["test".into(), "--".into(), "--coverage".into()],
+                ));
+            }
         }
         ProjectKind::Rust => {
-            if include("typecheck") { out.push(("typecheck", "cargo".to_string(), vec!["check".into()])); }
-            if include("test") { out.push(("test", "cargo".to_string(), vec!["test".into(), "--no-fail-fast".into()])); }
-            if include("build") { out.push(("build", "cargo".to_string(), vec!["build".into()])); }
+            if include("typecheck") {
+                out.push(("typecheck", "cargo".to_string(), vec!["check".into()]));
+            }
+            if include("test") {
+                out.push((
+                    "test",
+                    "cargo".to_string(),
+                    vec!["test".into(), "--no-fail-fast".into()],
+                ));
+            }
+            if include("build") {
+                out.push(("build", "cargo".to_string(), vec!["build".into()]));
+            }
         }
         ProjectKind::Python => {
-            if include("typecheck") { out.push(("typecheck", "python".to_string(), vec!["-m".into(), "mypy".into(), ".".into()])); }
-            if include("test") { out.push(("test", "python".to_string(), vec!["-m".into(), "pytest".into(), "-q".into()])); }
-            if include("build") { out.push(("build", "python".to_string(), vec!["-m".into(), "build".into()])); }
+            if include("typecheck") {
+                out.push((
+                    "typecheck",
+                    "python".to_string(),
+                    vec!["-m".into(), "mypy".into(), ".".into()],
+                ));
+            }
+            if include("test") {
+                out.push((
+                    "test",
+                    "python".to_string(),
+                    vec!["-m".into(), "pytest".into(), "-q".into()],
+                ));
+            }
+            if include("build") {
+                out.push((
+                    "build",
+                    "python".to_string(),
+                    vec!["-m".into(), "build".into()],
+                ));
+            }
         }
         ProjectKind::Go => {
-            if include("typecheck") { out.push(("typecheck", "go".to_string(), vec!["vet".into(), "./...".into()])); }
-            if include("test") { out.push(("test", "go".to_string(), vec!["test".into(), "./...".into()])); }
-            if include("build") { out.push(("build", "go".to_string(), vec!["build".into(), "./...".into()])); }
+            if include("typecheck") {
+                out.push((
+                    "typecheck",
+                    "go".to_string(),
+                    vec!["vet".into(), "./...".into()],
+                ));
+            }
+            if include("test") {
+                out.push((
+                    "test",
+                    "go".to_string(),
+                    vec!["test".into(), "./...".into()],
+                ));
+            }
+            if include("build") {
+                out.push((
+                    "build",
+                    "go".to_string(),
+                    vec!["build".into(), "./...".into()],
+                ));
+            }
         }
         ProjectKind::Unknown => {}
     }
@@ -178,7 +276,9 @@ pub fn run_validation(request: ValidationRequest) -> Result<ValidationResult, St
     for (kind_label, program, args) in commands {
         let class = classify_command(&program, &args);
         if matches!(authorize(mode, class), AuthOutcome::Forbidden(_)) {
-            errors.push(format!("Access mode blocks validation step '{kind_label}'."));
+            errors.push(format!(
+                "Access mode blocks validation step '{kind_label}'."
+            ));
             results.push(ValidationCommandResult {
                 kind: kind_label.to_string(),
                 program,
@@ -194,13 +294,20 @@ pub fn run_validation(request: ValidationRequest) -> Result<ValidationResult, St
         }
         let result = run_one(&root, &program, &args, timeout_ms);
         if !result.stdout.is_empty() {
-            for f in extract_filenames(&result.stdout) { likely_files.insert(f); }
+            for f in extract_filenames(&result.stdout) {
+                likely_files.insert(f);
+            }
         }
         if !result.stderr.is_empty() {
-            for f in extract_filenames(&result.stderr) { likely_files.insert(f); }
+            for f in extract_filenames(&result.stderr) {
+                likely_files.insert(f);
+            }
         }
         if result.exit_code != Some(0) {
-            errors.push(format!("{kind_label} ({program}) exited with code {:?}", result.exit_code));
+            errors.push(format!(
+                "{kind_label} ({program}) exited with code {:?}",
+                result.exit_code
+            ));
         }
         if kind_label == "coverage" && result.exit_code == Some(0) {
             coverage = parse_coverage(&result.stdout, &result.stderr);
@@ -217,10 +324,16 @@ pub fn run_validation(request: ValidationRequest) -> Result<ValidationResult, St
             failed: result.failed,
         });
     }
-    let ok = results.iter().all(|r| r.exit_code == Some(0) || r.exit_code.is_none() && r.kind == "coverage");
+    let ok = results
+        .iter()
+        .all(|r| r.exit_code == Some(0) || r.exit_code.is_none() && r.kind == "coverage");
     let likely_files_vec: Vec<String> = likely_files.iter().cloned().collect();
     let next_fix = next_fix_target(&results, &likely_files_vec);
-    let summary = if ok { "Validation passed.".to_string() } else { format!("Validation failed: {}", errors.join("; ")) };
+    let summary = if ok {
+        "Validation passed.".to_string()
+    } else {
+        format!("Validation failed: {}", errors.join("; "))
+    };
     Ok(ValidationResult {
         project,
         ok,
@@ -250,7 +363,10 @@ fn run_one(root: &Path, program: &str, args: &[String], timeout_ms: u64) -> RawC
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_remove("MINIMAX_API_KEY").env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY").env_remove("GITHUB_TOKEN")
+        .env_remove("MINIMAX_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("GITHUB_TOKEN")
         .spawn()
     {
         Ok(c) => c,
@@ -267,20 +383,30 @@ fn run_one(root: &Path, program: &str, args: &[String], timeout_ms: u64) -> RawC
     };
     let timeout = Duration::from_millis(timeout_ms.min(240_000));
     loop {
-        match child.try_wait() { Ok(Some(_)) => break, Ok(None) => {}, Err(_) => break }
-        if started.elapsed() >= timeout { let _ = child.kill(); break; }
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            break;
+        }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let output = match child.wait_with_output() { Ok(o) => o, Err(err) => {
-        return RawCommandResult {
-            exit_code: Some(-1),
-            stdout: String::new(),
-            stderr: format!("collect {program}: {err}"),
-            duration_ms: started.elapsed().as_millis(),
-            passed: -1,
-            failed: -1,
-        };
-    }};
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(err) => {
+            return RawCommandResult {
+                exit_code: Some(-1),
+                stdout: String::new(),
+                stderr: format!("collect {program}: {err}"),
+                duration_ms: started.elapsed().as_millis(),
+                passed: -1,
+                failed: -1,
+            };
+        }
+    };
     let (stdout, _) = bytes_to_limited(&output.stdout, MAX_CAPTURE_BYTES);
     let (stderr, _) = bytes_to_limited(&output.stderr, MAX_CAPTURE_BYTES);
     let combined = format!("{stdout}\n{stderr}");
@@ -301,13 +427,22 @@ fn parse_test_counts(combined: &str) -> (i32, i32) {
     for line in combined.lines() {
         let lower = line.to_lowercase();
         if lower.contains("tests passed") || lower.contains("test passed") {
-            if let Some(num) = extract_int_after(&lower, "passed") { passed = num; }
+            if let Some(num) = extract_int_after(&lower, "passed") {
+                passed = num;
+            }
         }
-        if lower.contains("tests failed") || lower.contains("test failed") || lower.contains("failed:") {
-            if let Some(num) = extract_int_after(&lower, "failed") { failed = num; }
+        if lower.contains("tests failed")
+            || lower.contains("test failed")
+            || lower.contains("failed:")
+        {
+            if let Some(num) = extract_int_after(&lower, "failed") {
+                failed = num;
+            }
         }
         if lower.contains(" ok") && lower.contains(" passed") {
-            if let Some(num) = extract_int_before(&lower, "passed") { passed = num; }
+            if let Some(num) = extract_int_before(&lower, "passed") {
+                passed = num;
+            }
         }
     }
     (passed, failed)
@@ -316,13 +451,22 @@ fn parse_test_counts(combined: &str) -> (i32, i32) {
 fn extract_int_after(line: &str, keyword: &str) -> Option<i32> {
     let idx = line.find(keyword)?;
     let after = &line[idx + keyword.len()..];
-    after.split(|c: char| !c.is_ascii_digit() && c != '-').find_map(|s| s.parse::<i32>().ok())
+    after
+        .split(|c: char| !c.is_ascii_digit() && c != '-')
+        .find_map(|s| s.parse::<i32>().ok())
 }
 
 fn extract_int_before(line: &str, keyword: &str) -> Option<i32> {
     let idx = line.find(keyword)?;
     let before = &line[..idx];
-    let digits: String = before.chars().rev().take_while(|c| c.is_ascii_digit() || *c == ' ').collect::<String>().chars().rev().collect();
+    let digits: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == ' ')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     digits.trim().parse::<i32>().ok()
 }
 
@@ -331,15 +475,26 @@ fn extract_filenames(log: &str) -> Vec<String> {
     for line in log.lines() {
         if line.contains(".rs:") {
             if let Some(idx) = line.find(".rs:") {
-                let start = line[..idx].rfind(|c: char| c.is_whitespace() || c == '(').map(|i| i + 1).unwrap_or(0);
+                let start = line[..idx]
+                    .rfind(|c: char| c.is_whitespace() || c == '(')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
                 let candidate = line[start..idx + 3].to_string();
-                if !out.contains(&candidate) { out.push(candidate); }
+                if !out.contains(&candidate) {
+                    out.push(candidate);
+                }
             }
         }
         for token in line.split_whitespace() {
-            if (token.contains(".ts:") || token.contains(".tsx:") || token.contains(".py:")) && !token.starts_with('(') {
-                let cleaned = token.trim_end_matches(|c: char| ":),".contains(c)).to_string();
-                if !out.contains(&cleaned) && !cleaned.is_empty() { out.push(cleaned); }
+            if (token.contains(".ts:") || token.contains(".tsx:") || token.contains(".py:"))
+                && !token.starts_with('(')
+            {
+                let cleaned = token
+                    .trim_end_matches(|c: char| ":),".contains(c))
+                    .to_string();
+                if !out.contains(&cleaned) && !cleaned.is_empty() {
+                    out.push(cleaned);
+                }
             }
         }
     }
@@ -353,21 +508,43 @@ fn parse_coverage(stdout: &str, stderr: &str) -> Option<CoverageSummary> {
     for line in combined.lines() {
         let lower = line.to_lowercase();
         if lower.contains("lines") && lower.contains('%') {
-            if let Some(p) = extract_percent(line) { lines_pct = Some(p); }
+            if let Some(p) = extract_percent(line) {
+                lines_pct = Some(p);
+            }
         }
         if lower.contains("branches") && lower.contains('%') {
-            if let Some(p) = extract_percent(line) { branches_pct = Some(p); }
+            if let Some(p) = extract_percent(line) {
+                branches_pct = Some(p);
+            }
         }
     }
-    if lines_pct.is_none() && branches_pct.is_none() { return None; }
-    let excerpt: String = combined.lines().filter(|l| l.contains('%')).take(8).collect::<Vec<_>>().join("\n");
-    Some(CoverageSummary { lines_pct, branches_pct, raw_excerpt: excerpt })
+    if lines_pct.is_none() && branches_pct.is_none() {
+        return None;
+    }
+    let excerpt: String = combined
+        .lines()
+        .filter(|l| l.contains('%'))
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(CoverageSummary {
+        lines_pct,
+        branches_pct,
+        raw_excerpt: excerpt,
+    })
 }
 
 fn extract_percent(line: &str) -> Option<f32> {
     let idx = line.find('%')?;
     let before = &line[..idx];
-    let digits: String = before.chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ' ').collect::<String>().chars().rev().collect();
+    let digits: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ' ')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     digits.trim().parse::<f32>().ok()
 }
 
@@ -375,14 +552,35 @@ fn next_fix_target(results: &[ValidationCommandResult], likely_files: &[String])
     // Pick the first failing step that names a file. Prefer the
     // simplest description so the agent doesn't over-fit on log noise.
     for result in results {
-        if result.exit_code == Some(0) { continue; }
-        if let Some(file) = likely_files.first() {
-            let line = extract_first_line(&result.stderr).or_else(|| extract_first_line(&result.stdout));
-            return NextFix { file: Some(file.clone()), line, description: format!("Investigate the failing {} step and fix the first reported issue.", result.kind) };
+        if result.exit_code == Some(0) {
+            continue;
         }
-        return NextFix { file: None, line: None, description: format!("Investigate the failing {} step (no file hint in logs).", result.kind) };
+        if let Some(file) = likely_files.first() {
+            let line =
+                extract_first_line(&result.stderr).or_else(|| extract_first_line(&result.stdout));
+            return NextFix {
+                file: Some(file.clone()),
+                line,
+                description: format!(
+                    "Investigate the failing {} step and fix the first reported issue.",
+                    result.kind
+                ),
+            };
+        }
+        return NextFix {
+            file: None,
+            line: None,
+            description: format!(
+                "Investigate the failing {} step (no file hint in logs).",
+                result.kind
+            ),
+        };
     }
-    NextFix { file: None, line: None, description: "No fix required — validation passed.".to_string() }
+    NextFix {
+        file: None,
+        line: None,
+        description: "No fix required — validation passed.".to_string(),
+    }
 }
 
 fn extract_first_line(text: &str) -> Option<usize> {
@@ -391,7 +589,9 @@ fn extract_first_line(text: &str) -> Option<usize> {
             if token.contains(':') {
                 let parts: Vec<&str> = token.split(':').collect();
                 if parts.len() >= 2 {
-                    if let Ok(n) = parts[1].parse::<usize>() { return Some(n); }
+                    if let Ok(n) = parts[1].parse::<usize>() {
+                        return Some(n);
+                    }
                 }
             }
         }
@@ -400,15 +600,28 @@ fn extract_first_line(text: &str) -> Option<usize> {
 }
 
 fn workspace_root(session_workspace: Option<&str>) -> Result<PathBuf, String> {
-    let configured = session_workspace.filter(|v| !v.trim().is_empty()).map(str::to_string)
-        .or_else(|| std::env::var("ZEUS_WORKSPACE_DIR").ok().filter(|v| !v.trim().is_empty()));
-    let root = match configured { Some(path) => PathBuf::from(path), None => std::env::current_dir().map_err(|e| format!("resolve current dir: {e}"))? };
-    root.canonicalize().map_err(|e| format!("canonicalize workspace '{}': {e}", root.display()))
+    let configured = session_workspace
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("ZEUS_WORKSPACE_DIR")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
+    let root = match configured {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_dir().map_err(|e| format!("resolve current dir: {e}"))?,
+    };
+    root.canonicalize()
+        .map_err(|e| format!("canonicalize workspace '{}': {e}", root.display()))
 }
 
 fn bytes_to_limited(bytes: &[u8], cap: usize) -> (String, bool) {
-    if bytes.len() > cap { (String::from_utf8_lossy(&bytes[..cap]).to_string(), true) }
-    else { (String::from_utf8_lossy(bytes).to_string(), false) }
+    if bytes.len() > cap {
+        (String::from_utf8_lossy(&bytes[..cap]).to_string(), true)
+    } else {
+        (String::from_utf8_lossy(bytes).to_string(), false)
+    }
 }
 
 #[cfg(test)]
@@ -417,7 +630,11 @@ mod tests {
 
     #[test]
     fn detects_node_project() {
-        let dir = std::env::temp_dir().join(format!("zeus_val_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_val_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("package.json"), "{}").unwrap();

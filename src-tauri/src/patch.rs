@@ -127,20 +127,33 @@ pub fn parse_patch(patch: &str) -> Result<Vec<ApplyPatchFile>, String> {
         if let Some(hunk) = current_hunk.as_mut() {
             if expected_total == 0 {
                 let popped = current_hunk.take().unwrap();
-                if let Some(file) = current.as_mut() { file.hunks.push(popped); }
+                if let Some(file) = current.as_mut() {
+                    file.hunks.push(popped);
+                }
                 continue;
             }
             let prefix = raw_line.chars().next();
             let body = raw_line.get(1..).unwrap_or("").to_string();
             match prefix {
-                Some(' ') => { hunk.lines.push(body); hunk.context_only_lines.push(false); }
-                Some('-') => { hunk.lines.push(body); hunk.context_only_lines.push(true); }
-                Some('+') => { hunk.lines.push(body); hunk.context_only_lines.push(false); }
+                Some(' ') => {
+                    hunk.lines.push(body);
+                    hunk.context_only_lines.push(false);
+                }
+                Some('-') => {
+                    hunk.lines.push(body);
+                    hunk.context_only_lines.push(true);
+                }
+                Some('+') => {
+                    hunk.lines.push(body);
+                    hunk.context_only_lines.push(false);
+                }
                 Some('\\') => continue,
                 _ => {
                     expected_total = 0;
                     let popped = current_hunk.take().unwrap();
-                    if let Some(file) = current.as_mut() { file.hunks.push(popped); }
+                    if let Some(file) = current.as_mut() {
+                        file.hunks.push(popped);
+                    }
                     continue;
                 }
             }
@@ -154,34 +167,59 @@ pub fn parse_patch(patch: &str) -> Result<Vec<ApplyPatchFile>, String> {
 
 fn flush_hunk(hunk: &mut Option<ApplyPatchHunk>, current: &mut Option<ApplyPatchFile>) {
     if let Some(h) = hunk.take() {
-        if let Some(file) = current.as_mut() { file.hunks.push(h); }
+        if let Some(file) = current.as_mut() {
+            file.hunks.push(h);
+        }
     }
 }
 
 fn flush_file(current: &mut Option<ApplyPatchFile>, files: &mut Vec<ApplyPatchFile>) {
-    if let Some(file) = current.take() { files.push(file); }
+    if let Some(file) = current.take() {
+        files.push(file);
+    }
 }
 
 fn normalize_patch_path(raw: &str) -> String {
-    let trimmed = raw.trim().trim_start_matches("a/").trim_start_matches("b/").trim();
-    if trimmed == "/dev/null" { return "/dev/null".to_string(); }
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("a/")
+        .trim_start_matches("b/")
+        .trim();
+    if trimmed == "/dev/null" {
+        return "/dev/null".to_string();
+    }
     trimmed.replace('\\', "/")
 }
 
 fn parse_hunk_header(line: &str) -> Result<ApplyPatchHunk, String> {
     let trimmed = line.trim_start_matches("@@").trim_end_matches("@@").trim();
     let mut parts = trimmed.split_whitespace();
-    let old = parts.next().ok_or_else(|| "malformed hunk header".to_string())?;
-    let new = parts.next().ok_or_else(|| "malformed hunk header".to_string())?;
+    let old = parts
+        .next()
+        .ok_or_else(|| "malformed hunk header".to_string())?;
+    let new = parts
+        .next()
+        .ok_or_else(|| "malformed hunk header".to_string())?;
     let old = old.trim_start_matches('-');
     let new = new.trim_start_matches('+');
-    let (old_start, old_count) = parse_range(old).ok_or_else(|| "malformed old range".to_string())?;
-    let (new_start, new_count) = parse_range(new).ok_or_else(|| "malformed new range".to_string())?;
-    Ok(ApplyPatchHunk { old_start, old_count, new_start, new_count, lines: Vec::new(), context_only_lines: Vec::new() })
+    let (old_start, old_count) =
+        parse_range(old).ok_or_else(|| "malformed old range".to_string())?;
+    let (new_start, new_count) =
+        parse_range(new).ok_or_else(|| "malformed new range".to_string())?;
+    Ok(ApplyPatchHunk {
+        old_start,
+        old_count,
+        new_start,
+        new_count,
+        lines: Vec::new(),
+        context_only_lines: Vec::new(),
+    })
 }
 
 fn parse_range(value: &str) -> Option<(usize, usize)> {
-    if value.is_empty() { return None; }
+    if value.is_empty() {
+        return None;
+    }
     if let Some((start, count)) = value.split_once(',') {
         Some((start.parse().ok()?, count.parse().ok()?))
     } else {
@@ -192,32 +230,47 @@ fn parse_range(value: &str) -> Option<(usize, usize)> {
 /// Validate that every hunk in every file matches the on-disk content.
 /// Returns a `BTreeMap<path, original_content>` so the apply step can
 /// both restore on failure and produce accurate diffs.
-pub fn validate_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<BTreeMap<String, String>, String> {
+pub fn validate_patch(
+    files: &[ApplyPatchFile],
+    base_dir: &Path,
+) -> Result<BTreeMap<String, String>, String> {
     let mut originals = BTreeMap::new();
     for file in files {
         let path = base_dir.join(&file.path);
         if file.new_file {
             if path.exists() {
-                return Err(format!("Patch wants to create {} but the file already exists.", file.path));
+                return Err(format!(
+                    "Patch wants to create {} but the file already exists.",
+                    file.path
+                ));
             }
             originals.insert(file.path.clone(), String::new());
             continue;
         }
         if file.deleted_file {
             if !path.exists() {
-                return Err(format!("Patch wants to delete {} but the file does not exist.", file.path));
+                return Err(format!(
+                    "Patch wants to delete {} but the file does not exist.",
+                    file.path
+                ));
             }
-            let content = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            let content =
+                fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
             originals.insert(file.path.clone(), content);
             continue;
         }
-        let content = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let lines: Vec<&str> = content.lines().collect();
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
             let start = hunk.old_start.saturating_sub(1);
             let end = start + hunk.old_count;
             if end > lines.len() {
-                return Err(format!("Hunk {} in {} runs past the end of the file.", hunk_index + 1, file.path));
+                return Err(format!(
+                    "Hunk {} in {} runs past the end of the file.",
+                    hunk_index + 1,
+                    file.path
+                ));
             }
             // Validate each '-' or ' ' line in the hunk matches the file.
             let mut file_cursor = start;
@@ -225,7 +278,12 @@ pub fn validate_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<BTree
                 if hunk.context_only_lines.get(i).copied().unwrap_or(false) {
                     if let Some(existing) = lines.get(file_cursor) {
                         if existing != line {
-                            return Err(format!("Context mismatch in hunk {} of {} at line {}.", hunk_index + 1, file.path, file_cursor + 1));
+                            return Err(format!(
+                                "Context mismatch in hunk {} of {} at line {}.",
+                                hunk_index + 1,
+                                file.path,
+                                file_cursor + 1
+                            ));
                         }
                     }
                     file_cursor += 1;
@@ -246,13 +304,16 @@ pub fn apply_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<ApplyPat
     let originals = match validate_patch(files, base_dir) {
         Ok(map) => map,
         Err(message) => {
-            let per_file = files.iter().map(|file| ApplyPatchFileResult {
-                path: file.path.clone(),
-                status: "failed".to_string(),
-                hunks_applied: 0,
-                diff: String::new(),
-                error: Some(message.clone()),
-            }).collect();
+            let per_file = files
+                .iter()
+                .map(|file| ApplyPatchFileResult {
+                    path: file.path.clone(),
+                    status: "failed".to_string(),
+                    hunks_applied: 0,
+                    diff: String::new(),
+                    error: Some(message.clone()),
+                })
+                .collect();
             return Ok(ApplyPatchResult {
                 files_touched: Vec::new(),
                 rollback_plan: Vec::new(),
@@ -275,13 +336,23 @@ pub fn apply_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<ApplyPat
                 if status_label == "created" || status_label == "applied" {
                     staged.push((path.clone(), Some(new_content.clone())));
                     touched.push(file.path.clone());
-                    rollback_plan.push(format!("Restore {} from backup or git checkout.", file.path));
+                    rollback_plan.push(format!(
+                        "Restore {} from backup or git checkout.",
+                        file.path
+                    ));
                 } else if status_label == "deleted" {
                     staged.push((path.clone(), None));
                     touched.push(file.path.clone());
-                    rollback_plan.push(format!("Restore {} from backup or git checkout.", file.path));
+                    rollback_plan.push(format!(
+                        "Restore {} from backup or git checkout.",
+                        file.path
+                    ));
                 }
-                let diff = simple_unified_diff(&file.path, originals.get(&file.path).map(String::as_str).unwrap_or(""), &new_content);
+                let diff = simple_unified_diff(
+                    &file.path,
+                    originals.get(&file.path).map(String::as_str).unwrap_or(""),
+                    &new_content,
+                );
                 per_file.push(ApplyPatchFileResult {
                     path: file.path.clone(),
                     status: status_label,
@@ -324,7 +395,9 @@ pub fn apply_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<ApplyPat
     for (path, content_opt) in &staged {
         match content_opt {
             Some(content) => {
-                if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
                 if let Err(err) = fs::write(path, content) {
                     write_failures.push(format!("write {}: {err}", path.display()));
                 }
@@ -350,12 +423,18 @@ pub fn apply_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<ApplyPat
             per_file,
             formatter_output: Vec::new(),
             ok: false,
-            message: format!("Patch rolled back after write failure(s): {}", write_failures.join("; ")),
+            message: format!(
+                "Patch rolled back after write failure(s): {}",
+                write_failures.join("; ")
+            ),
         });
     }
 
     let formatter_output = run_formatters(&touched, base_dir);
-    let applied = per_file.iter().filter(|r| r.status == "applied" || r.status == "created" || r.status == "deleted").count();
+    let applied = per_file
+        .iter()
+        .filter(|r| r.status == "applied" || r.status == "created" || r.status == "deleted")
+        .count();
     Ok(ApplyPatchResult {
         files_touched: touched,
         rollback_plan,
@@ -367,17 +446,24 @@ pub fn apply_patch(files: &[ApplyPatchFile], base_dir: &Path) -> Result<ApplyPat
 }
 
 fn pathdiff(path: &Path, base: &Path) -> Option<String> {
-    path.strip_prefix(base).ok().map(|p| p.to_string_lossy().replace('\\', "/"))
+    path.strip_prefix(base)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
-fn apply_one_file(file: &ApplyPatchFile, originals: &BTreeMap<String, String>) -> Result<(String, String), String> {
+fn apply_one_file(
+    file: &ApplyPatchFile,
+    originals: &BTreeMap<String, String>,
+) -> Result<(String, String), String> {
     if file.new_file {
         let mut out = String::new();
         for hunk in &file.hunks {
             for (i, line) in hunk.lines.iter().enumerate() {
                 // Only '+' lines become content; '-' lines shouldn't appear
                 // in new_file patches but we tolerate them by skipping.
-                if hunk.context_only_lines.get(i).copied().unwrap_or(false) { continue; }
+                if hunk.context_only_lines.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
                 out.push_str(line);
                 out.push('\n');
             }
@@ -387,7 +473,9 @@ fn apply_one_file(file: &ApplyPatchFile, originals: &BTreeMap<String, String>) -
     if file.deleted_file {
         return Ok(("deleted".to_string(), String::new()));
     }
-    let original = originals.get(&file.path).ok_or_else(|| format!("missing original for {}", file.path))?;
+    let original = originals
+        .get(&file.path)
+        .ok_or_else(|| format!("missing original for {}", file.path))?;
     let mut current_lines: Vec<String> = original.lines().map(String::from).collect();
     let mut hunks_sorted = file.hunks.clone();
     hunks_sorted.sort_by(|a, b| b.old_start.cmp(&a.old_start));
@@ -395,11 +483,17 @@ fn apply_one_file(file: &ApplyPatchFile, originals: &BTreeMap<String, String>) -
         let start = hunk.old_start.saturating_sub(1);
         let end = start + hunk.old_count;
         if end > current_lines.len() {
-            return Err(format!("Hunk range {}-{} exceeds file length.", start + 1, end));
+            return Err(format!(
+                "Hunk range {}-{} exceeds file length.",
+                start + 1,
+                end
+            ));
         }
         let mut new_segment: Vec<String> = Vec::new();
         for (i, line) in hunk.lines.iter().enumerate() {
-            if hunk.context_only_lines.get(i).copied().unwrap_or(false) { continue; }
+            if hunk.context_only_lines.get(i).copied().unwrap_or(false) {
+                continue;
+            }
             new_segment.push(line.clone());
         }
         let mut next = Vec::with_capacity(current_lines.len() + new_segment.len());
@@ -409,7 +503,9 @@ fn apply_one_file(file: &ApplyPatchFile, originals: &BTreeMap<String, String>) -
         current_lines = next;
     }
     let mut new_content = current_lines.join("\n");
-    if !new_content.ends_with('\n') && original.ends_with('\n') { new_content.push('\n'); }
+    if !new_content.ends_with('\n') && original.ends_with('\n') {
+        new_content.push('\n');
+    }
     if new_content == *original {
         return Ok(("unchanged".to_string(), original.clone()));
     }
@@ -424,13 +520,17 @@ fn simple_unified_diff(path: &str, before: &str, after: &str) -> String {
     for i in 0..max {
         match (before_lines.get(i), after_lines.get(i)) {
             (Some(a), Some(b)) if a == b => out.push_str(&format!(" {a}\n")),
-            (Some(a), Some(b)) => { out.push_str(&format!("-{a}\n+{b}\n")); }
+            (Some(a), Some(b)) => {
+                out.push_str(&format!("-{a}\n+{b}\n"));
+            }
             (Some(a), None) => out.push_str(&format!("-{a}\n")),
             (None, Some(b)) => out.push_str(&format!("+{b}\n")),
             (None, None) => {}
         }
     }
-    if before_lines.len().max(after_lines.len()) > max { out.push_str("...[diff truncated]\n"); }
+    if before_lines.len().max(after_lines.len()) > max {
+        out.push_str("...[diff truncated]\n");
+    }
     out
 }
 
@@ -441,7 +541,11 @@ pub fn run_formatters(paths: &[String], base_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for path in paths {
-        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let ext = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         let formatter = match ext.as_str() {
             "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some("prettier"),
             "rs" => Some("cargo-fmt"),
@@ -450,11 +554,18 @@ pub fn run_formatters(paths: &[String], base_dir: &Path) -> Vec<String> {
         };
         let Some(formatter) = formatter else { continue };
         let key = format!("{formatter}:{path}");
-        if !seen.insert(key) { continue; }
+        if !seen.insert(key) {
+            continue;
+        }
         let abs = base_dir.join(path);
         let result = match formatter {
             "prettier" => std::process::Command::new("npx")
-                .args(["--yes", "prettier", "--write", abs.to_string_lossy().as_ref()])
+                .args([
+                    "--yes",
+                    "prettier",
+                    "--write",
+                    abs.to_string_lossy().as_ref(),
+                ])
                 .current_dir(base_dir)
                 .output(),
             "cargo-fmt" => std::process::Command::new("cargo")
@@ -471,8 +582,13 @@ pub fn run_formatters(paths: &[String], base_dir: &Path) -> Vec<String> {
             Ok(output) => {
                 let code = output.status.code();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                if code == Some(0) { out.push(format!("{formatter} ok: {path}")); }
-                else { out.push(format!("{formatter} skipped {path}: exit {code:?} {stderr}")); }
+                if code == Some(0) {
+                    out.push(format!("{formatter} ok: {path}"));
+                } else {
+                    out.push(format!(
+                        "{formatter} skipped {path}: exit {code:?} {stderr}"
+                    ));
+                }
             }
             Err(err) => out.push(format!("{formatter} unavailable for {path}: {err}")),
         }
@@ -486,7 +602,11 @@ mod tests {
     use std::io::Write;
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zeus_patch_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_patch_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -511,7 +631,11 @@ mod tests {
         let files = parse_patch(patch).unwrap();
         let err = validate_patch(&files, &dir).unwrap_err();
         assert!(err.contains("Context mismatch"));
-        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\nc\n", "file must not be modified on validation failure");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "a\nb\nc\n",
+            "file must not be modified on validation failure"
+        );
     }
 
     #[test]
@@ -527,7 +651,14 @@ mod tests {
         let files = parse_patch(patch).unwrap();
         let result = apply_patch(&files, &dir).unwrap();
         assert!(!result.ok, "expected the bad hunk to fail validation");
-        assert_eq!(fs::read_to_string(dir.join("ok.txt")).unwrap(), "before-ok\n", "ok.txt must not be modified when a sibling patch fails");
-        assert_eq!(fs::read_to_string(dir.join("bad.txt")).unwrap(), "before-bad\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("ok.txt")).unwrap(),
+            "before-ok\n",
+            "ok.txt must not be modified when a sibling patch fails"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("bad.txt")).unwrap(),
+            "before-bad\n"
+        );
     }
 }

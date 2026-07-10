@@ -37,14 +37,10 @@ use providers::{
 };
 use workspace::{
     apply_workspace_edit as apply_workspace_edit_impl,
-    list_workspace_dir as list_workspace_dir_impl,
-    load_project_config as load_project_config_impl,
-    read_workspace_file as read_workspace_file_impl,
-    run_agent_task as run_agent_task_impl,
-    run_git_operation as run_git_operation_impl,
-    run_project_test as run_project_test_impl,
-    run_shell_command as run_shell_command_impl,
-    write_workspace_file as write_workspace_file_impl,
+    list_workspace_dir as list_workspace_dir_impl, load_project_config as load_project_config_impl,
+    read_workspace_file as read_workspace_file_impl, run_agent_task as run_agent_task_impl,
+    run_git_operation as run_git_operation_impl, run_project_test as run_project_test_impl,
+    run_shell_command as run_shell_command_impl, write_workspace_file as write_workspace_file_impl,
     AgentRunRequest, AgentRunResult, ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult,
     GitOperationRequest, GitOperationResult, ListWorkspaceDirRequest, ListWorkspaceDirResult,
     ProjectConfigRequest, ProjectConfigResult, ReadWorkspaceFileRequest, ReadWorkspaceFileResult,
@@ -248,7 +244,9 @@ fn skill_index_from_dir(root: &Path) -> Result<Vec<SkillIndexEntry>, String> {
     for path in dirs {
         match skill_index_entry_from_dir(&path) {
             Ok(entry) => skills.push(entry),
-            Err(error) => tracing::warn!(skill = %path.display(), "Skipping invalid skill: {error}"),
+            Err(error) => {
+                tracing::warn!(skill = %path.display(), "Skipping invalid skill: {error}")
+            }
         }
     }
     skills.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
@@ -604,7 +602,8 @@ fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
     let path = provider_keys_path(app)?;
     let mut parsed = if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        serde_json::from_str::<ProviderKeysFile>(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?
+        serde_json::from_str::<ProviderKeysFile>(&raw)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?
     } else {
         ProviderKeysFile::default()
     };
@@ -628,18 +627,29 @@ fn parse_dotenv(contents: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for raw in contents.split(|c| c == '\n' || c == '\r') {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        let Some(eq) = line.find('=') else { continue; };
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
         let key = line[..eq].trim().to_string();
-        if key.is_empty() { continue; }
+        if key.is_empty() {
+            continue;
+        }
         // Conventional env-var shape: leading letter or underscore,
         // then alphanumerics or underscores. This rejects `1INVALID=...`
         // style lines that some shells accept but the API keys here don't
         // need to.
         let mut chars = key.chars();
-        let first_ok = chars.next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+        let first_ok = chars
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false);
         let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !(first_ok && rest_ok) { continue; }
+        if !(first_ok && rest_ok) {
+            continue;
+        }
         let mut value = line[eq + 1..].trim().to_string();
         if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
             || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
@@ -666,7 +676,12 @@ fn merge_dotenv_into(parsed: &mut ProviderKeysFile) {
             parsed.openai = Some(value.clone());
         }
     }
-    if parsed.anthropic.as_deref().map(str::is_empty).unwrap_or(true) {
+    if parsed
+        .anthropic
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true)
+    {
         if let Some(value) = map.get("ANTHROPIC_API_KEY") {
             parsed.anthropic = Some(value.clone());
         }
@@ -749,15 +764,33 @@ fn set_provider_keys(
     } else {
         ProviderKeysFile::default()
     };
-    if let Some(value) = request.minimax { next.minimax = normalize_key(Some(value)); }
-    if let Some(value) = request.openai { next.openai = normalize_key(Some(value)); }
-    if let Some(value) = request.anthropic { next.anthropic = normalize_key(Some(value)); }
-    if let Some(value) = request.minimax_base_url { next.minimax_base_url = normalize_optional(Some(value)); }
-    if let Some(value) = request.openai_base_url { next.openai_base_url = normalize_optional(Some(value)); }
-    if let Some(value) = request.anthropic_base_url { next.anthropic_base_url = normalize_optional(Some(value)); }
-    if let Some(value) = request.minimax_model { next.minimax_model = normalize_optional(Some(value)); }
-    if let Some(value) = request.openai_model { next.openai_model = normalize_optional(Some(value)); }
-    if let Some(value) = request.anthropic_model { next.anthropic_model = normalize_optional(Some(value)); }
+    if let Some(value) = request.minimax {
+        next.minimax = normalize_key(Some(value));
+    }
+    if let Some(value) = request.openai {
+        next.openai = normalize_key(Some(value));
+    }
+    if let Some(value) = request.anthropic {
+        next.anthropic = normalize_key(Some(value));
+    }
+    if let Some(value) = request.minimax_base_url {
+        next.minimax_base_url = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.openai_base_url {
+        next.openai_base_url = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.anthropic_base_url {
+        next.anthropic_base_url = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.minimax_model {
+        next.minimax_model = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.openai_model {
+        next.openai_model = normalize_optional(Some(value));
+    }
+    if let Some(value) = request.anthropic_model {
+        next.anthropic_model = normalize_optional(Some(value));
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -864,7 +897,9 @@ async fn test_provider(
         provider: provider_id.clone(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: serde_json::Value::String("Respond with the single word OK and nothing else.".to_string()),
+            content: serde_json::Value::String(
+                "Respond with the single word OK and nothing else.".to_string(),
+            ),
         }],
         skill_id: None,
         options: serde_json::json!({
@@ -1016,9 +1051,18 @@ pub struct RunRalphRequest {
 /// state lives only in the workspace and the iteration log returned
 /// here, so there is no risk of context bloat between iterations.
 #[tauri::command]
-async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Result<RunRalphResult, String> {
-    let marker = request.completion_marker.clone().unwrap_or_else(|| RALPH_DEFAULT_MARKER.to_string());
-    let max_iterations = request.max_iterations.unwrap_or(RALPH_DEFAULT_MAX_ITERATIONS).max(1);
+async fn run_ralph_loop(
+    app: tauri::AppHandle,
+    request: RunRalphRequest,
+) -> Result<RunRalphResult, String> {
+    let marker = request
+        .completion_marker
+        .clone()
+        .unwrap_or_else(|| RALPH_DEFAULT_MARKER.to_string());
+    let max_iterations = request
+        .max_iterations
+        .unwrap_or(RALPH_DEFAULT_MAX_ITERATIONS)
+        .max(1);
     let base_system = match request.system_message.clone() {
         Some(s) if !s.trim().is_empty() => s,
         _ => format!(
@@ -1034,10 +1078,17 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
 
     for index in 0..max_iterations {
         let prior = iterations.last();
-        let user_content = render_ralph_user_prompt(&request.objective, index, prior, request.verifier.as_ref());
+        let user_content =
+            render_ralph_user_prompt(&request.objective, index, prior, request.verifier.as_ref());
         let messages = vec![
-            ChatMessage { role: "system".to_string(), content: serde_json::Value::String(base_system.clone()) },
-            ChatMessage { role: "user".to_string(), content: serde_json::Value::String(user_content) },
+            ChatMessage {
+                role: "system".to_string(),
+                content: serde_json::Value::String(base_system.clone()),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::String(user_content),
+            },
         ];
         let chat_request = ChatRequest {
             provider: request.provider.clone(),
@@ -1049,7 +1100,10 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
             }),
         };
         let messages_with_skill = inject_skill(&app, &chat_request)?;
-        let chat_with_skill = ChatRequest { messages: messages_with_skill, ..chat_request };
+        let chat_with_skill = ChatRequest {
+            messages: messages_with_skill,
+            ..chat_request
+        };
         let response = dispatch_chat(&chat_with_skill, None)
             .await
             .map_err(|e| e.public_message())?;
@@ -1066,11 +1120,19 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
                 let result = run_ralph_verifier(verifier).await?;
                 verifier_ok = Some(result.success);
                 if !result.success {
-                    iterations.push(RalphIteration { index, marker_seen, assistant_excerpt });
+                    iterations.push(RalphIteration {
+                        index,
+                        marker_seen,
+                        assistant_excerpt,
+                    });
                     continue;
                 }
             }
-            iterations.push(RalphIteration { index, marker_seen, assistant_excerpt });
+            iterations.push(RalphIteration {
+                index,
+                marker_seen,
+                assistant_excerpt,
+            });
             return Ok(RunRalphResult {
                 completed: true,
                 iterations_run: iterations.len(),
@@ -1084,13 +1146,20 @@ async fn run_ralph_loop(app: tauri::AppHandle, request: RunRalphRequest) -> Resu
             });
         }
 
-        iterations.push(RalphIteration { index, marker_seen, assistant_excerpt });
+        iterations.push(RalphIteration {
+            index,
+            marker_seen,
+            assistant_excerpt,
+        });
     }
 
     Ok(RunRalphResult {
         completed: false,
         iterations_run: iterations.len(),
-        exit_reason: format!("reached max iterations ({}) without completion marker", max_iterations),
+        exit_reason: format!(
+            "reached max iterations ({}) without completion marker",
+            max_iterations
+        ),
         marker,
         iterations,
     })
@@ -1147,7 +1216,9 @@ async fn run_ralph_verifier(verifier: &RalphVerifier) -> Result<RalphVerifierOut
         .map_err(|e| format!("spawn verifier '{}': {e}", verifier.program))?;
     let mut timed_out = false;
     loop {
-        let waited = child.try_wait().map_err(|e| format!("wait verifier: {e}"))?;
+        let waited = child
+            .try_wait()
+            .map_err(|e| format!("wait verifier: {e}"))?;
         if waited.is_some() {
             break;
         }
@@ -1194,9 +1265,13 @@ struct RalphVerifierOutcome {
 }
 
 fn excerpt(content: &str, max: usize) -> String {
-    if content.len() <= max { return content.to_string(); }
+    if content.len() <= max {
+        return content.to_string();
+    }
     let mut end = max;
-    while end > 0 && !content.is_char_boundary(end) { end -= 1; }
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
     let mut out = content[..end].to_string();
     out.push_str("\n...[truncated]");
     out
@@ -1225,7 +1300,9 @@ fn agent_engine_execute_tools(
 }
 
 #[tauri::command]
-async fn web_search(request: web_search::WebSearchRequest) -> Result<web_search::WebSearchResult, String> {
+async fn web_search(
+    request: web_search::WebSearchRequest,
+) -> Result<web_search::WebSearchResult, String> {
     web_search::web_search(request).await
 }
 
@@ -1628,7 +1705,9 @@ mod skills_resolver_tests {
         // The compile-time manifest fallback MUST include
         // `<repo>/skills`, which is where the real skills live in dev.
         assert!(
-            candidates.iter().any(|c| c.ends_with("skills") && c.is_absolute()),
+            candidates
+                .iter()
+                .any(|c| c.ends_with("skills") && c.is_absolute()),
             "candidates must include the manifest-rooted skills path; got {candidates:?}"
         );
     }
@@ -1690,7 +1769,8 @@ mod skills_resolver_tests {
         std::fs::write(
             inner.join("SKILL.md"),
             "---\nname: nested-skill\ndescription: Should be discovered.\n---\n\n# Nested\n",
-        ).unwrap();
+        )
+        .unwrap();
         let skills = crate::list_skills_from_dir(&root).expect("list");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id, "nested-skill");
@@ -1701,7 +1781,11 @@ mod skills_resolver_tests {
         let root = tempdir("invalid");
         // Folder without SKILL.md -> ignored.
         std::fs::create_dir_all(root.join("not-a-skill")).unwrap();
-        std::fs::write(root.join("not-a-skill").join("readme.txt"), "no frontmatter").unwrap();
+        std::fs::write(
+            root.join("not-a-skill").join("readme.txt"),
+            "no frontmatter",
+        )
+        .unwrap();
         // File directly under root (not a folder) -> ignored.
         std::fs::write(root.join("loose.md"), "---\nname: loose\n---\n").unwrap();
         // Real skill.
@@ -1710,7 +1794,8 @@ mod skills_resolver_tests {
         std::fs::write(
             good.join("SKILL.md"),
             "---\nname: real\ndescription: Should survive the filter.\n---\n\n# Real\n",
-        ).unwrap();
+        )
+        .unwrap();
         let skills = crate::list_skills_from_dir(&root).expect("list");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id, "real");
@@ -1756,8 +1841,17 @@ mod ralph_helpers_tests {
 
     #[test]
     fn verifier_present_adds_reminder_to_prompt() {
-        let verifier = RalphVerifier { program: "echo".into(), args: vec![], cwd: None, timeout_ms: None };
-        let prior = RalphIteration { index: 0, marker_seen: false, assistant_excerpt: "x".into() };
+        let verifier = RalphVerifier {
+            program: "echo".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: None,
+        };
+        let prior = RalphIteration {
+            index: 0,
+            marker_seen: false,
+            assistant_excerpt: "x".into(),
+        };
         let prompt = render_ralph_user_prompt("obj", 1, Some(&prior), Some(&verifier));
         assert!(prompt.contains("verifier will run after every iteration"));
     }
@@ -1770,7 +1864,9 @@ mod ralph_helpers_tests {
 
     #[test]
     fn excerpt_truncates_long_content_on_utf8_boundary() {
-        let value: String = (0..200).map(|i| char::from_u32(i as u32).unwrap_or('?')).collect();
+        let value: String = (0..200)
+            .map(|i| char::from_u32(i as u32).unwrap_or('?'))
+            .collect();
         let truncated = excerpt(&value, 64);
         assert!(truncated.len() <= 64 + "...[truncated]".len() + 1);
         assert!(truncated.ends_with("...[truncated]"));
@@ -1781,7 +1877,7 @@ mod ralph_helpers_tests {
         // 4-byte emoji characters; truncating in the middle must not split one.
         let value = "🦀🦀🦀🦀🦀 extra";
         let out = truncate_utf8(value, 5); // 4 bytes of one emoji isn't safe — round down
-        // Should contain only complete codepoints.
+                                           // Should contain only complete codepoints.
         for ch in out.chars() {
             assert!(ch.len_utf8() > 0);
         }
@@ -1795,8 +1891,14 @@ mod dotenv_helpers_tests {
     #[test]
     fn parse_dotenv_extracts_simple_pairs() {
         let map = parse_dotenv("MINIMAX_API_KEY=sk-abc\nOPENAI_API_KEY=sk-other\n");
-        assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-abc"));
-        assert_eq!(map.get("OPENAI_API_KEY").map(String::as_str), Some("sk-other"));
+        assert_eq!(
+            map.get("MINIMAX_API_KEY").map(String::as_str),
+            Some("sk-abc")
+        );
+        assert_eq!(
+            map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-other")
+        );
     }
 
     #[test]
@@ -1808,8 +1910,14 @@ mod dotenv_helpers_tests {
              INVALID LINE WITHOUT EQUALS\n\
              1INVALID=skip\n",
         );
-        assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-with-quotes"));
-        assert_eq!(map.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-single-quoted"));
+        assert_eq!(
+            map.get("MINIMAX_API_KEY").map(String::as_str),
+            Some("sk-with-quotes")
+        );
+        assert_eq!(
+            map.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-single-quoted")
+        );
         assert_eq!(map.get("INVALID LINE WITHOUT EQUALS"), None);
         assert_eq!(map.get("1INVALID"), None);
     }
@@ -1852,6 +1960,9 @@ mod dotenv_helpers_tests {
         // or empty. Verify that contract here so the precedence order
         // (JSON > .env) is testable without filesystem access.
         let should_fill = parsed.minimax.as_deref().map(str::is_empty).unwrap_or(true);
-        assert!(!should_fill, "a non-empty persisted key must not be overwritten by .env");
+        assert!(
+            !should_fill,
+            "a non-empty persisted key must not be overwritten by .env"
+        );
     }
 }
