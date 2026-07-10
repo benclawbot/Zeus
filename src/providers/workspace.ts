@@ -144,79 +144,9 @@ export interface ApplyWorkspaceEditResult {
   approvalRequired?: boolean;
 }
 
-export type AgentStepRequest =
-  | { kind: "readFile"; path: string; maxBytes?: number }
-  | { kind: "writeFile"; path: string; content: string; create: boolean; overwrite: boolean }
-  | { kind: "editFile"; path: string; find: string; replace: string; replaceAll: boolean }
-  | { kind: "runCommand"; program: string; args: string[]; cwd?: string; timeoutMs?: number }
-  | { kind: "listDir"; path: string; maxEntries?: number }
-  | { kind: "loadProjectConfig" }
-  | { kind: "gitOp"; args: string[]; timeoutMs?: number }
-  | { kind: "runTest"; args?: string[]; timeoutMs?: number }
-  | { kind: "webSearch"; query: string; maxResults?: number };
-
-export interface AgentRunRequest {
-  objective: string;
-  workspaceDir?: string;
-  steps: AgentStepRequest[];
-  approved?: boolean;
-  /** Runtime approval id covering every risky step in this run. The
-   *  frontend surfaces a single approval card and passes the resolved
-   *  id down to the Rust runtime, which consumes or honors it. */
-  approvalId?: string;
-  approvalSessionId?: string;
-  stopOnError?: boolean;
-}
-
-export interface AgentRunStepLog {
-  index: number;
-  label: string;
-  result: unknown;
-}
-
-export interface Diagnosis {
-  stepIndex: number;
-  stepLabel: string;
-  failureCategory: string;
-  rootCause: string;
-  nextAction: string;
-  revisedPlan: string[];
-  fallbackStrategy: string;
-}
-
-export interface AgentRunResult {
-  objective: string;
-  completed: boolean;
-  filesTouched: string[];
-  logs: AgentRunStepLog[];
-  diff: string;
-  summary: string;
-  proposedHarnessRule: string | null;
-  rollbackPlan: string[];
-  approvalId?: string | null;
-  /** Structured diagnosis of the most recent failure (if any). */
-  diagnosis?: Diagnosis | null;
-}
-
-export function normalizeAgentStep(step: AgentStepRequest): AgentStepRequest {
-  switch (step.kind) {
-    case "listDir":
-      return { ...step, path: normalizeWorkspacePath(step.path) };
-    case "runCommand":
-      return { ...step, cwd: step.cwd ? normalizeWorkspacePath(step.cwd) || undefined : undefined };
-    case "readFile":
-    case "writeFile":
-    case "editFile":
-      return { ...step, path: normalizeWorkspacePath(step.path) };
-    default:
-      return step;
-  }
-}
-
 function withExplicitComposerApproval<T extends { approved?: boolean }>(request: T): T {
   // Direct slash-command helpers are only reached after the human submits the
-  // composer command. Agent tool loops still go through runAgentTask and must
-  // pass their own approval decision explicitly.
+  // composer command. Agent turns execute through the session-bound Rust runtime.
   return { ...request, approved: request.approved ?? true };
 }
 
@@ -307,11 +237,6 @@ export async function applyWorkspaceEdit(args: {
 }): Promise<ApplyWorkspaceEditResult> {
   ensureRuntime("Workspace file edits");
   return invoke<ApplyWorkspaceEditResult>("apply_workspace_edit", { request: withSelectedWorkspace(withExplicitComposerApproval({ ...args, path: normalizeWorkspacePath(args.path) })) });
-}
-
-export async function runAgentTask(request: AgentRunRequest): Promise<AgentRunResult> {
-  ensureRuntime("Agent task execution");
-  return invoke<AgentRunResult>("run_agent_task", { request: withSelectedWorkspace({ ...request, steps: request.steps.map(normalizeAgentStep) }) });
 }
 
 export interface RalphVerifier {

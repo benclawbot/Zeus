@@ -1,10 +1,8 @@
 import { PlanProgressPanel } from "../components/PlanProgressPanel";
 import type { RuntimePlan } from "../agentRuntimeDeepLoop";
-import type { AgentRunSummary } from "../components/PlanProgressPanel";
 
 interface InspectorPanelProps {
   latestUserObjective: string;
-  lastAgentRun: AgentRunSummary | null;
   lastToolFailed: boolean;
   runtimePlan: RuntimePlan | null;
   latestTurnTokens: { in: number; out: number; cached?: number } | null;
@@ -20,7 +18,6 @@ interface InspectorPanelProps {
  */
 export function InspectorPanel({
   latestUserObjective,
-  lastAgentRun,
   lastToolFailed,
   runtimePlan,
   latestTurnTokens,
@@ -32,7 +29,6 @@ export function InspectorPanel({
     <aside className="inspector" aria-label="Run details">
       <PlanProgressPanel
         latestUserObjective={latestUserObjective}
-        lastAgentRun={lastAgentRun}
         lastToolFailed={lastToolFailed}
         runtimePlan={runtimePlan}
       />

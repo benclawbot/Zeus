@@ -47,7 +47,6 @@ const DECLARED_COMMANDS: &[&str] = &[
     "read_workspace_file",
     "write_workspace_file",
     "apply_workspace_edit",
-    "run_agent_task",
     "list_workspace_dir",
     "load_project_config",
     "run_git_operation",

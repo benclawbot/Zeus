@@ -144,6 +144,7 @@ pub struct ApplyWorkspaceEditResult {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[cfg(test)]
 pub enum AgentStepRequest {
     ReadFile {
         path: String,
@@ -191,6 +192,7 @@ pub enum AgentStepRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct AgentRunRequest {
     pub objective: String,
     pub workspace_dir: Option<String>,
@@ -213,6 +215,7 @@ pub struct AgentRunRequest {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[cfg(test)]
 pub enum AgentStepResult {
     ReadFile(ReadWorkspaceFileResult),
     WriteFile(WriteWorkspaceFileResult),
@@ -228,6 +231,7 @@ pub enum AgentStepResult {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct AgentRunStepLog {
     pub index: usize,
     pub label: String,
@@ -236,12 +240,14 @@ pub struct AgentRunStepLog {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub enum EffortTier {
     Low,
     Medium,
     High,
 }
 
+#[cfg(test)]
 impl EffortTier {
     fn label(self) -> &'static str {
         match self {
@@ -254,6 +260,7 @@ impl EffortTier {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct EffortSignals {
     pub files_touched: usize,
     pub prior_failures: usize,
@@ -264,6 +271,7 @@ pub struct EffortSignals {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct EffortLog {
     pub subtask_id: String,
     pub tier_selected: EffortTier,
@@ -273,6 +281,7 @@ pub struct EffortLog {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct MemoryCheckpoint {
     pub subtask_id: String,
     pub timestamp: String,
@@ -284,6 +293,7 @@ pub struct MemoryCheckpoint {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct AgentRunResult {
     pub objective: String,
     pub completed: bool,
@@ -310,6 +320,7 @@ pub struct AgentRunResult {
 /// what to try.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct Diagnosis {
     pub step_index: usize,
     pub step_label: String,
@@ -352,11 +363,13 @@ impl CommandClass {
         }
     }
 
+    #[cfg(test)]
     fn is_risky(self) -> bool {
         !matches!(self, CommandClass::Safe)
     }
 }
 
+#[cfg(test)]
 pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> AgentRunResult {
     let signals = effort_signals(&request);
     let mut effort_tier = classify_effort(&signals);
@@ -618,6 +631,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
 /// next-action strings are deliberately conservative — they tell the
 /// agent loop *which class of problem* this is so it can decide what
 /// to retry without prescribing a specific fix.
+#[cfg(test)]
 fn diagnose_step(
     objective: &str,
     index: usize,
@@ -703,6 +717,7 @@ fn diagnose_step(
     .with_objective(objective)
 }
 
+#[cfg(test)]
 impl Diagnosis {
     fn with_objective(mut self, objective: &str) -> Self {
         self.revised_plan
@@ -1620,6 +1635,7 @@ fn simple_diff(path: &str, before: &str, after: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
     let mut files = Vec::new();
     let mut risky_steps = 0;
@@ -1652,6 +1668,7 @@ fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
     }
 }
 
+#[cfg(test)]
 fn classify_effort(signals: &EffortSignals) -> EffortTier {
     if signals.prior_failures >= 2
         || signals.files_touched >= 8
@@ -1670,6 +1687,7 @@ fn classify_effort(signals: &EffortSignals) -> EffortTier {
     EffortTier::Low
 }
 
+#[cfg(test)]
 fn escalate_effort(current: EffortTier) -> EffortTier {
     match current {
         EffortTier::Low => EffortTier::Medium,
@@ -1677,6 +1695,7 @@ fn escalate_effort(current: EffortTier) -> EffortTier {
     }
 }
 
+#[cfg(test)]
 fn novelty_score(objective: &str, files: &[String], risky_steps: usize, total_steps: usize) -> f32 {
     let mut score: f32 = 0.0;
     let objective = objective.to_ascii_lowercase();
@@ -1702,6 +1721,7 @@ fn novelty_score(objective: &str, files: &[String], risky_steps: usize, total_st
     score.min(1.0)
 }
 
+#[cfg(test)]
 fn checkpoint_from_step(
     objective: &str,
     index: usize,
@@ -1740,6 +1760,7 @@ fn checkpoint_from_step(
     })
 }
 
+#[cfg(test)]
 fn dependency_from_label(label: &str) -> Option<String> {
     label
         .split_whitespace()
@@ -1748,6 +1769,7 @@ fn dependency_from_label(label: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn stable_subtask_id(value: &str) -> String {
     let mut out = value
         .chars()
@@ -1765,6 +1787,7 @@ fn stable_subtask_id(value: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn current_timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1772,6 +1795,7 @@ fn current_timestamp() -> String {
     format!("unix:{}", now.as_secs())
 }
 
+#[cfg(test)]
 fn harness_rule_from_logs(
     objective: &str,
     logs: &[AgentRunStepLog],
@@ -1787,6 +1811,7 @@ fn harness_rule_from_logs(
     Some(format!("When working on '{}', Zeus escalated effort to {} after a failed execution step. Re-plan with the failure output in context before attempting broader changes.", objective, effort_tier.label()))
 }
 
+#[cfg(test)]
 fn summarize_agent_run(
     objective: &str,
     completed: bool,

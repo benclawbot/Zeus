@@ -1,11 +1,10 @@
 import { FileText, Image as ImageIcon, Paperclip, Send, Sparkles, Square, User, X } from "lucide-react";
 import type { RefObject, ChangeEvent, KeyboardEvent, ClipboardEvent } from "react";
-import type { AccessMode, ChatMessage, SessionRef } from "../App";
+import type { ChatMessage, SessionRef } from "../App";
 import type { AttachedFile } from "../App";
 import type { UseSlashMenuResult } from "../providers/slash";
 import type { SlashItem } from "../providers/slash";
 import type { ProviderInfo, ProviderKeysStatus } from "../providers/providers";
-import { AgentProgressBubble } from "../components/AgentProgressBubble";
 import { MarkdownView } from "../components/MarkdownView";
 import { StatusBar } from "../components/StatusBar";
 import styles from "./HomeView.module.css";
@@ -38,11 +37,6 @@ interface HomeViewProps {
   activeSkillId: string | null;
   detachSkill: () => void;
 
-  // Access mode
-  accessMode: AccessMode;
-  setAccessMode: (mode: AccessMode) => void;
-  persistAccess: (mode: AccessMode) => void;
-
   // Run state
   runState: "idle" | "running" | "error";
   handleSend: () => Promise<void> | void;
@@ -58,8 +52,6 @@ interface HomeViewProps {
   livePromptTokens: number;
   onOpenSettings: () => void;
 }
-
-const ACCESS_MODES: AccessMode[] = ["Full", "Local", "Review", "Locked"];
 
 /**
  * The chat surface: header pills, conversation history, the composer
@@ -85,9 +77,6 @@ export function HomeView({
   applySlashPick,
   activeSkillId,
   detachSkill,
-  accessMode,
-  setAccessMode,
-  persistAccess,
   runState,
   handleSend,
   stopRun,
@@ -112,17 +101,6 @@ export function HomeView({
 
       <div className={styles.conversation} aria-label="Conversation" ref={conversationRef}>
         {chat.map((entry) => {
-          if (entry.agentProgress) {
-            return (
-              <AgentProgressBubble
-                key={entry.id}
-                steps={entry.agentProgress.steps}
-                completed={entry.agentProgress.completed}
-                total={entry.agentProgress.steps.length}
-                partial={entry.agentProgress.partial}
-              />
-            );
-          }
           if (entry.role === "user") {
             return (
               <article key={entry.id} className={`chat-bubble ${styles.chatUser}`}>
@@ -223,22 +201,6 @@ export function HomeView({
               type="file"
             />
             <button aria-label="Attach file" type="button" onClick={() => fileInputRef.current?.click()}><Paperclip size={16} /></button>
-            <label className={styles.composerAccess}>
-              <select
-                aria-label="Access mode"
-                className={styles.composerAccessSelect}
-                onChange={(event) => {
-                  const next = event.target.value as AccessMode;
-                  setAccessMode(next);
-                  persistAccess(next);
-                }}
-                value={accessMode}
-              >
-                {ACCESS_MODES.map((mode) => (
-                  <option key={mode} value={mode}>{mode}</option>
-                ))}
-              </select>
-            </label>
             <WorkingFolderButton />
             {attachedFiles.map((file) => (
               <span className={file.kind === "image" ? `${styles.attachedChip} ${styles.attachedChipImage}` : styles.attachedChip} key={file.id}>
@@ -265,13 +227,6 @@ export function HomeView({
             ))}
           </div>
           <div className={styles.sendCluster}>
-            <span>{
-              slash.visible
-                ? (runState === "running" ? "Slash picker open - run in progress, Esc to close" : "Up Down navigate - Enter to pick")
-                : runState === "running"
-                  ? "Generating... press the stop button to cancel"
-                  : "Enter sends · Shift+Enter adds a line"
-            }</span>
             {runState === "running" ? (
               <button aria-label="Stop run" className={styles.stopButton} onClick={stopRun} type="button"><Square size={14} /></button>
             ) : (

@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 use crate::code_intelligence;
 use crate::patch;
 use crate::workspace::{
-    self, AgentStepRequest, ApplyWorkspaceEditRequest, GitOperationRequest,
-    ListWorkspaceDirRequest, ProjectConfigRequest, ReadWorkspaceFileRequest, ShellCommandRequest,
-    TestRunRequest, WriteWorkspaceFileRequest,
+    self, ApplyWorkspaceEditRequest, GitOperationRequest, ListWorkspaceDirRequest,
+    ProjectConfigRequest, ReadWorkspaceFileRequest, ShellCommandRequest, TestRunRequest,
+    WriteWorkspaceFileRequest,
 };
 
 pub const ENGINE_VERSION: &str = "pi-rust-foundation-1";
@@ -82,7 +82,6 @@ pub struct AgentEngineHealth {
     pub phase: EnginePhase,
     pub workspace_limits_disabled: bool,
     pub filesystem_scope: &'static str,
-    pub legacy_loop_preserved: bool,
     pub events: Vec<EngineEventType>,
     pub tools: Vec<EngineToolManifest>,
     pub next_implementation: Vec<FollowUpMilestone>,
@@ -144,7 +143,6 @@ pub fn health() -> AgentEngineHealth {
         phase: EnginePhase::Idle,
         workspace_limits_disabled: true,
         filesystem_scope: "unrestricted: absolute paths and parent traversal are allowed; workspaceDir is only a relative-path anchor",
-        legacy_loop_preserved: true,
         events: vec![
             EngineEventType::AgentStart,
             EngineEventType::AgentEnd,
@@ -198,7 +196,7 @@ pub fn follow_up_plan() -> Vec<FollowUpMilestone> {
         FollowUpMilestone {
             id: "approval-single-gate",
             title: "Approval as the only gate",
-            outcome: "Make beforeToolCall create/consume PendingApproval; demote approved: bool to legacy compatibility only.",
+            outcome: "Create and consume session-bound approvals before any risky tool execution.",
             files: vec!["src-tauri/src/agent_runtime.rs", "src-tauri/src/engine/approval_gate.rs", "src-tauri/src/workspace.rs"],
         },
         FollowUpMilestone {
@@ -487,30 +485,6 @@ fn run_tool(
                 result.query
             );
             Ok((summary, json!(result)))
-        }
-        "agentTask" | "agent_task" => {
-            let steps_value = call
-                .args
-                .get("steps")
-                .cloned()
-                .ok_or_else(|| "agentTask requires steps".to_string())?;
-            let steps: Vec<AgentStepRequest> =
-                serde_json::from_value(steps_value).map_err(|e| format!("parse steps: {e}"))?;
-            let out = workspace::run_agent_task(
-                workspace::AgentRunRequest {
-                    objective: string_arg(&call.args, "objective")
-                        .unwrap_or_else(|| batch.objective.clone()),
-                    workspace_dir: workspace_dir(&call.args, batch),
-                    steps,
-                    approved: batch.approved,
-                    approval_id: batch.approval_id.clone(),
-                    approval_session_id: batch.approval_session_id.clone(),
-                    stop_on_error: bool_arg(&call.args, "stopOnError", batch.stop_on_error),
-                    prior_failures: 0,
-                },
-                access_mode,
-            );
-            Ok((out.summary.clone(), json!(out)))
         }
         other => Err(format!("Unknown engine tool '{other}'.")),
     }

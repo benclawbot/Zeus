@@ -38,14 +38,13 @@ use providers::{
 use workspace::{
     apply_workspace_edit as apply_workspace_edit_impl,
     list_workspace_dir as list_workspace_dir_impl, load_project_config as load_project_config_impl,
-    read_workspace_file as read_workspace_file_impl, run_agent_task as run_agent_task_impl,
-    run_git_operation as run_git_operation_impl, run_project_test as run_project_test_impl,
-    run_shell_command as run_shell_command_impl, write_workspace_file as write_workspace_file_impl,
-    AgentRunRequest, AgentRunResult, ApplyWorkspaceEditRequest, ApplyWorkspaceEditResult,
-    GitOperationRequest, GitOperationResult, ListWorkspaceDirRequest, ListWorkspaceDirResult,
-    ProjectConfigRequest, ProjectConfigResult, ReadWorkspaceFileRequest, ReadWorkspaceFileResult,
-    ShellCommandRequest, ShellCommandResult, TestRunRequest, TestRunResult,
-    WriteWorkspaceFileRequest, WriteWorkspaceFileResult,
+    read_workspace_file as read_workspace_file_impl, run_git_operation as run_git_operation_impl,
+    run_project_test as run_project_test_impl, run_shell_command as run_shell_command_impl,
+    write_workspace_file as write_workspace_file_impl, ApplyWorkspaceEditRequest,
+    ApplyWorkspaceEditResult, GitOperationRequest, GitOperationResult, ListWorkspaceDirRequest,
+    ListWorkspaceDirResult, ProjectConfigRequest, ProjectConfigResult, ReadWorkspaceFileRequest,
+    ReadWorkspaceFileResult, ShellCommandRequest, ShellCommandResult, TestRunRequest,
+    TestRunResult, WriteWorkspaceFileRequest, WriteWorkspaceFileResult,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -1734,24 +1733,6 @@ fn apply_workspace_edit(
 }
 
 #[tauri::command]
-fn run_agent_task(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    request: AgentRunRequest,
-) -> Result<AgentRunResult, String> {
-    validate_runtime_approval(
-        &app,
-        request.approval_session_id.as_deref(),
-        request.approval_id.as_deref(),
-    )?;
-    let access_mode = {
-        let conn = state.db.lock();
-        current_access_mode(&conn)?
-    };
-    Ok(run_agent_task_impl(request, access_mode.as_deref()))
-}
-
-#[tauri::command]
 fn list_workspace_dir(
     state: tauri::State<'_, AppState>,
     request: ListWorkspaceDirRequest,
@@ -1869,7 +1850,6 @@ pub fn run() {
             read_workspace_file,
             write_workspace_file,
             apply_workspace_edit,
-            run_agent_task,
             list_workspace_dir,
             load_project_config,
             run_git_operation,
