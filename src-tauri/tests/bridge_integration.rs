@@ -103,7 +103,11 @@ fn declared_commands_match_lib_rs_command_annotations() {
     let mut declared_in_source = std::collections::HashSet::new();
     for line in combined.lines() {
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("fn ").or(trimmed.strip_prefix("async fn ")) {
+        let visibility_stripped = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+        if let Some(rest) = visibility_stripped
+            .strip_prefix("fn ")
+            .or(visibility_stripped.strip_prefix("async fn "))
+        {
             // Take the function name up to the first `(` or whitespace.
             let name: String = rest
                 .chars()
