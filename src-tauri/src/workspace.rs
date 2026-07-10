@@ -38,6 +38,8 @@ pub struct ShellCommandRequest {
     /// responsible for the actual check; here we just log it.
     #[serde(default)]
     pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -93,6 +95,8 @@ pub struct WriteWorkspaceFileRequest {
     pub approved: bool,
     #[serde(default)]
     pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -121,6 +125,8 @@ pub struct ApplyWorkspaceEditRequest {
     pub approved: bool,
     #[serde(default)]
     pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -197,6 +203,8 @@ pub struct AgentRunRequest {
     /// authorized for any risky step the agent attempts.
     #[serde(default)]
     pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_session_id: Option<String>,
     /// Hard cap on the total number of self-correction iterations the
     /// agent is allowed to run after the initial plan executes. Defaults
     /// to 5 so a stuck agent doesn't loop forever.
@@ -398,6 +406,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                         expected_text: None,
                         approved: request.approved,
                         approval_id: request.approval_id.clone(),
+                        approval_session_id: request.approval_session_id.clone(),
                     },
                     access_mode,
                 )
@@ -429,6 +438,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                         replace_all,
                         approved: request.approved,
                         approval_id: request.approval_id.clone(),
+                        approval_session_id: request.approval_session_id.clone(),
                     },
                     access_mode,
                 )
@@ -462,6 +472,7 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                         timeout_ms,
                         approved: request.approved,
                         approval_id: request.approval_id.clone(),
+                        approval_session_id: request.approval_session_id.clone(),
                     },
                     access_mode,
                 )
@@ -502,6 +513,9 @@ pub fn run_agent_task(request: AgentRunRequest, access_mode: Option<&str>) -> Ag
                         workspace_dir: request.workspace_dir.clone(),
                         args,
                         timeout_ms,
+                        approved: request.approved,
+                        approval_id: request.approval_id.clone(),
+                        approval_session_id: request.approval_session_id.clone(),
                     },
                     access_mode,
                 )
@@ -1087,6 +1101,12 @@ pub struct GitOperationRequest {
     pub workspace_dir: Option<String>,
     pub args: Vec<String>,
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub approved: bool,
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    pub approval_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1100,13 +1120,14 @@ pub struct GitOperationResult {
     pub timed_out: bool,
     pub duration_ms: u128,
     pub mutated: bool,
+    pub policy: PolicyDecision,
 }
 
 /// Run a single `git` subcommand against the workspace. Read-only
 /// subcommands (`status`, `log`, `diff`, `show`, `branch`) run under any
 /// access mode. Mutating subcommands (`commit`, `merge`, `reset`,
-/// `checkout`, `clean`, `push`, `pull`) require explicit `approved: true`
-/// AND `Review` access mode OR `Full` access mode.
+/// `checkout`, `clean`, `push`, `pull`) are classified as destructive and
+/// must be approved whenever the active access mode requires it.
 pub fn run_git_operation(
     request: GitOperationRequest,
     access_mode: Option<&str>,
@@ -1125,13 +1146,16 @@ pub fn run_git_operation(
             | "ls-files"
             | "ls-tree"
     );
-    if !read_only {
-        match mode {
-            "Locked" => return Err("Locked mode blocks git mutations.".to_string()),
-            "Review" | "Full" => {}
-            _ => return Err(format!("Access mode '{mode}' blocks git mutations.")),
-        }
-    }
+    let policy = authorize_command(
+        Some(mode),
+        request.approved,
+        if read_only {
+            CommandClass::Safe
+        } else {
+            CommandClass::Destructive
+        },
+        request.approval_id.as_deref(),
+    )?;
     let root = workspace_root(request.workspace_dir.as_deref())?;
     let timeout = Duration::from_millis(
         request
@@ -1180,6 +1204,7 @@ pub fn run_git_operation(
         timed_out,
         duration_ms: started.elapsed().as_millis(),
         mutated: !read_only,
+        policy,
     })
 }
 
@@ -1425,13 +1450,13 @@ fn resolve_existing_workspace_dir(
 
 fn authorize_command(
     access_mode: Option<&str>,
-    approved: bool,
+    _approved: bool,
     class: CommandClass,
     approval_id: Option<&str>,
 ) -> Result<PolicyDecision, String> {
     let mode = access_mode.unwrap_or("Full").to_string();
     let approval_required = match (mode.as_str(), class) {
-        ("Full", CommandClass::Privileged) => true,
+        ("Full", CommandClass::Destructive | CommandClass::Privileged) => true,
         ("Full", _) => false,
         (
             "Local",
@@ -1454,7 +1479,7 @@ fn authorize_command(
     // `approved: bool` is false — the runtime has already validated
     // the id. The Tauri command surface is responsible for the
     // consumption check; here we just trust the caller and log the id.
-    let effective_approved = approved || approval_id.is_some();
+    let effective_approved = approval_id.is_some();
     if approval_required && !effective_approved {
         return Err(format!(
             "{} mode requires explicit approval for {} shell commands.",
@@ -1473,7 +1498,7 @@ fn authorize_command(
 
 fn authorize_file_write(
     access_mode: Option<&str>,
-    approved: bool,
+    _approved: bool,
     approval_id: Option<&str>,
 ) -> Result<PolicyDecision, String> {
     let mode = access_mode.unwrap_or("Full").to_string();
@@ -1483,7 +1508,7 @@ fn authorize_file_write(
         "Locked" => return Err("Locked mode blocks file writes.".to_string()),
         other => return Err(format!("Unknown access mode '{other}'.")),
     };
-    let effective_approved = approved || approval_id.is_some();
+    let effective_approved = approval_id.is_some();
     if approval_required && !effective_approved {
         return Err("Review mode requires explicit approval for file writes.".to_string());
     }
@@ -1837,7 +1862,13 @@ mod tests {
     fn policy_depends_on_access_mode() {
         assert!(authorize_command(Some("Full"), false, CommandClass::Safe, None).is_ok());
         assert!(authorize_command(Some("Local"), false, CommandClass::Dependency, None).is_err());
-        assert!(authorize_command(Some("Local"), true, CommandClass::Dependency, None).is_ok());
+        assert!(authorize_command(
+            Some("Local"),
+            false,
+            CommandClass::Dependency,
+            Some("approval-1"),
+        )
+        .is_ok());
         assert!(authorize_command(Some("Review"), false, CommandClass::Safe, None).is_err());
         assert!(authorize_command(Some("Locked"), true, CommandClass::Safe, None).is_err());
     }
@@ -1853,6 +1884,35 @@ mod tests {
         .unwrap();
         assert!(decision.approved);
         assert_eq!(decision.approval_id.as_deref(), Some("approval-1"));
+    }
+
+    #[test]
+    fn untrusted_approved_flag_does_not_authorize_a_risky_command() {
+        let result = authorize_command(Some("Review"), true, CommandClass::Safe, None);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_mode_blocks_git_mutations_without_an_approval() {
+        let root = unique_tempdir("review_git_mutation");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = run_git_operation(
+            GitOperationRequest {
+                workspace_dir: Some(root.to_string_lossy().into_owned()),
+                args: vec!["commit".into(), "-m".into(), "unsafe".into()],
+                timeout_ms: Some(1_000),
+                approved: false,
+                approval_id: None,
+                approval_session_id: None,
+            },
+            Some("Review"),
+        );
+
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1915,6 +1975,7 @@ mod tests {
                 }],
                 approved: false,
                 approval_id: None,
+                approval_session_id: None,
                 max_correction_steps: None,
                 stop_on_error: true,
                 prior_failures: 1,
@@ -2015,6 +2076,7 @@ mod tests {
                 }],
                 approved: false,
                 approval_id: None,
+                approval_session_id: None,
                 max_correction_steps: None,
                 stop_on_error: true,
                 prior_failures: 0,
@@ -2057,6 +2119,7 @@ mod tests {
                 }],
                 approved: false,
                 approval_id: None,
+                approval_session_id: None,
                 max_correction_steps: None,
                 stop_on_error: true,
                 prior_failures: 0,

@@ -12,7 +12,8 @@ export type ApprovalCheckStatus =
   | "session-wide"
   | "already-consumed"
   | "unknown"
-  | "not-approved";
+  | "not-approved"
+  | "session-mismatch";
 
 export interface ApprovalCheckResult {
   status: ApprovalCheckStatus;
@@ -43,12 +44,16 @@ export interface PendingApproval {
   resolutionNote: string | null;
 }
 
-export async function checkApproval(id: string, consumeOneShot = true): Promise<ApprovalCheckResult> {
+export async function checkApproval(
+  id: string,
+  sessionId: string,
+  consumeOneShot = true,
+): Promise<ApprovalCheckResult> {
   if (!isTauriRuntime()) {
     throw new Error("Approval checks are available inside the Zeus desktop runtime.");
   }
   return invoke<ApprovalCheckResult>("agent_runtime_check_approval", {
-    request: { id, consumeOneShot },
+    request: { id, sessionId, consumeOneShot },
   });
 }
 

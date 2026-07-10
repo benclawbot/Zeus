@@ -36,6 +36,7 @@ export interface ShellCommandRequest {
    *  actions — the runtime has validated this id against its
    *  ApprovedOnce/ApprovedForSession ledger. */
   approvalId?: string;
+  approvalSessionId?: string;
 }
 
 export interface ShellCommandResult {
@@ -108,6 +109,7 @@ export interface GitOperationResult {
   durationMs: number;
   /** True when the command modified the working tree (commit, write, etc.). */
   mutated: boolean;
+  policy: PolicyDecision;
 }
 
 export interface TestRunResult {
@@ -162,6 +164,7 @@ export interface AgentRunRequest {
    *  frontend surfaces a single approval card and passes the resolved
    *  id down to the Rust runtime, which consumes or honors it. */
   approvalId?: string;
+  approvalSessionId?: string;
   /** Hard cap on the self-correction iterations the agent loop is
    *  allowed to perform. Defaults to 5 in the Rust runtime. */
   maxCorrectionSteps?: number;

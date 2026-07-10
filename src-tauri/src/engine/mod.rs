@@ -115,6 +115,8 @@ pub struct AgentEngineToolBatchRequest {
     #[serde(default)]
     pub approval_id: Option<String>,
     #[serde(default)]
+    pub approval_session_id: Option<String>,
+    #[serde(default)]
     pub stop_on_error: bool,
 }
 
@@ -352,6 +354,7 @@ fn run_tool(
                     expected_text: string_arg(&call.args, "expectedText"),
                     approved: batch.approved,
                     approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
                 },
                 access_mode,
             )?;
@@ -373,6 +376,7 @@ fn run_tool(
                     replace_all: bool_arg(&call.args, "replaceAll", false),
                     approved: batch.approved,
                     approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
                 },
                 access_mode,
             )?;
@@ -406,6 +410,7 @@ fn run_tool(
                     timeout_ms: u64_arg(&call.args, "timeoutMs"),
                     approved: batch.approved,
                     approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
                 },
                 access_mode,
             )?;
@@ -421,6 +426,9 @@ fn run_tool(
                     workspace_dir: workspace_dir(&call.args, batch),
                     args,
                     timeout_ms: u64_arg(&call.args, "timeoutMs"),
+                    approved: bool_arg(&call.args, "approved", false),
+                    approval_id: string_arg(&call.args, "approvalId"),
+                    approval_session_id: string_arg(&call.args, "approvalSessionId"),
                 },
                 access_mode,
             )?;
@@ -503,6 +511,7 @@ fn run_tool(
                     steps,
                     approved: batch.approved,
                     approval_id: batch.approval_id.clone(),
+                    approval_session_id: batch.approval_session_id.clone(),
                     max_correction_steps: usize_arg(&call.args, "maxCorrectionSteps"),
                     stop_on_error: bool_arg(&call.args, "stopOnError", batch.stop_on_error),
                     prior_failures: 0,
@@ -603,6 +612,7 @@ mod tests {
             }],
             approved: true,
             approval_id: None,
+            approval_session_id: None,
             stop_on_error: true,
         };
         let result = execute_tool_batch(request, Some("Full"));
@@ -634,6 +644,7 @@ mod tests {
             ],
             approved: false,
             approval_id: None,
+            approval_session_id: None,
             stop_on_error: true,
         };
         let result = execute_tool_batch(request, Some("Full"));

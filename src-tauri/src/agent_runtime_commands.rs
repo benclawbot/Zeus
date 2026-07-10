@@ -79,6 +79,7 @@ pub struct ApprovalCheckResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckApprovalRequest {
+    pub session_id: String,
     pub id: String,
     /// True when the caller intends to consume this one-shot approval
     /// immediately. Session-wide approvals ignore this flag.
@@ -212,7 +213,11 @@ pub fn agent_runtime_check_approval(
     app: tauri::AppHandle,
     request: CheckApprovalRequest,
 ) -> Result<ApprovalCheckResult, String> {
-    let status = runtime(&app)?.check_approval(&request.id, request.consume_one_shot);
+    let status = runtime(&app)?.check_approval_for_session(
+        &request.session_id,
+        &request.id,
+        request.consume_one_shot,
+    )?;
     let (label, approved, message) = match status {
         ApprovalCheck::Valid => (
             "valid",
@@ -233,6 +238,11 @@ pub fn agent_runtime_check_approval(
             "unknown",
             false,
             "No approval matches the supplied id.".to_string(),
+        ),
+        ApprovalCheck::SessionMismatch => (
+            "session-mismatch",
+            false,
+            "This approval belongs to a different agent session.".to_string(),
         ),
         ApprovalCheck::NotApproved => (
             "not-approved",

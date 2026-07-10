@@ -305,6 +305,8 @@ pub enum ApprovalCheck {
     AlreadyConsumed,
     /// The id is unknown to the runtime.
     Unknown,
+    /// The approval belongs to a different agent session.
+    SessionMismatch,
     /// The id was rejected or never approved.
     NotApproved,
 }
@@ -659,21 +661,29 @@ impl AgentRuntimeService {
         Ok(out)
     }
 
-    /// Look up an approval id and tell the caller whether it is usable
-    /// for an upcoming risky execution. Also marks one-shot approvals
-    /// as consumed when `consume_one_shot` is true.
-    pub fn check_approval(&self, id: &str, consume_one_shot: bool) -> ApprovalCheck {
+    /// Consume or validate an approval for the session that requested it.
+    /// A successful one-shot consumption is persisted before this function
+    /// returns so a restart cannot accidentally reuse the approval.
+    pub fn check_approval_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+        consume_one_shot: bool,
+    ) -> Result<ApprovalCheck, String> {
         let mut state = self.state.lock();
+        let Some(approval) = state.approvals.iter().find(|a| a.id == id) else {
+            return Ok(ApprovalCheck::Unknown);
+        };
+        if approval.session_id != session_id {
+            return Ok(ApprovalCheck::SessionMismatch);
+        }
         if state.session_wide.contains(id) {
-            return ApprovalCheck::SessionWide;
+            return Ok(ApprovalCheck::SessionWide);
         }
         if state.consumed_one_shot.contains(id) {
-            return ApprovalCheck::AlreadyConsumed;
+            return Ok(ApprovalCheck::AlreadyConsumed);
         }
-        let Some(approval) = state.approvals.iter().find(|a| a.id == id) else {
-            return ApprovalCheck::Unknown;
-        };
-        match approval.status {
+        let status = match approval.status {
             ApprovalStatus::ApprovedForSession => {
                 state.session_wide.insert(id.to_string());
                 ApprovalCheck::SessionWide
@@ -686,7 +696,13 @@ impl AgentRuntimeService {
             }
             ApprovalStatus::Rejected => ApprovalCheck::NotApproved,
             ApprovalStatus::Pending => ApprovalCheck::NotApproved,
+        };
+        let changed = matches!(status, ApprovalCheck::Valid) && consume_one_shot;
+        drop(state);
+        if changed {
+            self.persist()?;
         }
+        Ok(status)
     }
 
     pub fn list_pending_approvals(&self, session_id: Option<&str>) -> Vec<PendingApproval> {
@@ -1057,9 +1073,92 @@ mod tests {
             .unwrap();
         svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None)
             .unwrap();
-        assert_eq!(svc.check_approval(&approval.id, true), ApprovalCheck::Valid);
         assert_eq!(
-            svc.check_approval(&approval.id, true),
+            svc.check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::Valid
+        );
+        assert_eq!(
+            svc.check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::AlreadyConsumed
+        );
+    }
+
+    #[test]
+    fn approval_cannot_be_used_by_a_different_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_session_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        let approval = svc
+            .create_approval(approval_for_steps(
+                "session-a".into(),
+                "edit one file".into(),
+                vec!["write src/lib.rs".into()],
+                vec!["src/lib.rs".into()],
+                RiskClass::LocalWrite,
+                None,
+            ))
+            .unwrap();
+        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None)
+            .unwrap();
+
+        assert_eq!(
+            svc.check_approval_for_session("session-b", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::SessionMismatch
+        );
+        assert_eq!(
+            svc.check_approval_for_session("session-a", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::Valid
+        );
+    }
+
+    #[test]
+    fn consumed_one_shot_approval_survives_a_runtime_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "zeus_rt_restart_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        let svc =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        let approval = svc
+            .create_approval(approval_for_steps(
+                "s".into(),
+                "edit one file".into(),
+                vec!["write src/lib.rs".into()],
+                vec!["src/lib.rs".into()],
+                RiskClass::LocalWrite,
+                None,
+            ))
+            .unwrap();
+        svc.resolve_approval(&approval.id, ApprovalStatus::ApprovedOnce, None)
+            .unwrap();
+        assert_eq!(
+            svc.check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
+            ApprovalCheck::Valid
+        );
+        drop(svc);
+
+        let restarted =
+            AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
+        assert_eq!(
+            restarted
+                .check_approval_for_session("s", &approval.id, true)
+                .unwrap(),
             ApprovalCheck::AlreadyConsumed
         );
     }
@@ -1090,7 +1189,8 @@ mod tests {
             .unwrap();
         for _ in 0..3 {
             assert_eq!(
-                svc.check_approval(&approval.id, false),
+                svc.check_approval_for_session("s", &approval.id, false)
+                    .unwrap(),
                 ApprovalCheck::SessionWide
             );
         }
@@ -1109,7 +1209,8 @@ mod tests {
         let svc =
             AgentRuntimeService::load_or_create_with(&path, browser_driver_script_path()).unwrap();
         assert_eq!(
-            svc.check_approval("does-not-exist", false),
+            svc.check_approval_for_session("s", "does-not-exist", false)
+                .unwrap(),
             ApprovalCheck::Unknown
         );
     }

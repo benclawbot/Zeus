@@ -25,7 +25,7 @@ mod validation;
 mod web_search;
 mod workspace;
 
-use agent_runtime::AgentRuntimeService;
+use agent_runtime::{AgentRuntimeService, ApprovalCheck};
 use persistence::{
     list_sessions as db_list_sessions, open_and_init, save_session as db_save_session,
     EditProposalRequest, PersistedProposal, PersistedSession, PersistedState, RecordActionRequest,
@@ -1460,11 +1460,43 @@ fn seed_default_state(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn validate_runtime_approval(
+    app: &tauri::AppHandle,
+    session_id: Option<&str>,
+    approval_id: Option<&str>,
+) -> Result<(), String> {
+    let (Some(session_id), Some(approval_id)) = (session_id, approval_id) else {
+        return match (session_id, approval_id) {
+            (None, None) => Ok(()),
+            _ => Err("A runtime approval requires both an approval id and session id.".to_string()),
+        };
+    };
+    let runtime = app
+        .try_state::<AgentRuntimeService>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| "AgentRuntimeService was not managed by the Tauri app.".to_string())?;
+    match runtime.check_approval_for_session(session_id, approval_id, true)? {
+        ApprovalCheck::Valid | ApprovalCheck::SessionWide => Ok(()),
+        ApprovalCheck::AlreadyConsumed => Err("This approval has already been used.".to_string()),
+        ApprovalCheck::Unknown => Err("No approval matches the supplied id.".to_string()),
+        ApprovalCheck::SessionMismatch => {
+            Err("This approval belongs to a different agent session.".to_string())
+        }
+        ApprovalCheck::NotApproved => Err("Approval was rejected or never approved.".to_string()),
+    }
+}
+
 #[tauri::command]
 fn run_shell_command(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: ShellCommandRequest,
 ) -> Result<ShellCommandResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1486,9 +1518,15 @@ fn read_workspace_file(
 
 #[tauri::command]
 fn write_workspace_file(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: WriteWorkspaceFileRequest,
 ) -> Result<WriteWorkspaceFileResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1498,9 +1536,15 @@ fn write_workspace_file(
 
 #[tauri::command]
 fn apply_workspace_edit(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: ApplyWorkspaceEditRequest,
 ) -> Result<ApplyWorkspaceEditResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1510,9 +1554,15 @@ fn apply_workspace_edit(
 
 #[tauri::command]
 fn run_agent_task(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: AgentRunRequest,
 ) -> Result<AgentRunResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
@@ -1546,9 +1596,15 @@ fn load_project_config(
 
 #[tauri::command]
 fn run_git_operation(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: GitOperationRequest,
 ) -> Result<GitOperationResult, String> {
+    validate_runtime_approval(
+        &app,
+        request.approval_session_id.as_deref(),
+        request.approval_id.as_deref(),
+    )?;
     let access_mode = {
         let conn = state.db.lock();
         current_access_mode(&conn)?
