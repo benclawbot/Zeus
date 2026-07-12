@@ -55,7 +55,7 @@
 /* User-side chat layout. Descends into the shared chat-bubble/avatar/body
    classes used by the shared chat surface; those rules stay global.
    Avatar is pinned to the right edge; the body fills the remaining row
-   width with right-aligned text, so long user prompts use the full
+   width with left-aligned text, so long user prompts use the full
    column instead of floating in a narrow right-side strip.
    Selector pairs `.chat-bubble` with the hashed local class so the
    rule wins the cascade against the global `.chat-bubble` block in
@@ -74,7 +74,7 @@
   grid-column: 1;
   grid-row: 1;
   justify-self: stretch;
-  text-align: right;
+  text-align: left;
   align-items: stretch;
   max-width: 100%;
 }

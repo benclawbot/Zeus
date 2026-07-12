@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { isSubstantiveObjective, generatePlanSteps, summarizeSessionTitle } from "./planner";
+import { isSubstantiveObjective, generatePlanSteps, summarizeObjectiveLine, summarizeSessionTitle } from "./planner";
 import * as registry from "./registry";
 
 vi.mock("./registry", async () => {
@@ -40,6 +40,20 @@ describe("planner.isSubstantiveObjective", () => {
     expect(isSubstantiveObjective("Add a settings panel to the sidebar")).toBe(true);
     expect(isSubstantiveObjective("Refactor the agent loop into a smaller module")).toBe(true);
     expect(isSubstantiveObjective("Run npx tsc and fix any type errors")).toBe(true);
+  });
+});
+
+describe("planner.summarizeObjectiveLine", () => {
+  it("reduces a long specification to a single concise line", () => {
+    const prompt = "Build an app according to this presentation of the app, make it beautiful and designed according to the context: Version courte — le pitch en 3 phrases\nCahier de dictées est une application web de suivi orthographique.";
+    const result = summarizeObjectiveLine(prompt);
+    expect(result).toBe("Build an app according to this presentation of the app, make it beautiful…");
+    expect(result).not.toContain("\n");
+    expect(result.length).toBeLessThanOrEqual(80);
+  });
+
+  it("leaves short objectives intact", () => {
+    expect(summarizeObjectiveLine("Fix the chat alignment" )).toBe("Fix the chat alignment");
   });
 });
 
