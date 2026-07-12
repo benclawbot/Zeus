@@ -110,13 +110,46 @@ fn inject_skill(app: &tauri::AppHandle, request: &ChatRequest) -> Result<Vec<Cha
             let root = resolve_skills_dir(app)?;
             select_auto_skill_messages(&root, request)?
         };
-    if skill_messages.is_empty() {
-        return Ok(request.messages.clone());
-    }
-    let mut out = Vec::with_capacity(request.messages.len() + skill_messages.len());
+    let capability_message = runtime_capability_message();
+    let mut out = Vec::with_capacity(request.messages.len() + skill_messages.len() + 1);
+    out.push(capability_message);
     out.extend(skill_messages);
     out.extend(request.messages.iter().cloned());
     Ok(out)
+}
+
+/// Build the authoritative capability prefix from the same manifest used by
+/// the native executor. Keeping this server-side prevents the UI prompt and
+/// executable tool set from drifting apart.
+fn runtime_capability_message() -> ChatMessage {
+    let tools = engine::tool_manifest()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    ChatMessage {
+        role: "system".to_string(),
+        content: serde_json::Value::String(format!(
+            "# Zeus runtime capabilities\nThis is authoritative for the current runtime. You are not static-only: you can inspect and edit files, run commands and tests, use Git, search code, apply transactional patches, and perform web search through native tools. Available native tools: {tools}. Use tools to verify runtime behavior when the objective requires it. Do not claim that you cannot run code, access the workspace, or test changes. Be honest about inherent limits: you cannot directly see the user's screen unless an image is attached, runtime observations only exist after you execute a tool, and persistent memory is only available when explicitly surfaced by the host."
+        )),
+    }
+}
+
+#[cfg(test)]
+mod runtime_capability_tests {
+    use super::*;
+
+    #[test]
+    fn capability_message_is_derived_from_executable_manifest() {
+        let message = runtime_capability_message();
+        let text = message_text(&message.content);
+        assert_eq!(message.role, "system");
+        for tool in engine::tool_manifest() {
+            assert!(text.contains(tool.name), "missing tool {}", tool.name);
+        }
+        assert!(text.contains("not static-only"));
+        assert!(text.contains("run commands and tests"));
+    }
 }
 
 fn strip_wrapping_quotes(value: &str) -> String {

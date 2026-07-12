@@ -1,7 +1,6 @@
 import { Check } from "lucide-react";
 import type { ReactNode } from "react";
 import {
-  derivePlanFromObjective,
   type PlanStatus,
   type RuntimePlan,
 } from "../agentRuntimeDeepLoop";
@@ -18,6 +17,7 @@ interface PlanProgressPanelProps {
    * heuristic plan when null (planning was skipped or failed).
    */
   runtimePlan?: RuntimePlan | null;
+  planPhase?: "idle" | "conversation" | "planning" | "ready" | "unavailable";
 }
 
 function statusGlyph(status: PlanStatus, index: number): string {
@@ -40,12 +40,11 @@ function buildPlan(
   const objective = latestUserObjective.trim();
   if (!objective) return null;
   // Prefer the LLM-generated plan when available — it carries task-
-  // specific steps that match this objective. Fall back to the heuristic
-  // 5-step boilerplate when the planner was skipped (short chat,
-  // provider error, etc.).
-  const basePlan = runtimePlan && runtimePlan.steps.length > 0
-    ? { ...runtimePlan, objective: runtimePlan.objective || objective }
-    : derivePlanFromObjective(objective);
+  // specific steps that match this objective. Conversational turns and
+  // planner failures deliberately remain planless instead of displaying
+  // generic progress that did not come from the objective.
+  if (!runtimePlan || runtimePlan.steps.length === 0) return null;
+  const basePlan = { ...runtimePlan, objective: runtimePlan.objective || objective };
   const updated = basePlan;
   if (lastToolFailed) {
     // Heuristic plan: a "recover" step is always present, target it.
@@ -73,6 +72,7 @@ export function PlanProgressPanel({
   latestUserObjective,
   lastToolFailed,
   runtimePlan,
+  planPhase = "idle",
 }: PlanProgressPanelProps): ReactNode {
   const plan = buildPlan(latestUserObjective, lastToolFailed, runtimePlan);
   const total = plan?.steps.length ?? 0;
@@ -82,14 +82,18 @@ export function PlanProgressPanel({
     <section className="panel">
       <div className="panel-heading">
         <h2>Plan Progress</h2>
-        <span>{total > 0 ? `${completed} / ${total} done` : "waiting"}</span>
+        <span>{total > 0 ? `${completed} / ${total} done` : planPhase === "planning" ? "planning" : "waiting"}</span>
       </div>
-      <div className="progress-track"><span style={{ width: `${percent}%` }} /></div>
-      <p className="progress-percent">{percent}%</p>
+      {total > 0 ? <><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><p className="progress-percent">{percent}%</p></> : null}
       {plan ? (
         <p className="plan-objective"><strong>Objective:</strong> {plan.objective}</p>
       ) : (
-        <p className="plan-empty">Start a task and Zeus will track the objective and subtasks here.</p>
+        <p className="plan-empty">
+          {planPhase === "conversation" ? "No execution plan needed for this conversational turn."
+            : planPhase === "planning" ? "Planning…"
+              : planPhase === "unavailable" ? "Plan unavailable for this objective."
+                : "Start a task and Zeus will track the objective and subtasks here."}
+        </p>
       )}
       <div className="compact-list">
         {(plan?.steps ?? []).map((step, index) => (

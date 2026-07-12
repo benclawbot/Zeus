@@ -6,7 +6,7 @@ export const NATIVE_WORKSPACE_TOOL_PROMPT = [
   "# Zeus native workspace tools",
   "The Zeus desktop runtime owns tool execution, observations, and re-planning.",
   "For a workspace action, emit a fenced `tool` block with one `<toolName> <JSON object>` line.",
-  "Available tools: listDir, readFile, search, webSearch, editFile, writeFile, runCommand, gitOp, runTest, loadProjectConfig.",
+  "Use the authoritative runtime capability message for the currently available tool names.",
   "After each tool run, Zeus supplies the observation automatically. Do not include tool output in your final response.",
 ].join("\n");
 

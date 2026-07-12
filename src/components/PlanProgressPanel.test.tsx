@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { PlanProgressPanel } from "./PlanProgressPanel";
 
 describe("PlanProgressPanel", () => {
@@ -9,35 +9,16 @@ describe("PlanProgressPanel", () => {
     expect(screen.getByText("waiting")).toBeTruthy();
   });
 
-  it("renders five steps derived from the latest user objective", () => {
-    render(<PlanProgressPanel latestUserObjective="Add a settings panel" />);
-    expect(screen.getByText("Understand objective")).toBeTruthy();
-    expect(screen.getByText("Inspect workspace and available tools")).toBeTruthy();
-    expect(screen.getByText("Run the next safest tool action")).toBeTruthy();
-    expect(screen.getByText("Verify output with tests or focused checks")).toBeTruthy();
-    expect(screen.getByText("Recover from failures before stopping")).toBeTruthy();
-    const objective = screen.getByText((_, element) =>
-      element?.className === "plan-objective" && /Add a settings panel/.test(element.textContent ?? ""),
-    );
-    expect(objective.textContent).toMatch(/Add a settings panel/);
+  it("does not fabricate a plan for a conversational question", () => {
+    render(<PlanProgressPanel latestUserObjective="what are your current coding limitations?" planPhase="conversation" />);
+    expect(screen.getByText(/No execution plan needed/i)).toBeTruthy();
+    expect(screen.queryByText("Understand objective")).toBeNull();
   });
 
-  it("marks recover in-progress when the last tool run failed", () => {
-    const { container } = render(
-      <PlanProgressPanel latestUserObjective="debug it" lastToolFailed />,
-    );
-    const list = container.querySelector(".compact-list");
-    expect(list).toBeTruthy();
-    const recoverRow = within(list as HTMLElement).getByText("Recover from failures before stopping").closest(".compact-row");
-    expect(recoverRow?.getAttribute("data-status")).toBe("in_progress");
-    expect(recoverRow?.textContent ?? "").toMatch(/failure|recovery/i);
-  });
-
-  it("shows the completed count and percent in the heading", () => {
-    render(<PlanProgressPanel latestUserObjective="do a thing" />);
-    // The "Understand objective" step starts as done; the rest as todo.
-    expect(screen.getByText("1 / 5 done")).toBeTruthy();
-    expect(screen.getByText("20%")).toBeTruthy();
+  it("shows planning without fabricated progress", () => {
+    render(<PlanProgressPanel latestUserObjective="Add a settings panel" planPhase="planning" />);
+    expect(screen.getByText("Planning…")).toBeTruthy();
+    expect(screen.queryByText("20%")).toBeNull();
   });
 
   it("renders LLM-generated plan steps when runtimePlan is provided", () => {
@@ -64,9 +45,9 @@ describe("PlanProgressPanel", () => {
     expect(screen.getByText("0%")).toBeTruthy();
   });
 
-  it("falls back to heuristic plan when runtimePlan is null", () => {
-    render(<PlanProgressPanel latestUserObjective="do a thing" runtimePlan={null} />);
-    expect(screen.getByText("Understand objective")).toBeTruthy();
-    expect(screen.getByText("Inspect workspace and available tools")).toBeTruthy();
+  it("shows plan unavailable instead of heuristic steps", () => {
+    render(<PlanProgressPanel latestUserObjective="Implement a difficult change" runtimePlan={null} planPhase="unavailable" />);
+    expect(screen.getByText(/Plan unavailable/i)).toBeTruthy();
+    expect(screen.queryByText("Understand objective")).toBeNull();
   });
 });

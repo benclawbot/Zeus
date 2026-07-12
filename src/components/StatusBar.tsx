@@ -25,6 +25,8 @@ export interface StatusBarProps {
   providerId: string;
   /** Token count of the next outgoing prompt (already built). */
   promptTokens: number;
+  /** Provider-reported input tokens for the last completed turn. */
+  actualPromptTokens?: number;
   /** Trigger ratio for auto-compaction, default 0.4. */
   triggerRatio?: number;
   /** Optional click handler — usually routes to the Settings view. */
@@ -51,14 +53,15 @@ function formatTokens(n: number): string {
 }
 
 export function StatusBar(props: StatusBarProps): React.ReactElement {
-  const { modelId, providerId, promptTokens, onOpenSettings } = props;
+  const { modelId, providerId, promptTokens, actualPromptTokens, onOpenSettings } = props;
+  const displayedTokens = actualPromptTokens ?? promptTokens;
   const triggerRatio = props.triggerRatio ?? DEFAULT_COMPACT_TRIGGER_RATIO;
   const contextWindow = lookupContextWindow(modelId, providerId);
-  const ratio = contextWindowUsage(promptTokens, modelId, providerId);
+  const ratio = contextWindowUsage(displayedTokens, modelId, providerId);
   const band = ratioBand(ratio, triggerRatio);
   const percentText = `${(ratio * 100).toFixed(1)}%`;
   const thresholdText = `${Math.round(triggerRatio * 100)}%`;
-  const promptDisplay = formatTokens(promptTokens);
+  const promptDisplay = formatTokens(displayedTokens);
   const windowDisplay = formatTokens(contextWindow);
 
   return (
@@ -74,11 +77,13 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
       </div>
       <div
         className="status-bar-cell status-bar-context"
-        title={`Outgoing prompt: ${promptTokens.toLocaleString()} tokens / ${contextWindow.toLocaleString()} window`}
+        title={actualPromptTokens === undefined
+          ? `Projected next prompt: ${promptTokens.toLocaleString()} tokens / ${contextWindow.toLocaleString()} window`
+          : `Last provider input: ${actualPromptTokens.toLocaleString()} tokens / ${contextWindow.toLocaleString()} window; next estimate: ${promptTokens.toLocaleString()}`}
       >
         <span className="status-bar-label">Context</span>
         <span className="status-bar-value">
-          {promptDisplay} / {windowDisplay}
+          {promptDisplay} / {windowDisplay}{actualPromptTokens === undefined ? " est." : " actual"}
         </span>
         <span className="status-bar-percent">{percentText}</span>
         <div className="status-bar-track" aria-hidden="true">

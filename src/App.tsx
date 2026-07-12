@@ -22,7 +22,8 @@ import { isTauriRuntime } from "./providers/minimax";
 import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
-import { generatePlanSteps, summarizeSessionTitle } from "./providers/planner";
+import { generatePlanSteps, isSubstantiveObjective, summarizeSessionTitle } from "./providers/planner";
+import { normalizeTokenUsage } from "./providers/tokenUsage";
 import type { RuntimePlan, RuntimePlanStep } from "./agentRuntimeDeepLoop";
 import { deleteSession, listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
 import { listProviders as listProvidersTauri, setAccessMode as persistAccessMode, getProviderKeys, setProviderKeys, testProvider, type ProviderInfo, type ProviderKeysStatus } from "./providers/providers";
@@ -127,7 +128,10 @@ interface ChatMessage {
     in: number;
     out: number;
     cached?: number;
+    cacheWrite?: number;
   };
+  /** Provider-confirmed model that produced this assistant turn. */
+  model?: string;
 }
 export type { ChatMessage };
 
@@ -411,6 +415,8 @@ export function App() {
     } catch { return []; }
   });
   const [runtimePlan, setRuntimePlan] = useState<RuntimePlan | null>(null);
+  const [planPhase, setPlanPhase] = useState<"idle" | "conversation" | "planning" | "ready" | "unavailable">("idle");
+  const planObjectiveRef = useRef("");
   const [proposalDraftBody, setProposalDraftBody] = useState<string | null>(null);
   const notificationCount = countPendingProposals(proposal, activeView === "Harness Evolution");
   const [message, setMessage] = useState("");
@@ -578,6 +584,19 @@ const latestTurnTokens = useMemo(() => {
   return null;
 }, [chat]);
 
+const latestTurnModel = useMemo(() => {
+  for (let index = chat.length - 1; index >= 0; index -= 1) {
+    const entry = chat[index];
+    if (entry.role !== "user" && entry.model) return entry.model;
+  }
+  const configured = activeProviderId === "openai"
+    ? providerKeysStatus.openaiModel
+    : activeProviderId === "anthropic"
+      ? providerKeysStatus.anthropicModel
+      : providerKeysStatus.minimaxModel;
+  return configured ?? providers.find((provider) => provider.id === activeProviderId)?.defaultModel ?? "";
+}, [chat, activeProviderId, providerKeysStatus, providers]);
+
 const livePromptTokens = useMemo(() => {
     const providerOverrides = (() => {
       switch (activeProviderId) {
@@ -731,6 +750,8 @@ const livePromptTokens = useMemo(() => {
     setCompactFromId(null);
     setMessage("");
     setRuntimePlan(null);
+    setPlanPhase("idle");
+    planObjectiveRef.current = "";
     // Release any blob preview URLs pinned to the previous session's
     // attachments before we drop the references on the floor.
     setAttachedFiles((current) => { revokeAttachmentUrls(current); return []; });
@@ -746,6 +767,9 @@ const livePromptTokens = useMemo(() => {
     persistActiveSession();
     setActiveSession(session);
     setChat([]);
+    setRuntimePlan(null);
+    setPlanPhase("idle");
+    planObjectiveRef.current = "";
     setCompactFromId(null);
     setMessage("");
     setActiveSkillId(null);
@@ -1323,14 +1347,21 @@ const livePromptTokens = useMemo(() => {
     // doesn't wait for the plan; the panel shows the heuristic fallback
     // until the LLM response arrives.
     setRuntimePlan(null);
+    planObjectiveRef.current = prompt.trim();
+    if (!isSubstantiveObjective(prompt)) {
+      setPlanPhase("conversation");
+    } else {
+      setPlanPhase("planning");
+    }
     {
       const overrides = getActiveProviderOverrides();
-      void generatePlanSteps(prompt, {
+      if (isSubstantiveObjective(prompt)) void generatePlanSteps(prompt, {
         provider: activeProviderId,
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(overrides.baseUrl ? { baseUrl: overrides.baseUrl } : {}),
       }).then((steps) => {
-        if (!steps) return;
+        if (planObjectiveRef.current !== prompt.trim()) return;
+        if (!steps) { setPlanPhase("unavailable"); return; }
         setRuntimePlan({
           objective: prompt.trim(),
           status: "in_progress",
@@ -1340,6 +1371,7 @@ const livePromptTokens = useMemo(() => {
             status: "todo",
           })),
         });
+        setPlanPhase("ready");
       });
     }
 
@@ -1495,19 +1527,10 @@ const livePromptTokens = useMemo(() => {
       // returns {input_tokens, output_tokens}; MiniMax mirrors OpenAI).
       // The cost estimate uses a conservative blended rate so the totals
       // are directionally useful without being a billing source of truth.
-      const usage = response.usage as {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        input_tokens?: number;
-        output_tokens?: number;
-        total_tokens?: number;
-        prompt_tokens_details?: { cached_tokens?: number };
-      } | undefined;
-      let turnTokens: { in: number; out: number; cached?: number } | undefined;
+      const usage = normalizeTokenUsage(response.usage);
+      let turnTokens: { in: number; out: number; cached?: number; cacheWrite?: number } | undefined;
       if (usage) {
-        const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
-        const completion = usage.completion_tokens ?? usage.output_tokens ?? 0;
-        const cached = usage.prompt_tokens_details?.cached_tokens;
+        const { input: prompt, output: completion, cacheRead: cached, cacheWrite } = usage;
         if (prompt > 0 || completion > 0) {
           const cost = (prompt * 0.000_000_3) + (completion * 0.000_001_2);
           setTokenTotals((current) => ({
@@ -1515,7 +1538,7 @@ const livePromptTokens = useMemo(() => {
             completion: current.completion + completion,
             costUsd: current.costUsd + cost,
           }));
-          turnTokens = { in: prompt, out: completion, ...(cached !== undefined ? { cached } : {}) };
+          turnTokens = { in: prompt, out: completion, ...(cached !== undefined ? { cached } : {}), ...(cacheWrite !== undefined ? { cacheWrite } : {}) };
         }
       }
       const clean = stripThinkingTags(response.content);
@@ -1523,7 +1546,7 @@ const livePromptTokens = useMemo(() => {
       setChat((entries) => {
         nextChat = entries.map((entry) =>
           entry.id === thinkingBubbleId
-            ? { ...entry, text: clean, thinking: false, ...(turnTokens ? { tokens: turnTokens } : {}) }
+            ? { ...entry, text: clean, thinking: false, model: response.model, ...(turnTokens ? { tokens: turnTokens } : {}) }
             : entry,
         );
         return nextChat;
@@ -1975,7 +1998,9 @@ useEffect(() => {
             activeProviderId={activeProviderId}
             providers={providers}
             providerKeysStatus={providerKeysStatus}
+            modelId={latestTurnModel}
             livePromptTokens={livePromptTokens}
+            actualPromptTokens={latestTurnTokens?.in}
             onOpenSettings={() => setActiveView("Settings")}
           />
         ) : (
@@ -2049,6 +2074,7 @@ useEffect(() => {
         latestUserObjective={latestUserObjective}
         lastToolFailed={lastToolFailed}
         runtimePlan={runtimePlan}
+        planPhase={planPhase}
         latestTurnTokens={latestTurnTokens}
         runState={runState}
         messageCount={chat.length}
