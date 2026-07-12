@@ -31,7 +31,6 @@ const DECLARED_COMMANDS: &[&str] = &[
     "list_providers",
     "agent_engine_health",
     "agent_engine_follow_up_plan",
-    "agent_engine_execute_tools",
     "run_ralph_loop",
     "load_state",
     "edit_proposal",
