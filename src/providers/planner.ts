@@ -29,6 +29,22 @@ Objective: `;
 const SUBSTANTIVE_MIN_LEN = 24;
 
 /**
+ * Produce a compact display label for the Plan panel without changing the
+ * full objective sent to the agent. Long specifications are reduced to their
+ * opening clause and capped at 13 words / 80 characters.
+ */
+export function summarizeObjectiveLine(objective: string): string {
+  const normalized = objective.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 80 && normalized.split(" ").length <= 13) return normalized;
+  const openingClause = normalized.split(/[:\n]|\s[—–]\s/)[0]?.trim() || normalized;
+  const words = openingClause.split(" ").filter(Boolean);
+  let summary = words.slice(0, 13).join(" ");
+  if (summary.length > 79) summary = summary.slice(0, 79).replace(/\s+\S*$/, "");
+  const wasShortened = summary.length < normalized.length;
+  return `${summary.replace(/[.,;:!?]+$/, "")}${wasShortened ? "…" : ""}`;
+}
+
+/**
  * Clamp a single step label to ≤5 words and ≤40 chars so the plan
  * panel never ships prose-length bullets. Strips trailing punctuation,
  * collapses internal whitespace, and capitalizes the first letter.

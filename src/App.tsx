@@ -22,7 +22,7 @@ import { isTauriRuntime } from "./providers/minimax";
 import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
 import { useSlashMenu, type SlashItem } from "./providers/slash";
 import { buildContextMessages, type UiChatBubble } from "./providers/context";
-import { generatePlanSteps, isSubstantiveObjective, summarizeSessionTitle } from "./providers/planner";
+import { generatePlanSteps, isSubstantiveObjective, summarizeObjectiveLine, summarizeSessionTitle } from "./providers/planner";
 import { normalizeTokenUsage } from "./providers/tokenUsage";
 import type { RuntimePlan, RuntimePlanStep } from "./agentRuntimeDeepLoop";
 import { deleteSession, listSessions, newSessionId, saveSession, type PersistedSession } from "./providers/sessions";
@@ -1344,8 +1344,8 @@ const livePromptTokens = useMemo(() => {
     // for this objective. Result lands in `runtimePlan`, which
     // PlanProgressPanel reads to surface task-specific steps instead of
     // the generic 5-step boilerplate. Fire-and-forget — the agent loop
-    // doesn't wait for the plan; the panel shows the heuristic fallback
-    // until the LLM response arrives.
+    // doesn't wait for the plan; the panel shows a planning state until
+    // the objective-specific response arrives.
     setRuntimePlan(null);
     planObjectiveRef.current = prompt.trim();
     if (!isSubstantiveObjective(prompt)) {
@@ -1363,7 +1363,7 @@ const livePromptTokens = useMemo(() => {
         if (planObjectiveRef.current !== prompt.trim()) return;
         if (!steps) { setPlanPhase("unavailable"); return; }
         setRuntimePlan({
-          objective: prompt.trim(),
+          objective: summarizeObjectiveLine(prompt),
           status: "in_progress",
           steps: steps.map<RuntimePlanStep>((label, index) => ({
             id: `plan-${index}`,
