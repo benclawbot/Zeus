@@ -44,6 +44,12 @@ describe("StatusBar", () => {
     expect(band).not.toBeNull();
   });
 
+  it("does not claim an actual over-target turn is currently compacting", () => {
+    render(<StatusBar modelId="gpt-4o" providerId="openai" promptTokens={100} actualPromptTokens={60_000} />);
+    expect(screen.getByText("over target")).toBeInTheDocument();
+    expect(screen.queryByText("compacting")).not.toBeInTheDocument();
+  });
+
   it("applies the amber band at 75% of the threshold", () => {
     // 30K / 128K = 23.4% — green
     // 40K / 128K = 31.3% — amber (75% of 40% = 30%)

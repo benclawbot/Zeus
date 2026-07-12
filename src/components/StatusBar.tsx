@@ -38,9 +38,9 @@ interface BandResult {
   className: string;
 }
 
-function ratioBand(ratio: number, threshold: number): BandResult {
+function ratioBand(ratio: number, threshold: number, isActual: boolean): BandResult {
   if (ratio <= 0) return { label: "idle", className: "status-bar-band idle" };
-  if (ratio >= threshold) return { label: "compacting", className: "status-bar-band red" };
+  if (ratio >= threshold) return { label: isActual ? "over target" : "compact on send", className: "status-bar-band red" };
   if (ratio >= threshold * 0.75) return { label: "watch", className: "status-bar-band amber" };
   return { label: "ok", className: "status-bar-band green" };
 }
@@ -58,7 +58,7 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
   const triggerRatio = props.triggerRatio ?? DEFAULT_COMPACT_TRIGGER_RATIO;
   const contextWindow = lookupContextWindow(modelId, providerId);
   const ratio = contextWindowUsage(displayedTokens, modelId, providerId);
-  const band = ratioBand(ratio, triggerRatio);
+  const band = ratioBand(ratio, triggerRatio, actualPromptTokens !== undefined);
   const percentText = `${(ratio * 100).toFixed(1)}%`;
   const thresholdText = `${Math.round(triggerRatio * 100)}%`;
   const promptDisplay = formatTokens(displayedTokens);

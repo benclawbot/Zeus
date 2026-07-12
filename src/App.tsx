@@ -21,7 +21,7 @@ import { dispatchChat } from "./providers/registry";
 import { isTauriRuntime } from "./providers/minimax";
 import { listSkills, loadSkill, type SkillDetail, type SkillSummary } from "./providers/skills";
 import { useSlashMenu, type SlashItem } from "./providers/slash";
-import { buildContextMessages, type UiChatBubble } from "./providers/context";
+import { buildContextMessages, compactChatHistory, type UiChatBubble } from "./providers/context";
 import { generatePlanSteps, isSubstantiveObjective, summarizeObjectiveLine, summarizeSessionTitle } from "./providers/planner";
 import { normalizeTokenUsage } from "./providers/tokenUsage";
 import type { RuntimePlan, RuntimePlanStep } from "./agentRuntimeDeepLoop";
@@ -1228,23 +1228,21 @@ const livePromptTokens = useMemo(() => {
 
   function detachSkill() { setActiveSkillId(null); }
 
-  function compactContext() {
+  function compactContext(source: ChatMessage[] = chatRef.current) {
     // Anchor the LLM-context window at the first kept entry's id. Future
     // turns send only entries with id >= compactFromId, so the dropped
     // turns never re-enter the model's context window.
-    let firstKeptId: number | null = null;
-    let nextChat: ChatMessage[] = [];
-    setChat((entries) => {
-      const recent = entries.slice(-COMPACT_KEEP_LAST);
-      firstKeptId = recent.length > 0 ? recent[0].id : null;
-      const note: ChatMessage = { id: nextMessageId(), role: "zeus", text: `Context compacted. Kept the last ${recent.length} turn(s).` };
-      nextChat = [...recent, note];
-      return nextChat;
-    });
-    setCompactFromId(firstKeptId);
-    // Persist after the next tick so the `setChat` updater above has
-    // already produced the new array (we read `nextChat` from closure).
-    setTimeout(() => persistActiveSession({ compactFromId: firstKeptId, chat: nextChat }), 0);
+    const compacted = compactChatHistory(source, COMPACT_KEEP_LAST);
+    const completed = compacted.entries.filter((entry) => entry.thinking !== true) as ChatMessage[];
+    const pending = compacted.entries.filter((entry) => entry.thinking === true) as ChatMessage[];
+    const note: ChatMessage = { id: nextMessageId(), role: "zeus", text: `Context compacted. Kept the last ${completed.length} turn(s).` };
+    const nextChat = [...completed, note, ...pending];
+    chatRef.current = nextChat;
+    compactFromIdRef.current = compacted.compactFromId;
+    setChat(nextChat);
+    setCompactFromId(compacted.compactFromId);
+    setTimeout(() => persistActiveSession({ compactFromId: compacted.compactFromId, chat: nextChat }), 0);
+    return compacted;
   }
 
   function stopRun() {
@@ -1401,7 +1399,10 @@ const livePromptTokens = useMemo(() => {
     // Snapshot the chat at dispatch time so the history we send reflects
     // exactly what the user saw, even if a concurrent setter updates chat
     // while the await is in flight.
-    const contextMessages = buildContextMessages(historySnapshot, compactFromId);
+    // The current user turn is appended explicitly below. Context contains
+    // only prior turns; including historySnapshot here would send the long
+    // prompt twice and can push an otherwise safe request over the limit.
+    const contextMessages = buildContextMessages(chat, compactFromId);
     // Build the outbound content for the user message. Image attachments
     // travel as multimodal blocks so the model can actually see them;
     // non-image file names are appended to the text prompt so the model
@@ -1435,28 +1436,22 @@ const livePromptTokens = useMemo(() => {
       { role: "user", content: userOutboundContent },
     ];
     const decision = decideAutoCompact(projectedMessages, providerModel, activeProviderId, triggerRatio);
+    let dispatchHistory = chat;
+    let dispatchCompactFromId = compactFromId;
     if (decision.shouldCompact) {
       // Persist a copy of the chat so we can mention what we lost in
       // the notice, then call compactContext (which already mutates
       // `chat` and `compactFromId` and re-saves the session).
-      const droppedCount = chat.filter((entry) => entry.thinking !== true && (compactFromId === null || entry.id < compactFromId)).length;
-      compactContext();
+      const compacted = compactContext(historySnapshot as ChatMessage[]);
+      dispatchHistory = compacted.entries.filter((entry) => entry.id !== userMessage.id && entry.thinking !== true) as ChatMessage[];
+      dispatchCompactFromId = compacted.compactFromId;
       // Build the auto-compact notice after the state has settled so
       // the user sees what just happened. We do this through a setTimeout
       // to keep the order of side-effects predictable (the actual
       // compact already queued its own persistActiveSession).
       setTimeout(() => {
-        appendZeusMessage(`${formatCompactNotice(decision)} Dropped ${droppedCount} earlier turn(s).`);
+        appendZeusMessage(`${formatCompactNotice(decision)} Dropped ${compacted.droppedCount} earlier turn(s).`);
       }, 0);
-      // Re-build contextMessages from the freshly-compacted chat.
-      const freshSnapshot = [...chatRef.current, userMessage, thinkingMessage] as UiChatBubble[];
-      const freshContext = buildContextMessages(freshSnapshot, compactFromIdRef.current);
-      projectedMessages.length = 0;
-      projectedMessages.push(
-        { role: "system", content: SYSTEM_PROMPT + projectHint },
-        ...freshContext,
-        { role: "user", content: userOutboundContent },
-      );
     }
     // Build the final system prompt by appending the active terse and
     // minimal-code skill bodies. The terse skill is on by default
@@ -1468,7 +1463,7 @@ const livePromptTokens = useMemo(() => {
     // Seed messages: system prompt + compact context + the user's prompt.
     const seedMessages: ChatRequestMessage[] = [
       { role: "system", content: augmentedSystem },
-      ...buildContextMessages([...chat, userMessage, thinkingMessage] as UiChatBubble[], compactFromId),
+      ...buildContextMessages(dispatchHistory, dispatchCompactFromId),
       { role: "user", content: userOutboundContent },
     ];
 

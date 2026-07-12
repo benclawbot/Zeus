@@ -10,6 +10,25 @@ export interface UiChatBubble {
   skillId?: string;
 }
 
+export interface CompactedChatHistory {
+  entries: UiChatBubble[];
+  compactFromId: number | null;
+  droppedCount: number;
+}
+
+/** Keep the newest completed messages plus any in-flight placeholder. */
+export function compactChatHistory(chat: UiChatBubble[], keepLast: number): CompactedChatHistory {
+  const completed = chat.filter((entry) => entry.thinking !== true);
+  const keptCompleted = completed.slice(-Math.max(0, keepLast));
+  const keptIds = new Set(keptCompleted.map((entry) => entry.id));
+  const entries = chat.filter((entry) => entry.thinking === true || keptIds.has(entry.id));
+  return {
+    entries,
+    compactFromId: keptCompleted[0]?.id ?? null,
+    droppedCount: completed.length - keptCompleted.length,
+  };
+}
+
 /**
  * Map a frontend chat entry into the shape the LLM provider expects.
  * - `zeus` becomes `assistant` (it's the model speaking).

@@ -19,6 +19,7 @@ Rules:
 - Each step is a TIGHT LABEL of 2-5 words. Imperative verb + object. No explanations, no clauses, no punctuation at the end.
 - Examples of good labels: "Read package.json", "Add SettingsPanel.tsx", "Wire into sidebar", "Run tsc + vitest", "Commit with feat()".
 - Do NOT include generic steps like "Understand objective" or "Verify output". Only steps specific to THIS objective.
+- Keep the architecture proportional to the request. For a simple page, mockup, prototype, or local browser tool with no explicit framework requirement, plan a single self-contained HTML file with inline CSS and JavaScript. Do not introduce Vite, a data layer, a PWA, or a framework unless the objective requires it.
 - Return ONLY a JSON array of strings. No prose, no markdown fences, no commentary.
 
 Example response:
