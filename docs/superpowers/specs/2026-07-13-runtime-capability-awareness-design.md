@@ -30,6 +30,28 @@ React retains identity, response style, compaction, and optional terse/minimal-c
 
 The snapshot builder will be a pure Rust function over typed capability data. This keeps wording testable and prevents live secrets, full memory contents, file contents, or unbounded runtime state from entering the system prompt.
 
+## Live model and context status
+
+The bottom status bar will use the model identifier and normalized usage returned by the latest completed native turn. It will clearly distinguish actual last-turn input from the locally projected next prompt. The active configured model remains a temporary preflight value only until the provider returns an authoritative model identifier.
+
+The projected count must include every frontend-known system block, workspace hint, chat message, compact anchor, and composer draft. The UI will label it as an estimate because Rust may inject capability, skill, memory, and tool-observation context after the frontend projection. After a response, the status bar displays the provider-reported input count against the returned model's registered context window and retains the projected next-turn estimate separately.
+
+Unknown model identifiers will visibly use the conservative fallback window instead of appearing authoritative. Tests will cover configured-model fallback, authoritative response-model replacement, actual versus estimated labels, and context-window calculation.
+
+## Objective-linked plan progress
+
+The Plan Progress panel will never synthesize a generic five-step plan. A substantive execution objective displays only provider-generated or runtime-generated objective-specific steps. A conversational question or explanation request displays a concise “No execution plan needed” state. While a substantive objective is waiting for its plan, the panel displays “Planning…” without fabricated progress. Planner failure displays “Plan unavailable” and the objective, not boilerplate TODOs.
+
+Plan results will be bound to an objective/request identifier so a late planner response cannot replace the plan for a newer user turn. Progress updates will apply only to the active objective's real steps.
+
+## Cache-token visibility and diagnosis
+
+Provider usage will be normalized into input, output, cache-read, and cache-write token counts. Normalization will recognize OpenAI-compatible `prompt_tokens_details.cached_tokens`, Anthropic `cache_read_input_tokens` and `cache_creation_input_tokens`, and equivalent nested fields returned by compatible providers. Missing cache telemetry is represented as “not reported,” not zero.
+
+The Session panel will display cached-read tokens and cached-read percentage of input tokens, plus cache-write tokens when supplied. Its tooltip/status copy will distinguish “0% reported” from “provider did not report cache usage.” The percentage formula is `cacheRead / input * 100`, clamped to 0–100.
+
+The implementation will not claim that a low percentage is a Zeus defect without telemetry. Stable system-prefix ordering will be preserved to maximize provider cache reuse; per-turn dynamic capability values will be placed after the stable capability/tool description so runtime counters do not invalidate the reusable prefix.
+
 ## Error handling
 
 If runtime status cannot be collected, the turn continues with a degraded snapshot that states which status probe failed. A failed optional capability must not erase confirmed capabilities. Tool execution errors remain observations; they do not mutate the persistent capability description for later turns unless the underlying health check changes.
