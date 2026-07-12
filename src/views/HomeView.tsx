@@ -49,7 +49,9 @@ interface HomeViewProps {
   activeProviderId: string;
   providers: ProviderInfo[];
   providerKeysStatus: ProviderKeysStatus;
+  modelId: string;
   livePromptTokens: number;
+  actualPromptTokens?: number;
   onOpenSettings: () => void;
 }
 
@@ -84,14 +86,11 @@ export function HomeView({
   activeProviderId,
   providers,
   providerKeysStatus,
+  modelId,
   livePromptTokens,
+  actualPromptTokens,
   onOpenSettings,
 }: HomeViewProps) {
-  const modelId =
-    (providerKeysStatus as unknown as Record<string, string | null>)[`${activeProviderId}Model`]
-    || providers.find((p) => p.id === activeProviderId)?.defaultModel
-    || "";
-
   return (
     <>
       <div className={styles.workspaceHeader}>
@@ -240,6 +239,7 @@ export function HomeView({
         modelId={modelId}
         providerId={activeProviderId}
         promptTokens={livePromptTokens}
+        actualPromptTokens={actualPromptTokens}
         triggerRatio={DEFAULT_COMPACT_TRIGGER_RATIO}
         onOpenSettings={onOpenSettings}
       />
