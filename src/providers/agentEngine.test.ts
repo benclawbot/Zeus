@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEngineHealth, AgentEngineToolBatchRequest } from "./agentEngine";
+import type { AgentEngineHealth } from "./agentEngine";
 
 describe("agentEngine frontend types", () => {
   it("models the unrestricted Rust foundation health payload", () => {
@@ -15,14 +15,5 @@ describe("agentEngine frontend types", () => {
     };
     expect(health.workspaceLimitsDisabled).toBe(true);
     expect(health.tools[0].name).toBe("readFile");
-  });
-
-  it("allows per-call roots for follow-up provider migration", () => {
-    const request: AgentEngineToolBatchRequest = {
-      objective: "search anywhere",
-      calls: [{ name: "searchCode", args: { root: "C:/Users", query: "AgentRuntime" } }],
-      stopOnError: true,
-    };
-    expect(request.calls[0].args?.root).toBe("C:/Users");
   });
 });

@@ -32,7 +32,6 @@ const DECLARED_COMMANDS = [
   "list_providers",
   "agent_engine_health",
   "agent_engine_follow_up_plan",
-  "agent_engine_execute_tools",
   "run_ralph_loop",
   "load_state",
   "edit_proposal",
@@ -129,6 +128,10 @@ describe("bridge contract — TS invoke calls match Rust commands", () => {
     for (const name of DECLARED_COMMANDS) {
       expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
     }
+  });
+
+  it("does not expose the legacy engine tool executor", () => {
+    expect(findInvokeCalls()).not.toContain("agent_engine_execute_tools");
   });
 
   // Light assertion on the most-trafficked commands so a typo in any

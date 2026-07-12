@@ -1,12 +1,13 @@
-use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::policy;
+use crate::policy::{self, CommandClass};
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
@@ -341,32 +342,6 @@ pub struct PolicyDecision {
     /// Approval id that authorized the call, when supplied.
     #[serde(default)]
     pub approval_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandClass {
-    Safe,
-    Dependency,
-    Network,
-    Destructive,
-    Privileged,
-}
-
-impl CommandClass {
-    fn label(self) -> &'static str {
-        match self {
-            CommandClass::Safe => "safe",
-            CommandClass::Dependency => "dependency",
-            CommandClass::Network => "network",
-            CommandClass::Destructive => "destructive",
-            CommandClass::Privileged => "privileged",
-        }
-    }
-
-    #[cfg(test)]
-    fn is_risky(self) -> bool {
-        !matches!(self, CommandClass::Safe)
-    }
 }
 
 #[cfg(test)]
@@ -738,7 +713,7 @@ pub fn run_shell_command(
 ) -> Result<ShellCommandResult, String> {
     validate_program(&request.program)?;
     validate_args(&request.args)?;
-    let command_class = classify_command(&request.program, &request.args);
+    let command_class = policy::classify_command(&request.program, &request.args);
     let policy = authorize_command(
         access_mode,
         request.approved,
@@ -788,6 +763,16 @@ pub fn run_shell_command(
     let mut child = command
         .spawn()
         .map_err(|e| format!("spawn '{}': {e}", request.program))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("capture stdout for '{}'", request.program))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("capture stderr for '{}'", request.program))?;
+    let stdout_reader = drain_bounded(stdout, MAX_CAPTURE_BYTES);
+    let stderr_reader = drain_bounded(stderr, MAX_CAPTURE_BYTES);
     let mut timed_out = false;
     loop {
         if child
@@ -804,24 +789,67 @@ pub fn run_shell_command(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("collect output for '{}': {e}", request.program))?;
-    let (stdout_redacted, _) = policy_redact(&output.stdout);
-    let (stderr_redacted, _) = policy_redact(&output.stderr);
+    let status = child
+        .wait()
+        .map_err(|e| format!("collect status for '{}': {e}", request.program))?;
+    let (stdout, stdout_truncated) = join_capture(stdout_reader, "stdout")?;
+    let (stderr, stderr_truncated) = join_capture(stderr_reader, "stderr")?;
+    let (stdout_redacted, _) = policy_redact(&stdout);
+    let (stderr_redacted, _) = policy_redact(&stderr);
     Ok(ShellCommandResult {
         program: request.program,
         args: request.args,
         cwd: display_path(&cwd),
-        exit_code: output.status.code(),
-        stdout: bytes_to_limited_string(&stdout_redacted, MAX_CAPTURE_BYTES),
-        stderr: bytes_to_limited_string(&stderr_redacted, MAX_CAPTURE_BYTES),
+        exit_code: status.code(),
+        stdout: captured_to_string(&stdout_redacted, stdout_truncated),
+        stderr: captured_to_string(&stderr_redacted, stderr_truncated),
         timed_out,
         duration_ms: started.elapsed().as_millis(),
         policy,
         approval_id: request.approval_id,
         approval_required: false,
     })
+}
+
+fn drain_bounded<R>(mut reader: R, max_bytes: usize) -> JoinHandle<Result<(Vec<u8>, bool), String>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut captured = Vec::with_capacity(max_bytes.min(64 * 1024));
+        let mut chunk = [0_u8; 16 * 1024];
+        let mut truncated = false;
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .map_err(|e| format!("read child output: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            let remaining = max_bytes.saturating_sub(captured.len());
+            let keep = remaining.min(read);
+            captured.extend_from_slice(&chunk[..keep]);
+            truncated |= keep < read;
+        }
+        Ok((captured, truncated))
+    })
+}
+
+fn join_capture(
+    reader: JoinHandle<Result<(Vec<u8>, bool), String>>,
+    stream: &str,
+) -> Result<(Vec<u8>, bool), String> {
+    reader
+        .join()
+        .map_err(|_| format!("{stream} reader thread panicked"))?
+}
+
+fn captured_to_string(bytes: &[u8], truncated: bool) -> String {
+    let mut out = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        out.push_str("\n...[truncated]");
+    }
+    out
 }
 
 pub fn read_workspace_file(
@@ -1482,7 +1510,7 @@ fn authorize_command(
             | CommandClass::Destructive
             | CommandClass::Privileged,
         ) => true,
-        ("Local", CommandClass::Safe) => false,
+        ("Local", CommandClass::Safe | CommandClass::Test | CommandClass::Build) => false,
         ("Review", _) => true,
         ("Locked", _) => {
             return Err(format!(
@@ -1536,53 +1564,6 @@ fn authorize_file_write(
         approved: effective_approved,
         approval_id: approval_id.map(String::from),
     })
-}
-
-fn classify_command(program: &str, args: &[String]) -> CommandClass {
-    let name = Path::new(program)
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .unwrap_or(program)
-        .to_ascii_lowercase();
-    let text = std::iter::once(name.as_str())
-        .chain(args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    if ["sudo", "su", "doas"].contains(&name.as_str()) {
-        return CommandClass::Privileged;
-    }
-    if [
-        "rm", "del", "erase", "rmdir", "format", "mkfs", "dd", "shutdown", "reboot", "halt",
-        "poweroff",
-    ]
-    .contains(&name.as_str())
-    {
-        return CommandClass::Destructive;
-    }
-    if name == "git"
-        && (text.contains(" reset")
-            || text.contains(" clean")
-            || text.contains(" push")
-            || text.contains(" checkout --"))
-    {
-        return CommandClass::Destructive;
-    }
-    if [
-        "npm", "pnpm", "yarn", "cargo", "pip", "pip3", "poetry", "bun",
-    ]
-    .contains(&name.as_str())
-        && (text.contains(" install")
-            || text.contains(" add")
-            || text.contains(" update")
-            || text.contains(" remove"))
-    {
-        return CommandClass::Dependency;
-    }
-    if ["curl", "wget", "ssh", "scp", "rsync", "gh"].contains(&name.as_str()) {
-        return CommandClass::Network;
-    }
-    CommandClass::Safe
 }
 
 fn validate_program(program: &str) -> Result<(), String> {
@@ -1645,7 +1626,13 @@ fn effort_signals(request: &AgentRunRequest) -> EffortSignals {
             | AgentStepRequest::WriteFile { path, .. }
             | AgentStepRequest::EditFile { path, .. } => files.push(path.clone()),
             AgentStepRequest::RunCommand { program, args, .. } => {
-                if classify_command(program, args).is_risky() {
+                if matches!(
+                    policy::classify_command(program, args),
+                    CommandClass::Dependency
+                        | CommandClass::Network
+                        | CommandClass::Destructive
+                        | CommandClass::Privileged
+                ) {
                     risky_steps += 1;
                 }
             }
@@ -1945,21 +1932,67 @@ mod tests {
     #[test]
     fn classifies_risky_commands() {
         assert_eq!(
-            classify_command("npm", &["test".into()]),
-            CommandClass::Safe
+            policy::classify_command("npm", &["test".into()]),
+            CommandClass::Test
         );
         assert_eq!(
-            classify_command("npm", &["install".into()]),
+            policy::classify_command("npm", &["install".into()]),
             CommandClass::Dependency
         );
         assert_eq!(
-            classify_command("git", &["reset".into(), "--hard".into()]),
+            policy::classify_command("git", &["reset".into(), "--hard".into()]),
             CommandClass::Destructive
         );
         assert_eq!(
-            classify_command("curl", &["https://example.com".into()]),
+            policy::classify_command("curl", &["https://example.com".into()]),
             CommandClass::Network
         );
+        assert_eq!(
+            policy::classify_command("pkexec", &["id".into()]),
+            CommandClass::Privileged
+        );
+        assert_eq!(
+            policy::classify_command("truncate", &["-s".into(), "0".into(), "data".into()]),
+            CommandClass::Destructive
+        );
+        assert_eq!(
+            policy::classify_command("nc", &["example.com".into(), "443".into()]),
+            CommandClass::Network
+        );
+        assert_eq!(
+            policy::classify_command("git", &["pull".into()]),
+            CommandClass::Network
+        );
+        assert_eq!(
+            policy::classify_command("git", &["branch".into(), "-D".into(), "old".into()]),
+            CommandClass::Destructive
+        );
+    }
+
+    #[test]
+    fn shell_command_drains_large_output_without_timing_out() {
+        let result = run_shell_command(
+            ShellCommandRequest {
+                program: "node".into(),
+                args: vec![
+                    "-e".into(),
+                    "process.stdout.write('x'.repeat(1024 * 1024))".into(),
+                ],
+                cwd: None,
+                workspace_dir: None,
+                timeout_ms: Some(10_000),
+                approved: false,
+                approval_id: None,
+                approval_session_id: None,
+            },
+            Some("Full"),
+        )
+        .expect("large-output command should run");
+
+        assert!(!result.timed_out, "large output filled the child pipe");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.len() <= MAX_CAPTURE_BYTES + "\n...[truncated]".len());
+        assert!(result.stdout.ends_with("...[truncated]"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use tauri::Manager;
 mod agent_runtime;
 mod agent_runtime_commands;
 mod code_intelligence;
+mod credentials;
 mod engine;
 mod github_workflow;
 mod memory;
@@ -607,16 +608,52 @@ fn load_provider_keys_into_env(app: &tauri::AppHandle) -> Result<(), String> {
         ProviderKeysFile::default()
     };
     merge_dotenv_into(&mut parsed);
-    if let Some(value) = parsed.minimax.as_deref() {
+    let store = credentials::OsCredentialStore;
+    let legacy_updates = [
+        ("minimax", parsed.minimax.clone()),
+        ("openai", parsed.openai.clone()),
+        ("anthropic", parsed.anthropic.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(account, secret)| {
+        secret.map(|secret| credentials::CredentialUpdate {
+            account: account.to_string(),
+            secret: Some(secret),
+        })
+    })
+    .collect::<Vec<_>>();
+    let migrated = credentials::migrate_legacy(&store, &legacy_updates).unwrap_or(false);
+    if migrated {
+        parsed.minimax = None;
+        parsed.openai = None;
+        parsed.anthropic = None;
+        write_provider_keys_file(&path, &parsed)?;
+    }
+    let minimax =
+        credentials::CredentialStore::get(&store, "minimax")?.or_else(|| parsed.minimax.clone());
+    let openai =
+        credentials::CredentialStore::get(&store, "openai")?.or_else(|| parsed.openai.clone());
+    let anthropic = credentials::CredentialStore::get(&store, "anthropic")?
+        .or_else(|| parsed.anthropic.clone());
+    if let Some(value) = minimax.as_deref() {
         set_optional_env("MINIMAX_API_KEY", value);
     }
-    if let Some(value) = parsed.openai.as_deref() {
+    if let Some(value) = openai.as_deref() {
         set_optional_env("OPENAI_API_KEY", value);
     }
-    if let Some(value) = parsed.anthropic.as_deref() {
+    if let Some(value) = anthropic.as_deref() {
         set_optional_env("ANTHROPIC_API_KEY", value);
     }
     Ok(())
+}
+
+fn write_provider_keys_file(path: &Path, settings: &ProviderKeysFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let serialized =
+        serde_json::to_string_pretty(settings).map_err(|e| format!("serialize keys: {e}"))?;
+    fs::write(path, serialized).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Read `KEY=VALUE` lines from a `.env` file. Skips blank lines, comment
@@ -750,7 +787,7 @@ struct SetProviderKeysRequest {
 fn set_provider_keys(
     app: tauri::AppHandle,
     request: SetProviderKeysRequest,
-) -> Result<ProviderKeysFile, String> {
+) -> Result<ProviderKeysStatus, String> {
     // Read the existing file first so a single-field update (e.g. saving
     // just the OpenAI key) does not wipe previously-saved keys for the
     // other providers. Absent fields in the request mean "leave alone";
@@ -763,15 +800,44 @@ fn set_provider_keys(
     } else {
         ProviderKeysFile::default()
     };
+    let store = credentials::OsCredentialStore;
+    let legacy_updates = [
+        ("minimax", next.minimax.clone()),
+        ("openai", next.openai.clone()),
+        ("anthropic", next.anthropic.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(account, secret)| {
+        secret.map(|secret| credentials::CredentialUpdate {
+            account: account.to_string(),
+            secret: Some(secret),
+        })
+    })
+    .collect::<Vec<_>>();
+    credentials::migrate_legacy(&store, &legacy_updates)?;
+    let mut updates = Vec::new();
     if let Some(value) = request.minimax {
-        next.minimax = normalize_key(Some(value));
+        updates.push(credentials::CredentialUpdate {
+            account: "minimax".into(),
+            secret: normalize_key(Some(value)),
+        });
     }
     if let Some(value) = request.openai {
-        next.openai = normalize_key(Some(value));
+        updates.push(credentials::CredentialUpdate {
+            account: "openai".into(),
+            secret: normalize_key(Some(value)),
+        });
     }
     if let Some(value) = request.anthropic {
-        next.anthropic = normalize_key(Some(value));
+        updates.push(credentials::CredentialUpdate {
+            account: "anthropic".into(),
+            secret: normalize_key(Some(value)),
+        });
     }
+    credentials::apply_updates(&store, &updates)?;
+    next.minimax = None;
+    next.openai = None;
+    next.anthropic = None;
     if let Some(value) = request.minimax_base_url {
         next.minimax_base_url = normalize_optional(Some(value));
     }
@@ -790,14 +856,9 @@ fn set_provider_keys(
     if let Some(value) = request.anthropic_model {
         next.anthropic_model = normalize_optional(Some(value));
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
-    let serialized =
-        serde_json::to_string_pretty(&next).map_err(|e| format!("serialize keys: {e}"))?;
-    fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))?;
+    write_provider_keys_file(&path, &next)?;
     load_provider_keys_into_env(&app)?;
-    Ok(next)
+    provider_keys_status(&store, next)
 }
 
 fn normalize_key(value: Option<String>) -> Option<String> {
@@ -833,16 +894,26 @@ struct ProviderKeysStatus {
 #[tauri::command]
 fn get_provider_keys(app: tauri::AppHandle) -> Result<ProviderKeysStatus, String> {
     let path = provider_keys_path(&app)?;
-    if !path.exists() {
-        return Ok(default_provider_keys_status());
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let parsed: ProviderKeysFile =
-        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let parsed: ProviderKeysFile = if path.exists() {
+        let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?
+    } else {
+        ProviderKeysFile::default()
+    };
+    provider_keys_status(&credentials::OsCredentialStore, parsed)
+}
+
+fn provider_keys_status(
+    store: &dyn credentials::CredentialStore,
+    parsed: ProviderKeysFile,
+) -> Result<ProviderKeysStatus, String> {
     Ok(ProviderKeysStatus {
-        minimax: parsed.minimax.as_deref().map(str::is_empty) == Some(false),
-        openai: parsed.openai.as_deref().map(str::is_empty) == Some(false),
-        anthropic: parsed.anthropic.as_deref().map(str::is_empty) == Some(false),
+        minimax: store.get("minimax")?.is_some()
+            || parsed.minimax.as_deref().map(str::is_empty) == Some(false),
+        openai: store.get("openai")?.is_some()
+            || parsed.openai.as_deref().map(str::is_empty) == Some(false),
+        anthropic: store.get("anthropic")?.is_some()
+            || parsed.anthropic.as_deref().map(str::is_empty) == Some(false),
         minimax_base_url: parsed.minimax_base_url,
         openai_base_url: parsed.openai_base_url,
         anthropic_base_url: parsed.anthropic_base_url,
@@ -850,20 +921,6 @@ fn get_provider_keys(app: tauri::AppHandle) -> Result<ProviderKeysStatus, String
         openai_model: parsed.openai_model,
         anthropic_model: parsed.anthropic_model,
     })
-}
-
-fn default_provider_keys_status() -> ProviderKeysStatus {
-    ProviderKeysStatus {
-        minimax: false,
-        openai: false,
-        anthropic: false,
-        minimax_base_url: None,
-        openai_base_url: None,
-        anthropic_base_url: None,
-        minimax_model: None,
-        openai_model: None,
-        anthropic_model: None,
-    }
 }
 
 /// Result of a Test Connection probe. Returned to the frontend so the
@@ -1470,16 +1527,6 @@ fn agent_engine_follow_up_plan() -> Vec<engine::FollowUpMilestone> {
 }
 
 #[tauri::command]
-fn agent_engine_execute_tools(
-    state: tauri::State<'_, AppState>,
-    request: engine::AgentEngineToolBatchRequest,
-) -> Result<engine::AgentEngineToolBatchResult, String> {
-    let conn = state.db.lock();
-    let access_mode = current_access_mode(&conn)?;
-    Ok(engine::execute_tool_batch(request, access_mode.as_deref()))
-}
-
-#[tauri::command]
 async fn web_search(
     request: web_search::WebSearchRequest,
 ) -> Result<web_search::WebSearchResult, String> {
@@ -1859,7 +1906,6 @@ pub fn run() {
             test_provider,
             agent_engine_health,
             agent_engine_follow_up_plan,
-            agent_engine_execute_tools,
             agent_runtime_commands::agent_runtime_health,
             agent_runtime_commands::agent_runtime_status,
             agent_runtime_commands::agent_runtime_open_session,
