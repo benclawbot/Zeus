@@ -136,6 +136,8 @@ describe("planner.generatePlanSteps", () => {
       baseUrl: "https://api.example.com/v1",
       temperature: 0.2,
     }));
+    const request = vi.mocked(registry.dispatchChat).mock.calls[0][0];
+    expect(JSON.stringify(request.messages)).toContain("single self-contained HTML file");
   });
 });
 

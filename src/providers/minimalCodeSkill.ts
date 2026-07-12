@@ -43,7 +43,9 @@ const LITE_BLOCK = `Code-generation discipline — minimal (lite):
 Before writing new code, work through these checks in order. Stop at the first "yes":
 1. Does this need to exist at all? If the task can be satisfied without new code (a config change, an existing flag, deleting something instead of adding), do that instead.
 2. Does the codebase already solve this? Search the codebase first. Reuse an existing utility / component / pattern rather than reimplementing it, even partially.
-3. Does the platform / language / runtime already solve this natively? (e.g. a native <input type="date">, a stdlib function, a built-in language feature) — before reaching for a dependency.`;
+3. Does the platform / language / runtime already solve this natively? (e.g. a native <input type="date">, a stdlib function, a built-in language feature) — before reaching for a dependency.
+
+For a simple page, mockup, prototype, or local browser tool with no explicit framework requirement, default to a single self-contained HTML file with inline CSS and JavaScript. Do not scaffold Vite, add a data layer, or make it a PWA unless the requested behavior actually requires those choices.`;
 
 /**
  * `full` — full ladder + exemption list + audit comments on.

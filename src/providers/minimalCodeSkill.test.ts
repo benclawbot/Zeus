@@ -23,6 +23,7 @@ describe("getMinimalCodeInstructions", () => {
     expect(block).toContain("work through these checks in order");
     // Lite should NOT include the audit comment guidance.
     expect(block).not.toContain("Auditability");
+    expect(block).toContain("single self-contained HTML file");
   });
 
   it("returns the full block for `full`", () => {

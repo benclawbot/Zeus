@@ -239,7 +239,7 @@ export function HomeView({
         modelId={modelId}
         providerId={activeProviderId}
         promptTokens={livePromptTokens}
-        actualPromptTokens={actualPromptTokens}
+        actualPromptTokens={runState === "running" ? undefined : actualPromptTokens}
         triggerRatio={DEFAULT_COMPACT_TRIGGER_RATIO}
         onOpenSettings={onOpenSettings}
       />

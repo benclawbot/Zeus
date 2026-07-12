@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildContextMessages, chatEntryToProviderMessage, type UiChatBubble } from "./context";
+import { buildContextMessages, chatEntryToProviderMessage, compactChatHistory, type UiChatBubble } from "./context";
 
 function bubble(id: number, role: "user" | "zeus", text: string, extra: Partial<UiChatBubble> = {}): UiChatBubble {
   return { id, role, text, ...extra };
@@ -23,6 +23,24 @@ describe("chatEntryToProviderMessage", () => {
     // when request.skillId is set, so we never need to round-trip it.
     expect(chatEntryToProviderMessage(bubble(4, "user", "with skill", { skillId: "frontend-dev" })))
       .toEqual({ role: "user", content: "with skill" });
+  });
+});
+
+describe("compactChatHistory", () => {
+  it("keeps the current user turn while dropping older turns", () => {
+    const chat = [
+      bubble(1, "user", "old question"),
+      bubble(2, "zeus", "old answer"),
+      bubble(3, "user", "recent question"),
+      bubble(4, "zeus", "recent answer"),
+      bubble(5, "user", "current long prompt"),
+      bubble(6, "zeus", "", { thinking: true }),
+    ];
+    const compacted = compactChatHistory(chat, 3);
+    expect(compacted.compactFromId).toBe(3);
+    expect(compacted.entries.map((entry) => entry.id)).toEqual([3, 4, 5, 6]);
+    expect(buildContextMessages(compacted.entries, compacted.compactFromId).map((message) => message.content))
+      .toEqual(["recent question", "recent answer", "current long prompt"]);
   });
 });
 
