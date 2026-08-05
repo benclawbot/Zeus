@@ -1,0 +1,43 @@
+name: Install supplied hero banner
+
+on:
+  push:
+    branches:
+      - fix/supplied-hero-banner
+    paths:
+      - .github/workflows/install-supplied-banner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decode and install supplied banner
+        shell: bash
+        run: |
+          cat .github/banner-upload/final-*.b64 | tr -d '\n' | base64 --decode > docs/assets/zeus-hero-banner.webp
+          echo "f634992683f332f9eb0aa2f9bf0c84e641189ecaf2c46e1e76508e6d1ff6e61c  docs/assets/zeus-hero-banner.webp" | sha256sum -c -
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("README.md")
+          text = path.read_text()
+          old = "docs/assets/zeus-hero-banner.svg"
+          new = "docs/assets/zeus-hero-banner.webp"
+          if old not in text:
+              raise SystemExit(f"README does not contain {old}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          rm docs/assets/zeus-hero-banner.svg
+          rm -rf .github/banner-upload
+          rm .github/workflows/install-supplied-banner.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: install supplied Zeus hero banner"
+          git push
