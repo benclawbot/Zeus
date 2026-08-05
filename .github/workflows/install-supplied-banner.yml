@@ -21,15 +21,31 @@ jobs:
       - name: Decode and install supplied banner
         shell: bash
         run: |
-          sha256sum .github/banner-upload/final-*.b64
+          sha256sum .github/banner-upload/repair-01-*.b64 .github/banner-upload/final-0[2-5].b64
           cat <<'SUMS' | sha256sum -c -
-          f6ed16b6dff43d0dd5c3c2ab6b906a0f4d3bfe3e9240ce5f45d51f049669ceac  .github/banner-upload/final-01.b64
+          dc4393928d5aacea26c7b3d0bf818109ccc16ffd30b176a273b1f4e4841318cd  .github/banner-upload/repair-01-00.b64
+          3680631fcbf81dc834caf37eb894b7a6d06bd50fb3d537dc9d3112735528960e  .github/banner-upload/repair-01-01.b64
+          66511a8fbff431cbc8ed534a88000e287319fea24d84fcd92fc3b29cefc4005f  .github/banner-upload/repair-01-02.b64
+          c5982803f0ed919a229bbe16f11e402fd19ffb69a0097738d7a94066cf3341ef  .github/banner-upload/repair-01-03.b64
+          2445f972f620c9c1843d1fd875b9e59b4b09142eb538535b245308acc64d4a83  .github/banner-upload/repair-01-04.b64
           598a88694f7e6c244aed5c558f47e82027a23adb1e4f97fe4f7dc9d77a293d7e  .github/banner-upload/final-02.b64
           d0192c69de9718e90f2762743d54da5bc8e5b656dd9aa800d5e90b740e44e6eb  .github/banner-upload/final-03.b64
           d92bef9996dce063a15452c154e58f4cef18ec82517cd2bcbeb83a847be4f474  .github/banner-upload/final-04.b64
           0dcb3de8ead0c27f408a7e7d6e86432904555128e63def930e6c948ffa31e447  .github/banner-upload/final-05.b64
           SUMS
-          cat .github/banner-upload/final-*.b64 | tr -d '\n' | base64 --decode > docs/assets/zeus-hero-banner.webp
+          cat \
+            .github/banner-upload/repair-01-00.b64 \
+            .github/banner-upload/repair-01-01.b64 \
+            .github/banner-upload/repair-01-02.b64 \
+            .github/banner-upload/repair-01-03.b64 \
+            .github/banner-upload/repair-01-04.b64 \
+            .github/banner-upload/final-02.b64 \
+            .github/banner-upload/final-03.b64 \
+            .github/banner-upload/final-04.b64 \
+            .github/banner-upload/final-05.b64 \
+            | tr -d '\n' \
+            | base64 --decode \
+            > docs/assets/zeus-hero-banner.webp
           echo "f634992683f332f9eb0aa2f9bf0c84e641189ecaf2c46e1e76508e6d1ff6e61c  docs/assets/zeus-hero-banner.webp" | sha256sum -c -
           python - <<'PY'
           from pathlib import Path
