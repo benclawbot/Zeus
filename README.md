@@ -1,7 +1,7 @@
 # ⚡ Zeus — The Good Coding Agent
 
 <p align="center">
-  <img src="docs/assets/zeus-hero-banner.svg" alt="Zeus — The Good Coding Agent" />
+  <img src="docs/assets/zeus-hero-banner.webp" alt="Zeus — The Good Coding Agent" />
 </p>
 
 <p align="center">
