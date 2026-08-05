@@ -21,6 +21,14 @@ jobs:
       - name: Decode and install supplied banner
         shell: bash
         run: |
+          sha256sum .github/banner-upload/final-*.b64
+          cat <<'SUMS' | sha256sum -c -
+          f6ed16b6dff43d0dd5c3c2ab6b906a0f4d3bfe3e9240ce5f45d51f049669ceac  .github/banner-upload/final-01.b64
+          598a88694f7e6c244aed5c558f47e82027a23adb1e4f97fe4f7dc9d77a293d7e  .github/banner-upload/final-02.b64
+          d0192c69de9718e90f2762743d54da5bc8e5b656dd9aa800d5e90b740e44e6eb  .github/banner-upload/final-03.b64
+          d92bef9996dce063a15452c154e58f4cef18ec82517cd2bcbeb83a847be4f474  .github/banner-upload/final-04.b64
+          0dcb3de8ead0c27f408a7e7d6e86432904555128e63def930e6c948ffa31e447  .github/banner-upload/final-05.b64
+          SUMS
           cat .github/banner-upload/final-*.b64 | tr -d '\n' | base64 --decode > docs/assets/zeus-hero-banner.webp
           echo "f634992683f332f9eb0aa2f9bf0c84e641189ecaf2c46e1e76508e6d1ff6e61c  docs/assets/zeus-hero-banner.webp" | sha256sum -c -
           python - <<'PY'
